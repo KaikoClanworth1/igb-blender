@@ -38,7 +38,7 @@ The standalone Conversation Editor and Menu Editor windows require PySide6. You 
 | X-Men Legends II | PS2, PSP, Xbox | IGB | - |
 | Marvel Ultimate Alliance | PC | IGB | IGB |
 | Marvel Ultimate Alliance | PS2, PSP, Xbox | IGB | - |
-| Marvel Ultimate Alliance 2 | PC | IGZ | - |
+| Marvel Ultimate Alliance 2 | PC | IGZ (Broken) | - |
 
 The addon auto-detects the game format on import. You can also pick a game preset manually in the import dialog.
 
