@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.blend1
+*.blend2
+.DS_Store
+Thumbs.db
+
+# Bundled dependencies (too large for git)
+mapmaker/deps/
