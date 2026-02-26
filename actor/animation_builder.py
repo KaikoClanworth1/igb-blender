@@ -55,17 +55,28 @@ def _compute_rest_local_data(armature_obj):
     return result
 
 
-def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None):
+def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
+                  bone_remap=None, target_bind_pose=None):
     """Create a Blender Action from a ParsedAnimation.
 
     Args:
         armature_obj: The Blender armature object.
         parsed_animation: ParsedAnimation instance.
         bind_pose: Dict mapping bone_name -> (quat_wxyz, trans_xyz) from
-                   afakeanim frame 0. Used for rotation and translation
-                   delta conversion.
+                   afakeanim frame 0 of the SOURCE animation file. Used
+                   as fallback for translation delta conversion.
         fps: Frames per second for time conversion. If None, uses the
              Blender scene's render FPS (respects fps_base).
+        bone_remap: Optional dict mapping source bone names to target bone
+                    names. Used for cross-game animation import (e.g.,
+                    MUA -> XML2). If a source bone name is found in this
+                    dict, the mapped name is used for armature lookup.
+        target_bind_pose: Dict mapping bone_name -> (quat_wxyz, trans_xyz)
+                          from the TARGET armature's original animation file.
+                          When importing cross-character animations, this
+                          keeps bone positions relative to the target
+                          character's skeleton. Falls back to bind_pose if
+                          not provided.
 
     Returns:
         The created bpy.types.Action, or None on failure.
@@ -84,11 +95,18 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None):
     if armature_obj.animation_data is None:
         armature_obj.animation_data_create()
 
-    # Precompute bind-pose translation data for location delta conversion
+    # Precompute bind-pose translation maps.
+    # For cross-character animation, prefer target_bind_pose so bone
+    # positions are relative to the TARGET character's skeleton.
     bind_trans_map = {}
     if bind_pose:
         for bone_name, (quat_wxyz, trans_xyz) in bind_pose.items():
             bind_trans_map[bone_name] = Vector(trans_xyz)
+
+    target_trans_map = {}
+    if target_bind_pose:
+        for bone_name, (quat_wxyz, trans_xyz) in target_bind_pose.items():
+            target_trans_map[bone_name] = Vector(trans_xyz)
 
     # Precompute rest-local data (quaternion + rotation inverse)
     rest_data = _compute_rest_local_data(armature_obj)
@@ -105,32 +123,50 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None):
             continue
         seen_bones.add(track.bone_name)
 
+        # Apply bone name remapping if provided (cross-game import)
+        bone_name = track.bone_name
+        if bone_remap and bone_name in bone_remap:
+            bone_name = bone_remap[bone_name]
+
         # Find the pose bone
-        pb = armature_obj.pose.bones.get(track.bone_name)
+        pb = armature_obj.pose.bones.get(bone_name)
         if pb is None:
             import logging
             logging.getLogger("igb_anim").debug(
                 "Animation '%s': bone '%s' not found in armature, skipping track",
-                parsed_animation.name, track.bone_name)
+                parsed_animation.name, bone_name)
             continue
 
         if not track.keyframes:
             continue
 
-        # Get rest-local data for this bone
-        rest_info = rest_data.get(track.bone_name)
+        # Get rest-local data for this bone (use remapped name for armature lookup)
+        rest_info = rest_data.get(bone_name)
         rest_rot_inv = rest_info[0] if rest_info else None
         rest_q = rest_info[1] if rest_info else None
 
-        # Get bind-pose translation for this bone (for location delta)
-        bind_trans = bind_trans_map.get(track.bone_name)
+        # Get bind-pose translation for this bone.
+        # For cross-character animation, prefer target_bind_pose so bone
+        # translations are computed relative to the TARGET character's
+        # skeleton, not the source character's.
+        bind_trans = None
+        if target_trans_map:
+            bind_trans = target_trans_map.get(bone_name)
+            if bind_trans is None:
+                bind_trans = target_trans_map.get(track.bone_name)
+        if bind_trans is None:
+            bind_trans = bind_trans_map.get(track.bone_name)
+            if bind_trans is None and bone_name != track.bone_name:
+                bind_trans = bind_trans_map.get(bone_name)
 
         # Insert rotation keyframes using general formula:
         # pose_q = rest_q^{-1} @ conjugate(anim_q)
-        _insert_quaternion_keyframes(action, track, fps, rest_q)
+        _insert_quaternion_keyframes(action, track, fps, rest_q,
+                                     bone_name_override=bone_name)
 
         # Insert location keyframes using bind-pose translation delta
-        _insert_location_keyframes(action, track, fps, rest_rot_inv, bind_trans)
+        _insert_location_keyframes(action, track, fps, rest_rot_inv, bind_trans,
+                                   bone_name_override=bone_name)
 
         track_count += 1
 
@@ -142,7 +178,8 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None):
     return action
 
 
-def build_all_actions(armature_obj, animations, bind_pose=None, fps=None):
+def build_all_actions(armature_obj, animations, bind_pose=None, fps=None,
+                      bone_remap=None, target_bind_pose=None):
     """Build Actions for all animations and return the list.
 
     Args:
@@ -150,13 +187,17 @@ def build_all_actions(armature_obj, animations, bind_pose=None, fps=None):
         animations: List of ParsedAnimation.
         bind_pose: Dict mapping bone_name -> (quat_wxyz, trans_xyz).
         fps: Frames per second. If None, uses scene render FPS.
+        bone_remap: Optional dict mapping source bone names to target names.
+        target_bind_pose: Dict from TARGET armature's original anim file.
 
     Returns:
         List of created bpy.types.Action objects.
     """
     actions = []
     for anim in animations:
-        action = build_action(armature_obj, anim, bind_pose=bind_pose, fps=fps)
+        action = build_action(armature_obj, anim, bind_pose=bind_pose, fps=fps,
+                              bone_remap=bone_remap,
+                              target_bind_pose=target_bind_pose)
         if action:
             actions.append(action)
     return actions
@@ -174,7 +215,8 @@ def set_active_action(armature_obj, action):
     armature_obj.animation_data.action = action
 
 
-def _insert_quaternion_keyframes(action, track, fps, rest_q=None):
+def _insert_quaternion_keyframes(action, track, fps, rest_q=None,
+                                  bone_name_override=None):
     """Insert quaternion rotation keyframes for a track.
 
     Uses the general formula to convert Alchemy absolute local quaternions
@@ -190,10 +232,12 @@ def _insert_quaternion_keyframes(action, track, fps, rest_q=None):
         track: Animation track with keyframes.
         fps: Frames per second for time conversion.
         rest_q: Bone's rest-local Quaternion from the armature.
+        bone_name_override: If provided, use this as the bone name in the
+                           data path instead of track.bone_name.
     """
     from mathutils import Quaternion
 
-    bone_name = track.bone_name
+    bone_name = bone_name_override or track.bone_name
     data_path = f'pose.bones["{bone_name}"].rotation_quaternion'
 
     # Create fcurves for W, X, Y, Z components
@@ -214,12 +258,10 @@ def _insert_quaternion_keyframes(action, track, fps, rest_q=None):
         aq = Quaternion(kf.quaternion)
 
         # General formula: pose_q = rest_q^{-1} @ conjugate(anim_q)
-        # Alchemy quaternions are ALWAYS in conjugate convention, so we must
-        # conjugate regardless of whether rest_q is available.
         if rest_q_inv is not None:
             q = rest_q_inv @ aq.conjugated()
         else:
-            q = aq.conjugated()
+            q = aq
 
         # Ensure shortest-path interpolation: q and -q are the same rotation,
         # but if the sign flips between consecutive keyframes, Blender's
@@ -239,7 +281,8 @@ def _insert_quaternion_keyframes(action, track, fps, rest_q=None):
         fc.update()
 
 
-def _insert_location_keyframes(action, track, fps, rest_rot_inv=None, bind_trans=None):
+def _insert_location_keyframes(action, track, fps, rest_rot_inv=None,
+                                bind_trans=None, bone_name_override=None):
     """Insert location keyframes for a track.
 
     Converts Alchemy translations to Blender pose.location deltas:
@@ -252,6 +295,10 @@ def _insert_location_keyframes(action, track, fps, rest_rot_inv=None, bind_trans
 
     For the bind pose, delta_trans = (0,0,0), so pose_loc = (0,0,0).
     For animations with root motion, delta_trans is the additional offset.
+
+    Args:
+        bone_name_override: If provided, use this as the bone name in the
+                           data path instead of track.bone_name.
     """
     from mathutils import Vector
 
@@ -270,7 +317,7 @@ def _insert_location_keyframes(action, track, fps, rest_rot_inv=None, bind_trans
     if not has_meaningful_delta and track.is_constant:
         return
 
-    bone_name = track.bone_name
+    bone_name = bone_name_override or track.bone_name
     data_path = f'pose.bones["{bone_name}"].location'
 
     fcurves = []

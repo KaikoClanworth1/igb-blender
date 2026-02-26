@@ -57,6 +57,12 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         scale_factor = 1.0
     _apply_scale_to_skeleton(skeleton_data, scale_factor)
 
+    # NOTE: No axis rotation is applied to skeleton data here.
+    # The rig converter already bakes the game-space rotation (Rz90 @ arm_world_rot)
+    # into translations and inv_joint matrices via _get_game_rotation().
+    # _transform_mesh_for_export applies the same rotation to mesh vertices.
+    # Both are already consistent — no additional rotation needed.
+
     # ---- 3. Build BMS palette ----
     bms_palette = _extract_bms_palette(armature_obj, skeleton_data)
 
@@ -249,6 +255,74 @@ def _apply_scale_to_skeleton(skeleton_data, scale_factor):
             m[13] *= scale_factor
             m[14] *= scale_factor
             bone['inv_joint_matrix'] = m
+
+
+def _apply_rotation_to_skeleton(skeleton_data, armature_obj):
+    """Apply axis rotation to skeleton data to match mesh vertex rotation.
+
+    _transform_mesh_for_export() applies Rz(+90°) @ arm_world_rot to vertices
+    for converted rigs. The skeleton translations and inv_joint matrices must
+    receive the same rotation so the exported skeleton matches the rotated mesh.
+
+    For native IGB imports (identity rotation, igb_converted_rig=False), this
+    is a no-op.
+
+    Translations are parent-local offsets used in accumulated-translation mode
+    (no FK rotation). To produce correct rotated world positions when summing
+    translations, each translation vector must be rotated.
+
+    Inv_joint matrices map world → bone space. After rotating world by R:
+        new_IJM = old_IJM @ R^{-1}  (column-major / Blender convention)
+    """
+    from mathutils import Quaternion, Matrix, Vector
+    import math
+
+    # Compute the same rotation as _transform_mesh_for_export
+    arm_rot_q = armature_obj.matrix_world.to_quaternion()
+
+    converted_rig = armature_obj.get("igb_converted_rig", False)
+    if converted_rig:
+        rz90 = Quaternion((0, 0, 1), math.radians(90))
+        combined_q = rz90 @ arm_rot_q
+    else:
+        combined_q = arm_rot_q
+
+    # Check if rotation is significant
+    identity_q = Quaternion()
+    if combined_q.rotation_difference(identity_q).angle < 0.001:
+        return  # No rotation needed (native XML2 import case)
+
+    rot_mat_3x3 = combined_q.to_matrix()  # 3x3
+    rot_mat_4x4 = rot_mat_3x3.to_4x4()
+    rot_inv_4x4 = rot_mat_4x4.inverted()
+
+    for bone in skeleton_data['bones']:
+        # Rotate translations (parent-local offsets)
+        tx, ty, tz = bone['translation']
+        v = rot_mat_3x3 @ Vector((tx, ty, tz))
+        bone['translation'] = (v.x, v.y, v.z)
+
+        # Rotate inv_joint matrices
+        ijm = bone.get('inv_joint_matrix')
+        if ijm is not None:
+            # Convert row-major IGB → Blender column-major (transpose)
+            ijm_cm = Matrix((
+                (ijm[0], ijm[4], ijm[8],  ijm[12]),
+                (ijm[1], ijm[5], ijm[9],  ijm[13]),
+                (ijm[2], ijm[6], ijm[10], ijm[14]),
+                (ijm[3], ijm[7], ijm[11], ijm[15]),
+            ))
+
+            # new_IJM = old_IJM @ R^{-1}
+            new_ijm_cm = ijm_cm @ rot_inv_4x4
+
+            # Convert back to row-major (transpose)
+            bone['inv_joint_matrix'] = [
+                new_ijm_cm[0][0], new_ijm_cm[1][0], new_ijm_cm[2][0], new_ijm_cm[3][0],
+                new_ijm_cm[0][1], new_ijm_cm[1][1], new_ijm_cm[2][1], new_ijm_cm[3][1],
+                new_ijm_cm[0][2], new_ijm_cm[1][2], new_ijm_cm[2][2], new_ijm_cm[3][2],
+                new_ijm_cm[0][3], new_ijm_cm[1][3], new_ijm_cm[2][3], new_ijm_cm[3][3],
+            ]
 
 
 # ============================================================================

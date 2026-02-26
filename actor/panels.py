@@ -103,6 +103,8 @@ class ACTOR_PT_Import(Panel):
         col.prop(props, "import_skins")
         col.prop(props, "import_animations")
         col.prop(props, "import_materials")
+        col.separator()
+        col.prop(props, "game_preset")
 
         # Rig Converter — show when an armature is selected but not yet
         # set up for IGB export (no igb_skin_bone_info_list property)
@@ -205,7 +207,7 @@ class ACTOR_PT_Animations(Panel):
 
         # Side buttons for add/remove
         col = row.column(align=True)
-        col.operator("actor.import_single_animation", icon='ADD', text="")
+        col.operator("actor.import_single_animation", icon='IMPORT', text="")
         col.operator("actor.remove_animation", icon='REMOVE', text="")
 
         # Playback controls

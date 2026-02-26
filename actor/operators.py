@@ -68,7 +68,7 @@ class ACTOR_OT_import_actor(Operator, ImportHelper):
             'import_skins': props.import_skins,
             'import_animations': props.import_animations,
             'import_materials': props.import_materials,
-            'game_preset': 'auto',
+            'game_preset': props.game_preset,
         }
 
         # If skins found and import_skins enabled, show selection dialog
@@ -92,6 +92,12 @@ class ACTOR_OT_import_actor(Operator, ImportHelper):
             return {'CANCELLED'}
 
         armature_obj, skin_objects, actions = result
+
+        # Ensure all imported skin meshes have IGB material properties
+        # so the IGB Materials panel can always edit render state.
+        for _, mesh_obj in skin_objects:
+            _ensure_igb_material_properties(mesh_obj)
+
         _populate_import_results(context, props, armature_obj,
                                  skin_objects, actions)
         return {'FINISHED'}
@@ -134,7 +140,7 @@ class ACTOR_OT_import_skin(Operator, ImportHelper):
         from .actor_import import _import_skin_file
         from .sg_skeleton import extract_skeleton
         from ..igb_format.igb_reader import IGBReader
-        from ..game_profiles import detect_profile
+        from ..game_profiles import detect_profile, get_profile
 
         props = context.scene.igb_actor
         armature_obj = bpy.data.objects.get(props.active_armature)
@@ -155,7 +161,11 @@ class ACTOR_OT_import_skin(Operator, ImportHelper):
             self.report({'ERROR'}, "Failed to extract skeleton")
             return {'CANCELLED'}
 
-        profile = detect_profile(reader)
+        game_preset = props.game_preset
+        if game_preset == 'auto':
+            profile = detect_profile(reader)
+        else:
+            profile = get_profile(game_preset)
 
         # Find the actor's collection
         collection = None
@@ -180,6 +190,9 @@ class ACTOR_OT_import_skin(Operator, ImportHelper):
 
         if mesh_objs:
             for mesh_obj in mesh_objs:
+                # Ensure IGB material properties exist for the panel
+                _ensure_igb_material_properties(mesh_obj)
+
                 item = props.skins.add()
                 item.name = self.variant_name
                 item.object_name = mesh_obj.name
@@ -316,7 +329,7 @@ class ACTOR_OT_play_animation(Operator):
 
 
 class ACTOR_OT_import_animations(Operator, ImportHelper):
-    """Import animations from an IGB file onto the current armature"""
+    """Import animations from an IGB file (select which ones)"""
     bl_idname = "actor.import_animations"
     bl_label = "Import Animations"
     bl_options = {'REGISTER', 'UNDO'}
@@ -335,19 +348,12 @@ class ACTOR_OT_import_animations(Operator, ImportHelper):
                 props.active_armature in bpy.data.objects)
 
     def execute(self, context):
+        """Read the IGB file, cache animations, then open the multi-select dialog."""
         from .sg_skeleton import extract_skeleton
         from .sg_animation import extract_animations
-        from .animation_builder import build_all_actions
         from .actor_import import _extract_bind_pose
         from ..igb_format.igb_reader import IGBReader
 
-        props = context.scene.igb_actor
-        armature_obj = bpy.data.objects.get(props.active_armature)
-        if armature_obj is None or armature_obj.type != 'ARMATURE':
-            self.report({'ERROR'}, "No active armature found")
-            return {'CANCELLED'}
-
-        # Read the animation IGB file
         reader = IGBReader(self.filepath)
         reader.read()
 
@@ -356,37 +362,23 @@ class ACTOR_OT_import_animations(Operator, ImportHelper):
             self.report({'ERROR'}, "No skeleton found in animation file")
             return {'CANCELLED'}
 
-        # Extract animations
         parsed_anims = extract_animations(reader, skeleton)
         if not parsed_anims:
             self.report({'WARNING'}, "No animations found in file")
             return {'CANCELLED'}
 
-        # Extract bind pose for delta conversion
         bind_pose = _extract_bind_pose(parsed_anims)
 
-        # Build Blender Actions (fps=None → auto-detect from scene)
-        actions = build_all_actions(
-            armature_obj, parsed_anims, bind_pose=bind_pose
-        )
+        # Populate the cache for the multi-select dialog
+        _anim_import_cache['parsed_anims'] = parsed_anims
+        _anim_import_cache['bind_pose'] = bind_pose
+        _anim_import_cache['anim_names'] = [
+            (pa.name, pa.name, f"{pa.duration_ms / 1000.0:.2f}s, {len(pa.tracks)} tracks")
+            for pa in parsed_anims
+        ]
 
-        if not actions:
-            self.report({'WARNING'}, "Failed to build any animations")
-            return {'CANCELLED'}
-
-        # Add to the animations list in the panel
-        fps = context.scene.render.fps
-        for action in actions:
-            item = props.animations.add()
-            item.name = action.name
-            item.action_name = action.name
-            item.duration_ms = action.get("igb_duration_ms", 0.0)
-            item.track_count = action.get("igb_track_count", 0)
-            item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
-
-        basename = os.path.splitext(os.path.basename(self.filepath))[0]
-        self.report({'INFO'},
-                    f"Imported {len(actions)} animation(s) from '{basename}'")
+        # Open the multi-select pick dialog
+        bpy.ops.actor.pick_animation('INVOKE_DEFAULT')
         return {'FINISHED'}
 
 
@@ -534,9 +526,9 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
 
 
 class ACTOR_OT_export_animations(Operator, ExportHelper):
-    """Save animations back to the actor IGB file"""
+    """Export animations to a NEW IGB file (uses original as read-only template)"""
     bl_idname = "actor.export_animations"
-    bl_label = "Save Animations"
+    bl_label = "Export Animations"
     bl_options = {'REGISTER'}
 
     filename_ext = ".igb"
@@ -558,13 +550,15 @@ class ACTOR_OT_export_animations(Operator, ExportHelper):
         return export_animations(context, self.filepath, operator=self)
 
     def invoke(self, context, event):
-        # Default to the original animation file path
+        # Default to a NEW file alongside the original (never overwrite template)
         props = context.scene.igb_actor
         armature_obj = bpy.data.objects.get(props.active_armature)
         if armature_obj:
             template = armature_obj.get("igb_anim_file", "")
             if template and os.path.exists(template):
-                self.filepath = template
+                dirname = os.path.dirname(template)
+                stem = os.path.splitext(os.path.basename(template))[0]
+                self.filepath = os.path.join(dirname, f"{stem}_export.igb")
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -624,10 +618,150 @@ class ACTOR_OT_convert_rig(Operator):
             # Auto-populate skins list with child meshes
             _populate_skins_from_children(props, armature_obj)
 
+            # Ensure child meshes have IGB material properties before
+            # round-trip export.  VRChat/Unity materials won't have igb_*
+            # custom props, so fill in sensible defaults.
+            for child in armature_obj.children:
+                if child.type == 'MESH':
+                    _ensure_igb_material_properties(child)
+
+            # Round-trip: export skin to temp IGB then reimport for a clean
+            # IGB-compatible mesh that responds correctly to XML2 animations.
+            self._round_trip_skin(context, armature_obj, props)
+
             return {'FINISHED'}
         else:
             self.report({'ERROR'}, result['error'])
             return {'CANCELLED'}
+
+    def _round_trip_skin(self, context, armature_obj, props):
+        """Full round-trip: export to game-scale IGB, delete original, reimport fresh.
+
+        Exports the converted rig + child meshes at full game scale (with
+        igb_export_scale and axis rotation applied), then deletes the original
+        armature and all child meshes, and reimports the exported IGB as a
+        completely fresh actor at game scale.
+
+        This gives a clean IGB-compatible model usable for XML2 animation testing.
+        """
+        import tempfile
+
+        # Collect child meshes
+        mesh_children = [c for c in armature_obj.children if c.type == 'MESH']
+        if not mesh_children:
+            self.report({'INFO'}, "No child meshes to round-trip")
+            return
+
+        # Check that skeleton data exists (convert_rig stores it)
+        if "igb_skin_bone_translations" not in armature_obj:
+            self.report({'WARNING'},
+                        "No skeleton data on armature, skipping round-trip")
+            return
+
+        try:
+            from ..exporter.skin_export import export_skin
+            from .actor_import import import_actor
+
+            # 1. Export to temp IGB at FULL game scale.
+            #    export_skin() applies igb_export_scale (~67x) to skeleton
+            #    translations + inv_joint matrices, and applies axis rotation
+            #    (igb_converted_rig) + scale to mesh vertex data.
+            tmp_path = os.path.join(tempfile.gettempdir(),
+                                    f"{armature_obj.name}_roundtrip.igb")
+
+            mesh_objs = [(c, False) for c in mesh_children]
+            success = export_skin(
+                filepath=tmp_path,
+                mesh_objs=mesh_objs,
+                armature_obj=armature_obj,
+                operator=self,
+                swap_rb=False,
+                texture_mode='clut',
+            )
+
+            if not success:
+                self.report({'WARNING'},
+                            "Round-trip export failed, keeping original meshes")
+                return
+
+            # 2. Find old collection (to clean up after deleting armature)
+            old_collection = None
+            for coll in bpy.data.collections:
+                if armature_obj.name in coll.objects:
+                    old_collection = coll
+                    break
+
+            # 3. Delete original armature and ALL child meshes
+            children_to_remove = list(armature_obj.children)
+            for child in children_to_remove:
+                bpy.data.objects.remove(child, do_unlink=True)
+            bpy.data.objects.remove(armature_obj, do_unlink=True)
+            armature_obj = None  # No longer valid
+
+            # Remove old empty collection
+            if old_collection and len(old_collection.objects) == 0:
+                bpy.data.collections.remove(old_collection)
+
+            # 4. Reimport the temp IGB as a completely fresh actor.
+            #    Pass it as both the animation file AND skin file.
+            #    extract_skeleton() finds igSkeleton directly in the skin IGB,
+            #    inv_joint matrices provide bone positions at game scale,
+            #    and _import_skin_file() reads the geometry back.
+            result = import_actor(
+                context, tmp_path,
+                skin_filepaths=[("default", tmp_path)],
+                operator=self,
+                options={
+                    'import_skins': True,
+                    'import_animations': False,
+                    'import_materials': True,
+                    'game_preset': 'xml2_pc',
+                },
+            )
+
+            if result is None:
+                self.report({'ERROR'}, "Round-trip reimport failed")
+                return
+
+            new_armature, skin_objects, actions = result
+
+            # 5. The new armature is already at game scale — set export
+            #    scale to 1.0 so future exports don't double-scale.
+            new_armature["igb_export_scale"] = 1.0
+            new_armature["igb_converted_rig"] = False  # Already in game space
+
+            # 5b. Fix non-deforming bone orientations.
+            #     In native XML2 imports, Root/Bip01/Motion get their
+            #     orientation from afakeanim bind_pose (identity quaternion
+            #     → bone tail along Y-forward).  The round-trip has no
+            #     bind_pose, so build_armature defaults to Z-up tails.
+            #     This changes rest_q and rotates all animations by 90°.
+            #     Fix: set these bones to identity orientation (Y-forward).
+            _fix_nondeforming_bone_orientations(new_armature)
+
+            # 5c. Add default IGB material properties to meshes so the
+            #     IGB Materials panel can edit render state.
+            for _, mesh_obj in skin_objects:
+                _ensure_igb_material_properties(mesh_obj)
+
+            # 6. Update panel state with the new actor
+            _populate_import_results(context, props, new_armature,
+                                     skin_objects, actions)
+
+            self.report({'INFO'},
+                        f"Round-trip complete: game-scale actor with "
+                        f"{len(skin_objects)} mesh(es)")
+
+            # 7. Clean up temp file
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+        except Exception as e:
+            self.report({'WARNING'}, f"Round-trip failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
@@ -770,9 +904,9 @@ def _anim_name_items(self, context):
 
 
 class ACTOR_OT_import_single_animation(Operator, ImportHelper):
-    """Import a single animation from an IGB file"""
+    """Import animations from an IGB file (select which ones)"""
     bl_idname = "actor.import_single_animation"
-    bl_label = "Import Animation"
+    bl_label = "Import Animations"
     bl_options = {'REGISTER', 'UNDO'}
 
     filename_ext = ".igb"
@@ -818,44 +952,92 @@ class ACTOR_OT_import_single_animation(Operator, ImportHelper):
             for pa in parsed_anims
         ]
 
-        # Open the pick dialog
+        # Open the multi-select pick dialog
         bpy.ops.actor.pick_animation('INVOKE_DEFAULT')
         return {'FINISHED'}
 
 
 class ACTOR_OT_pick_animation(Operator):
-    """Pick which animation to import and how"""
+    """Select which animations to import"""
     bl_idname = "actor.pick_animation"
-    bl_label = "Select Animation"
+    bl_label = "Select Animations to Import"
     bl_options = {'REGISTER', 'UNDO'}
 
-    anim_name: EnumProperty(
-        name="Animation",
-        description="Select the animation to import",
-        items=_anim_name_items,
+    source_game: EnumProperty(
+        name="Source Game",
+        description=(
+            "Game the animation file comes from. "
+            "MUA and XML2 share bone names, so cross-game import works automatically. "
+            "Extra MUA bones (Nub endpoints, fx/Gun bones) are skipped on XML2 rigs"
+        ),
+        items=[
+            ('AUTO', "Auto", "Same game as current rig (no bone remapping)"),
+            ('XML2', "XML2", "X-Men Legends II animations"),
+            ('MUA', "MUA", "Marvel Ultimate Alliance animations"),
+        ],
+        default='AUTO',
     )
 
-    mode: EnumProperty(
-        name="Mode",
-        items=[
-            ('ADD', "Add New", "Add as a new animation to the list"),
-            ('REPLACE', "Replace Selected",
-             "Replace the currently selected animation"),
-        ],
-        default='ADD',
-    )
+    # Up to 30 animation slots with toggles (enough for most actors)
+    anim_00: BoolProperty(name="Anim 0", default=True)
+    anim_01: BoolProperty(name="Anim 1", default=True)
+    anim_02: BoolProperty(name="Anim 2", default=True)
+    anim_03: BoolProperty(name="Anim 3", default=True)
+    anim_04: BoolProperty(name="Anim 4", default=True)
+    anim_05: BoolProperty(name="Anim 5", default=True)
+    anim_06: BoolProperty(name="Anim 6", default=True)
+    anim_07: BoolProperty(name="Anim 7", default=True)
+    anim_08: BoolProperty(name="Anim 8", default=True)
+    anim_09: BoolProperty(name="Anim 9", default=True)
+    anim_10: BoolProperty(name="Anim 10", default=True)
+    anim_11: BoolProperty(name="Anim 11", default=True)
+    anim_12: BoolProperty(name="Anim 12", default=True)
+    anim_13: BoolProperty(name="Anim 13", default=True)
+    anim_14: BoolProperty(name="Anim 14", default=True)
+    anim_15: BoolProperty(name="Anim 15", default=True)
+    anim_16: BoolProperty(name="Anim 16", default=True)
+    anim_17: BoolProperty(name="Anim 17", default=True)
+    anim_18: BoolProperty(name="Anim 18", default=True)
+    anim_19: BoolProperty(name="Anim 19", default=True)
+    anim_20: BoolProperty(name="Anim 20", default=True)
+    anim_21: BoolProperty(name="Anim 21", default=True)
+    anim_22: BoolProperty(name="Anim 22", default=True)
+    anim_23: BoolProperty(name="Anim 23", default=True)
+    anim_24: BoolProperty(name="Anim 24", default=True)
+    anim_25: BoolProperty(name="Anim 25", default=True)
+    anim_26: BoolProperty(name="Anim 26", default=True)
+    anim_27: BoolProperty(name="Anim 27", default=True)
+    anim_28: BoolProperty(name="Anim 28", default=True)
+    anim_29: BoolProperty(name="Anim 29", default=True)
 
     @classmethod
     def poll(cls, context):
         return len(_anim_import_cache.get('parsed_anims', [])) > 0
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=300)
+        return context.window_manager.invoke_props_dialog(self, width=350)
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "anim_name")
-        layout.prop(self, "mode", expand=True)
+
+        # Source game selector at the top
+        layout.prop(self, "source_game")
+        layout.separator()
+
+        anims = _anim_import_cache.get('parsed_anims', [])
+        if not anims:
+            layout.label(text="No animations found.", icon='INFO')
+            return
+        layout.label(text=f"Found {len(anims)} animation(s):", icon='ACTION')
+        col = layout.column(align=True)
+        for i, pa in enumerate(anims):
+            if i >= 30:
+                col.label(text=f"... and {len(anims) - 30} more (not shown)")
+                break
+            prop_name = f"anim_{i:02d}"
+            secs = pa.duration_ms / 1000.0
+            label = f"{pa.name}  ({secs:.1f}s, {len(pa.tracks)} tracks)"
+            col.prop(self, prop_name, text=label)
 
     def execute(self, context):
         from .animation_builder import build_action
@@ -866,62 +1048,74 @@ class ACTOR_OT_pick_animation(Operator):
             self.report({'ERROR'}, "No active armature found")
             return {'CANCELLED'}
 
-        # Find the selected parsed animation
         parsed_anims = _anim_import_cache.get('parsed_anims', [])
         bind_pose = _anim_import_cache.get('bind_pose')
-        target_anim = None
-        for pa in parsed_anims:
-            if pa.name == self.anim_name:
-                target_anim = pa
+
+        # Determine bone remapping based on source game selection.
+        # MUA and XML2 use identical bone names for shared bones, so
+        # cross-game import works automatically — extra MUA bones
+        # (HeadNub, Finger0Nub, Toe0Nub, fx01, Gun1, etc.) are
+        # silently skipped when not found in the target armature.
+        # The bone_remap dict is reserved for future use if any
+        # name mismatches are discovered.
+        bone_remap = None  # No remapping needed — names are identical
+
+        # For cross-character animation: extract the TARGET armature's
+        # bind_pose from its original animation file.  This ensures bone
+        # translations are computed relative to the target character's
+        # skeleton, not the source's.
+        target_bind_pose = None
+        target_anim_file = armature_obj.get("igb_anim_file", "")
+        if target_anim_file and os.path.exists(target_anim_file):
+            try:
+                from ..igb_format.igb_reader import IGBReader
+                from .sg_skeleton import extract_skeleton
+                from .sg_animation import extract_animations
+                from .actor_import import _extract_bind_pose
+
+                target_reader = IGBReader(target_anim_file)
+                target_reader.read()
+                target_skel = extract_skeleton(target_reader)
+                if target_skel:
+                    target_anims = extract_animations(target_reader, target_skel)
+                    target_bind_pose = _extract_bind_pose(target_anims)
+            except Exception:
+                pass  # Fall back to source bind_pose
+
+        # Collect selected animations based on checkboxes
+        selected = []
+        for i, pa in enumerate(parsed_anims):
+            if i >= 30:
                 break
+            prop_name = f"anim_{i:02d}"
+            if getattr(self, prop_name, True):
+                selected.append(pa)
 
-        if target_anim is None:
-            self.report({'ERROR'}, f"Animation '{self.anim_name}' not found")
-            return {'CANCELLED'}
-
-        # Build the Blender Action
-        action = build_action(armature_obj, target_anim, bind_pose=bind_pose)
-        if action is None:
-            self.report({'ERROR'}, "Failed to build animation")
+        if not selected:
+            self.report({'WARNING'}, "No animations selected")
             return {'CANCELLED'}
 
         fps = context.scene.render.fps
+        imported_count = 0
+        for pa in selected:
+            action = build_action(armature_obj, pa, bind_pose=bind_pose,
+                                  bone_remap=bone_remap,
+                                  target_bind_pose=target_bind_pose)
+            if action is None:
+                continue
 
-        if self.mode == 'REPLACE' and props.animations_index < len(props.animations):
-            # Replace the currently selected animation
-            item = props.animations[props.animations_index]
-            old_action = bpy.data.actions.get(item.action_name)
-
-            # Clear from armature if it was active
-            if (armature_obj.animation_data and
-                    armature_obj.animation_data.action == old_action):
-                armature_obj.animation_data.action = None
-
-            # Remove old action
-            if old_action is not None:
-                bpy.data.actions.remove(old_action)
-
-            # Update the list item
-            item.name = action.name
-            item.action_name = action.name
-            item.duration_ms = action.get("igb_duration_ms", 0.0)
-            item.track_count = action.get("igb_track_count", 0)
-            item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
-
-            self.report({'INFO'},
-                        f"Replaced animation with '{action.name}'")
-        else:
-            # Add as new
             item = props.animations.add()
             item.name = action.name
             item.action_name = action.name
             item.duration_ms = action.get("igb_duration_ms", 0.0)
             item.track_count = action.get("igb_track_count", 0)
             item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
+            imported_count += 1
+
+        if imported_count > 0:
             props.animations_index = len(props.animations) - 1
 
-            self.report({'INFO'},
-                        f"Added animation '{action.name}'")
+        self.report({'INFO'}, f"Imported {imported_count} animation(s)")
 
         # Clear cache
         _anim_import_cache['parsed_anims'] = []
@@ -1067,6 +1261,10 @@ class ACTOR_OT_select_skins(Operator):
 
         armature_obj, skin_objects, actions = result
 
+        # Ensure all imported skin meshes have IGB material properties
+        for _, mesh_obj in skin_objects:
+            _ensure_igb_material_properties(mesh_obj)
+
         # Update panel state (same as original import_actor execute)
         _populate_import_results(context, props, armature_obj,
                                  skin_objects, actions)
@@ -1104,6 +1302,94 @@ def _populate_import_results(context, props, armature_obj, skin_objects, actions
         item.duration_ms = action.get("igb_duration_ms", 0.0)
         item.track_count = action.get("igb_track_count", 0)
         item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
+
+
+def _fix_nondeforming_bone_orientations(armature_obj):
+    """Fix Root/Bip01/Motion bone orientations after round-trip reimport.
+
+    In native XML2 imports, these non-deforming bones get their orientation
+    from the afakeanim bind_pose (identity quaternion → bone Y-axis along
+    world Y, Z-axis along world Z).  The round-trip has no bind_pose, so
+    build_armature defaults to Z-up tails, which changes rest_q and causes
+    a 90° animation rotation.
+
+    Fix: enter edit mode and set these bones to identity orientation
+    (tail along Y-forward, roll aligned to Z-up).
+    """
+    from mathutils import Vector
+
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    nondeforming = {"Bone_000", "", "Bip01", "Motion"}
+    for eb in armature_obj.data.edit_bones:
+        if eb.name in nondeforming:
+            bone_len = max(eb.length, 0.5)
+            # Identity orientation: tail along Y (forward in game space)
+            eb.tail = eb.head + Vector((0, bone_len, 0))
+            eb.align_roll(Vector((0, 0, 1)))
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+
+def _ensure_igb_material_properties(mesh_obj):
+    """Ensure a mesh's materials have IGB custom properties for the panel.
+
+    If a material already has igb_diffuse (set by build_material from IGB
+    data), it's left as-is.  Otherwise, sensible defaults are added so the
+    IGB Materials panel can edit blend, alpha, lighting, and cull settings.
+    """
+    if not mesh_obj or mesh_obj.type != 'MESH':
+        return
+
+    for mat in mesh_obj.data.materials:
+        if mat is None:
+            continue
+
+        # Derive diffuse from Principled BSDF if no igb_diffuse already set
+        diffuse = [0.8, 0.8, 0.8, 1.0]
+        if "igb_diffuse" not in mat and mat.use_nodes and mat.node_tree:
+            for node in mat.node_tree.nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    bc = node.inputs.get('Base Color')
+                    if bc:
+                        c = bc.default_value
+                        diffuse = [c[0], c[1], c[2], c[3]]
+                    break
+
+        # Set each property only if not already present.
+        # build_material() sets these from IGB data during normal imports;
+        # this fills in defaults for non-IGB materials (VRChat, Unity) or
+        # IGB files with missing state attributes.
+        def _set(key, val):
+            if key not in mat:
+                mat[key] = val
+
+        # Core material properties
+        _set("igb_diffuse", diffuse)
+        _set("igb_ambient", diffuse[:])
+        _set("igb_specular", [0.0, 0.0, 0.0, 1.0])
+        _set("igb_emission", [0.0, 0.0, 0.0, 1.0])
+        _set("igb_shininess", 0.0)
+        _set("igb_flags", 31)
+
+        # Render state defaults (standard opaque character material)
+        _set("igb_blend_enabled", True)
+        _set("igb_blend_src", 4)   # SRC_ALPHA
+        _set("igb_blend_dst", 5)   # ONE_MINUS_SRC_ALPHA
+        _set("igb_alpha_test_enabled", True)
+        _set("igb_alpha_func", 6)  # GREATER
+        _set("igb_alpha_ref", 0.5)
+        _set("igb_lighting_enabled", True)
+        _set("igb_cull_face_enabled", True)
+        _set("igb_cull_face_mode", 0)
+
+        # Color attribute (white tint = no tint)
+        _set("igb_color_r", 1.0)
+        _set("igb_color_g", 1.0)
+        _set("igb_color_b", 1.0)
+        _set("igb_color_a", 1.0)
 
 
 _classes = (

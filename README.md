@@ -156,6 +156,9 @@ Manages the skin mesh variants attached to an actor.
 - **Add / Remove** - Attach a Blender mesh as a new skin or remove one.
 
 #### Animations
+
+> **Note:** Animation import and export are currently broken and under active development.
+
 Manages animation clips on the actor.
 
 - **Animation List** - Shows all loaded animations with play buttons and durations.

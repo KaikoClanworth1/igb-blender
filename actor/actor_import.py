@@ -371,7 +371,13 @@ def _import_materials_for_mesh(reader, mesh_obj, state, profile):
 
     blender_mat = build_material(parsed_mat, parsed_tex, name=mesh_obj.name)
     if blender_mat:
-        mesh_obj.data.materials.append(blender_mat)
+        try:
+            mesh_obj.data.materials.append(blender_mat)
+        except ReferenceError:
+            # Material was garbage-collected between creation and assignment.
+            # This can happen during rapid data-block creation. The mesh will
+            # import without a material but is otherwise fine.
+            pass
 
 
 def _extract_skin_data(filepath, skeleton, profile):

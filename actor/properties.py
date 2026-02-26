@@ -3,7 +3,7 @@
 import bpy
 from bpy.props import (
     StringProperty, BoolProperty, IntProperty,
-    CollectionProperty, FloatProperty,
+    CollectionProperty, FloatProperty, EnumProperty,
 )
 from bpy.types import PropertyGroup
 
@@ -91,6 +91,17 @@ class ACTOR_SceneProperties(PropertyGroup):
         name="Import Materials",
         description="Import materials and textures on skins",
         default=True,
+    )
+
+    game_preset: EnumProperty(
+        name="Game",
+        description="Game profile for correct texture colors and bone conventions",
+        items=[
+            ('auto', "Auto-Detect", "Detect game from file metadata"),
+            ('xml2_pc', "XML2 PC", "X-Men Legends II PC"),
+            ('mua_pc', "MUA PC", "Marvel Ultimate Alliance PC (swap R/B)"),
+        ],
+        default='auto',
     )
 
 

@@ -1,8 +1,15 @@
 """Export Blender Actions as IGB animation files.
 
 Uses a template-based approach: reads an existing animation IGB file,
-patches the keyframe data in its igTransformSequence1_5 objects, and
-writes the result. This preserves all metadata, bindings, and structure.
+patches the keyframe data, and writes the result.  This preserves all
+metadata, bindings, and structure.
+
+EXPORT CAPABILITIES:
+- Root motion tracks (igTransformSequence1_5): patched in place.
+- Bone animation tracks (igEnbayaTransformSource): recompressed via the
+  enbaya encoder (actor/enbaya_encoder.py).  All bone tracks sharing one
+  igEnbayaAnimationSource are collected, converted to Alchemy format,
+  compressed, and the blob is replaced.
 
 REVERSE ROTATION FORMULA:
     Blender pose_q is a delta from rest: final_local = rest_q @ pose_q
@@ -23,6 +30,24 @@ import os
 import logging
 
 _log = logging.getLogger("igb_anim_export")
+
+
+def _update_entry_mem_size(reader, writer, ref_index, new_size):
+    """Update the _memSize field in the igMemoryDirEntry for a replaced block.
+
+    When a MemoryBlockDef is replaced with different-sized data, the
+    directory entry's _memSize field must be updated to match.  Without
+    this, the game reads the wrong size and crashes.
+    """
+    entry_idx = writer.index_map[ref_index]
+    # Find the position of slot 7 (_memSize) in the entry's field list
+    _ent_type, fields = reader.entries[entry_idx]
+    for pos, field_tuple in enumerate(fields):
+        if field_tuple[0] == 7:  # slot 7 = _memSize
+            writer.entries[entry_idx].field_values[pos] = new_size
+            break
+    # Also update ref_info for internal consistency
+    writer.ref_info[ref_index]['mem_size'] = new_size
 
 
 def export_animations(context, filepath, operator=None):
@@ -53,6 +78,15 @@ def export_animations(context, filepath, operator=None):
         if operator:
             operator.report({'ERROR'},
                             f"Template animation file not found: {template_path}")
+        return {'CANCELLED'}
+
+    # Safety: warn if output would overwrite the template
+    if os.path.normcase(os.path.abspath(filepath)) == os.path.normcase(os.path.abspath(template_path)):
+        if operator:
+            operator.report({'ERROR'},
+                            "Output path is the same as the template file. "
+                            "Choose a different filename to avoid overwriting "
+                            "the original.")
         return {'CANCELLED'}
 
     # Read template
@@ -98,39 +132,114 @@ def export_animations(context, filepath, operator=None):
     # Build a map: animation_name -> igAnimation object index in reader
     anim_obj_map = _build_anim_object_map(reader)
 
-    # For each action, find the matching template animation and patch it
+    # Count how many template animations have patchable tracks
+    patchable_uncompressed = [
+        name for name, info in anim_obj_map.items() if info['tracks']
+    ]
+    patchable_enbaya = [
+        name for name, info in anim_obj_map.items()
+        if info['enbaya_track_details']
+    ]
+
+    _log.info("Template has %d animations total: %d with uncompressed tracks, "
+              "%d with enbaya tracks",
+              len(anim_obj_map), len(patchable_uncompressed), len(patchable_enbaya))
+
+    # For each action, find the matching template animation and patch it.
+    # Enbaya blobs are processed separately (after this loop) because a
+    # single blob can be shared across multiple animations.
     patched_count = 0
+    skipped_no_match = []
+    fps = context.scene.render.fps
+
+    _log.info("Exporting %d action(s). Action igb_anim_names: %s",
+              len(actions_to_export),
+              [a.get("igb_anim_name", a.name) for a in actions_to_export])
+    _log.info("Template animation names: %s", list(anim_obj_map.keys()))
+
+    # Phase 1: patch uncompressed tracks + collect enbaya work per blob
+    # blob_ref -> {track_id: (bone_name, action)}
+    blob_track_map = {}
+    blob_duration_ns = {}   # blob_ref -> max duration_ns seen
+    matched_anims = set()
+
     for action in actions_to_export:
         anim_name = action.get("igb_anim_name", action.name)
 
         # Find matching template animation
         anim_info = anim_obj_map.get(anim_name)
         if anim_info is None:
-            _log.debug("No template animation '%s' found, skipping", anim_name)
+            skipped_no_match.append(anim_name)
             continue
 
-        fps = context.scene.render.fps
-        success = _patch_animation(
-            reader, writer, anim_info, action, armature_obj,
-            rest_data, bind_trans_map, endian, fps
-        )
+        success = False
+
+        # Patch uncompressed tracks (root motion)
+        if anim_info['tracks']:
+            success = _patch_animation(
+                reader, writer, anim_info, action, armature_obj,
+                rest_data, bind_trans_map, endian, fps
+            )
+
+        # Collect enbaya tracks for deferred blob processing
+        for track_id, bone_name, blob_ref in anim_info['enbaya_track_details']:
+            if blob_ref not in blob_track_map:
+                blob_track_map[blob_ref] = {}
+                blob_duration_ns[blob_ref] = 0
+            # First action to claim a track_id wins (shared tracks are identical)
+            if track_id not in blob_track_map[blob_ref]:
+                blob_track_map[blob_ref][track_id] = (bone_name, action)
+            # Track the longest duration for this blob
+            dur = anim_info['duration_ns']
+            if dur > blob_duration_ns[blob_ref]:
+                blob_duration_ns[blob_ref] = dur
+            success = True  # mark as having enbaya content
+
         if success:
+            matched_anims.add(anim_name)
             patched_count += 1
+
+    # Phase 2: process each enbaya blob once with ALL its tracks merged
+    enbaya_blobs_ok = 0
+    for blob_ref, track_map in blob_track_map.items():
+        ok = _patch_enbaya_blob(
+            reader, writer, blob_ref, track_map,
+            blob_duration_ns[blob_ref],
+            armature_obj, rest_data, bind_trans_map, endian, fps
+        )
+        if ok:
+            enbaya_blobs_ok += 1
+
+    if enbaya_blobs_ok > 0:
+        _log.info("Patched %d enbaya blob(s)", enbaya_blobs_ok)
 
     if patched_count == 0:
         if operator:
-            operator.report({'WARNING'},
-                            "No animations matched the template. "
-                            "Animation names must match the original file.")
+            msg = "No animations could be exported."
+            if skipped_no_match:
+                msg += (f" {len(skipped_no_match)} animation(s) have no matching "
+                        f"template entry.")
+            operator.report({'WARNING'}, msg)
         return {'CANCELLED'}
 
     # Write output
-    writer.write(filepath)
+    try:
+        writer.write(filepath)
+    except Exception as exc:
+        if operator:
+            operator.report({'ERROR'}, f"Failed to write file: {exc}")
+        return {'CANCELLED'}
 
     if operator:
-        operator.report({'INFO'},
-                        f"Exported {patched_count} animation(s) to "
-                        f"{os.path.basename(filepath)}")
+        msg = (f"Exported {patched_count} animation(s) to "
+               f"{os.path.basename(filepath)}")
+        if enbaya_blobs_ok > 0:
+            msg += f" ({enbaya_blobs_ok} enbaya blob(s) recompressed)"
+        if skipped_no_match:
+            msg += f" ({len(skipped_no_match)} skipped: no template match)"
+            _log.warning("Skipped animations (no template match): %s",
+                         skipped_no_match[:10])
+        operator.report({'INFO'}, msg)
     return {'FINISHED'}
 
 
@@ -163,9 +272,15 @@ def _build_anim_object_map(reader):
     Returns dict: anim_name -> {
         'anim_obj_index': int,
         'tracks': [(track_obj_index, source_obj_index, bone_name), ...],
+        'enbaya_track_details': [(track_id, bone_name, blob_ref), ...],
+        'duration_ns': int,
     }
+
+    Note: enbaya_track_details has per-track blob_ref because a single
+    animation can span multiple blobs, and blobs can be shared across
+    multiple animations.
     """
-    from ..igb_format.igb_objects import IGBObject
+    from ..igb_format.igb_objects import IGBObject, IGBMemoryBlock
 
     result = {}
 
@@ -177,10 +292,13 @@ def _build_anim_object_map(reader):
 
         name = ""
         track_list_ref = None
+        duration_ns = 0
 
         for slot, val, fi in obj._raw_fields:
             if fi.short_name == b"String":
                 name = val if isinstance(val, str) else ""
+            elif fi.short_name == b"Long" and slot == 9:
+                duration_ns = val
             elif fi.short_name == b"ObjectRef" and val != -1:
                 ref = reader.resolve_ref(val)
                 if isinstance(ref, IGBObject):
@@ -191,8 +309,10 @@ def _build_anim_object_map(reader):
         if not name or track_list_ref is None:
             continue
 
-        # Parse tracks to find igTransformSequence1_5 sources
-        tracks = []
+        # Parse tracks: find both uncompressed and enbaya sources
+        tracks = []               # uncompressed igTransformSequence1_5
+        enbaya_track_details = [] # (track_id, bone_name, blob_ref)
+
         tl = reader.resolve_ref(track_list_ref)
         if isinstance(tl, IGBObject):
             track_objs = reader.resolve_object_list(tl)
@@ -213,10 +333,32 @@ def _build_anim_object_map(reader):
                         if (src.is_type(b"igTransformSequence1_5") or
                                 src.is_type(b"igTransformSequence")):
                             tracks.append((track_obj.index, src.index, bone_name))
+                        elif src.is_type(b"igEnbayaTransformSource"):
+                            # Extract track_id and per-track blob_ref
+                            track_id = -1
+                            blob_ref = None
+                            eas_ref = None
+                            for s, v, f in src._raw_fields:
+                                if f.short_name == b"Int" and s == 2:
+                                    track_id = v
+                                elif f.short_name == b"ObjectRef" and v != -1:
+                                    eas_ref = v
+                            if eas_ref is not None:
+                                eas_obj = reader.resolve_ref(eas_ref)
+                                if isinstance(eas_obj, IGBObject):
+                                    for s, v, f in eas_obj._raw_fields:
+                                        if f.short_name == b"MemoryRef" and v != -1:
+                                            blob_ref = v
+                                            break
+                            if track_id >= 0 and blob_ref is not None:
+                                enbaya_track_details.append(
+                                    (track_id, bone_name, blob_ref))
 
         result[name] = {
             'anim_obj_index': i,
             'tracks': tracks,
+            'enbaya_track_details': enbaya_track_details,
+            'duration_ns': duration_ns,
         }
 
     return result
@@ -478,8 +620,213 @@ def _patch_data_list(reader, writer, list_obj, num_keys, keyframes,
     # Pack new data
     new_data = b"".join(pack_func(kf) for kf in keyframes)
 
-    # Replace memory block
+    # Replace memory block and update its directory entry size
     mem_idx = mem_ref_val
     # Resolve through ref_info to get the actual memory block index
     if mem_idx < len(reader.ref_info) and not reader.ref_info[mem_idx]['is_object']:
         writer.objects[mem_idx] = MemoryBlockDef(new_data)
+        _update_entry_mem_size(reader, writer, mem_idx, len(new_data))
+
+
+def _patch_enbaya_blob(reader, writer, blob_ref, track_map, duration_ns,
+                       armature_obj, rest_data, bind_trans_map, endian, fps):
+    """Compress all tracks for one enbaya blob and replace it in the writer.
+
+    A single blob can be shared across multiple animations.  This function
+    receives the MERGED track map (track_id -> (bone_name, action)) from
+    all animations that reference this blob, and compresses them into one
+    replacement blob.
+
+    Args:
+        reader: IGBReader (template).
+        writer: from_reader(reader) writer object.
+        blob_ref: MemoryRef index of the enbaya blob to replace.
+        track_map: Dict {track_id: (bone_name, action)} — merged from all
+                   animations sharing this blob.
+        duration_ns: Longest animation duration in nanoseconds.
+        armature_obj: Blender Armature object.
+        rest_data: Dict from _compute_rest_local_data.
+        bind_trans_map: Dict bone_name -> Vector(bind_translation).
+        endian: '<' or '>'.
+        fps: Scene frames-per-second.
+
+    Returns:
+        True if the blob was successfully replaced.
+    """
+    from mathutils import Quaternion, Vector
+    from ..igb_format.igb_writer import MemoryBlockDef
+    from .enbaya_encoder import compress_enbaya
+    from ..igb_format.igb_objects import IGBMemoryBlock
+    from .enbaya import EnbayaStream
+
+    if not track_map:
+        return False
+
+    # Read the original blob to get sample_rate and quantization_error
+    orig_block = reader.resolve_ref(blob_ref)
+    if not isinstance(orig_block, IGBMemoryBlock):
+        _log.warning("Enbaya blob ref %d not resolvable", blob_ref)
+        return False
+
+    # Handle blobs with missing/empty data (aliased or unresolved refs)
+    if not orig_block.data or orig_block.mem_size == 0:
+        _log.warning("Enbaya blob ref %d has no data (mem_size=%d), skipping",
+                      blob_ref, orig_block.mem_size)
+        return False
+
+    orig_data = bytes(orig_block.data[:orig_block.mem_size])
+    if len(orig_data) < 80:
+        _log.warning("Enbaya blob ref %d too small (%d bytes)", blob_ref, len(orig_data))
+        return False
+
+    orig_header = EnbayaStream(orig_data, endian=endian)
+
+    # Validate the enbaya header — encrypted/scrambled blobs get defaults.
+    # Use stricter thresholds to catch garbage values that are technically
+    # in range but obviously wrong (e.g., duration=2.5e-43).
+    header_valid = (
+        orig_header.track_count >= 1 and orig_header.track_count <= 500 and
+        orig_header.sample_rate >= 10 and orig_header.sample_rate <= 240 and
+        orig_header.duration >= 0.01 and orig_header.duration <= 300 and
+        orig_header.quantization_error >= 1e-6 and
+        orig_header.quantization_error <= 0.5
+    )
+
+    # Compute duration from action frame range or animation metadata
+    if duration_ns > 0:
+        duration_sec = duration_ns / 1_000_000_000.0
+    elif header_valid:
+        duration_sec = orig_header.duration
+    else:
+        duration_sec = 0.0
+
+    if header_valid:
+        sample_rate = orig_header.sample_rate
+        qe_orig = orig_header.quantization_error / 2.0
+    else:
+        _log.info("Enbaya blob %d: unreadable header, using defaults "
+                   "(tracks=%s, sr=%s, dur=%s, qe=%s)",
+                   blob_ref, orig_header.track_count, orig_header.sample_rate,
+                   orig_header.duration, orig_header.quantization_error)
+        sample_rate = 30
+        qe_orig = 0.002
+
+    # Build sorted track list: [(track_id, bone_name, action), ...]
+    # The blob needs tracks 0..max_track_id.
+    max_track_id = max(track_map.keys())
+    num_tracks = max_track_id + 1
+
+    # Determine frame range from all contributing actions
+    frame_start = None
+    frame_end = None
+    seen_actions = set()
+    for track_id, (bone_name, action) in track_map.items():
+        if id(action) in seen_actions:
+            continue
+        seen_actions.add(id(action))
+        for fc in action.fcurves:
+            for kfp in fc.keyframe_points:
+                fr = kfp.co[0]
+                if frame_start is None or fr < frame_start:
+                    frame_start = fr
+                if frame_end is None or fr > frame_end:
+                    frame_end = fr
+
+    if frame_start is None:
+        frame_start = 0
+        frame_end = max(1.0, duration_sec * fps)
+    else:
+        if duration_sec <= 0 and fps > 0:
+            duration_sec = (frame_end - frame_start) / fps
+
+    # Ensure duration is sane (at least 1 frame)
+    if duration_sec <= 0:
+        duration_sec = 1.0 / sample_rate  # single frame fallback
+
+    num_samples = max(2, int(duration_sec * sample_rate) + 2)
+
+    # Sample keyframes for each track slot 0..num_tracks-1
+    encoder_input = [[] for _ in range(num_tracks)]
+
+    for track_id in range(num_tracks):
+        if track_id in track_map:
+            bone_name, action = track_map[track_id]
+        else:
+            # Gap in track_ids — fill with identity
+            bone_name, action = "", None
+
+        quat_fcurves = _get_fcurves(action, bone_name,
+                                     'rotation_quaternion', 4) if action else []
+        loc_fcurves = _get_fcurves(action, bone_name,
+                                    'location', 3) if action else []
+
+        rest_info = rest_data.get(bone_name)
+        rest_rot = rest_info[0] if rest_info else None
+        rest_q = rest_info[1] if rest_info else None
+        bind_trans = bind_trans_map.get(bone_name)
+
+        for si in range(num_samples):
+            time_sec = min(si / float(sample_rate), duration_sec)
+            frame = frame_start + time_sec * fps
+
+            # Sample pose quaternion
+            if quat_fcurves and any(fc is not None for fc in quat_fcurves):
+                w = quat_fcurves[0].evaluate(frame) if quat_fcurves[0] else 1.0
+                x = quat_fcurves[1].evaluate(frame) if quat_fcurves[1] else 0.0
+                y = quat_fcurves[2].evaluate(frame) if quat_fcurves[2] else 0.0
+                z = quat_fcurves[3].evaluate(frame) if quat_fcurves[3] else 0.0
+                pose_q = Quaternion((w, x, y, z))
+            else:
+                pose_q = Quaternion((1.0, 0.0, 0.0, 0.0))
+
+            # Sample pose location
+            if loc_fcurves and any(fc is not None for fc in loc_fcurves):
+                lx = loc_fcurves[0].evaluate(frame) if loc_fcurves[0] else 0.0
+                ly = loc_fcurves[1].evaluate(frame) if loc_fcurves[1] else 0.0
+                lz = loc_fcurves[2].evaluate(frame) if loc_fcurves[2] else 0.0
+                pose_loc = Vector((lx, ly, lz))
+            else:
+                pose_loc = Vector((0.0, 0.0, 0.0))
+
+            # Reverse rotation: anim_q = conjugate(rest_q @ pose_q)
+            if rest_q is not None:
+                alchemy_q = (rest_q @ pose_q).conjugated()
+            else:
+                alchemy_q = pose_q.conjugated()
+
+            quat_xyzw = (alchemy_q.x, alchemy_q.y, alchemy_q.z, alchemy_q.w)
+
+            # Reverse translation: anim_trans = bind_trans + rest_rot @ pose_loc
+            if rest_rot is not None and bind_trans is not None:
+                anim_trans = bind_trans + rest_rot @ pose_loc
+                trans = (anim_trans.x, anim_trans.y, anim_trans.z)
+            elif bind_trans is not None:
+                anim_trans = bind_trans + pose_loc
+                trans = (anim_trans.x, anim_trans.y, anim_trans.z)
+            else:
+                trans = tuple(pose_loc)
+
+            encoder_input[track_id].append((time_sec, quat_xyzw, trans))
+
+    # Compress with the enbaya encoder
+    try:
+        new_blob = compress_enbaya(
+            encoder_input, duration_sec,
+            sample_rate=sample_rate,
+            quantization_error=qe_orig,
+        )
+    except Exception as exc:
+        _log.error("Enbaya compression failed for blob %d: %s", blob_ref, exc)
+        return False
+
+    # Replace the memory block in the writer and update directory entry size
+    mem_idx = blob_ref
+    if mem_idx < len(reader.ref_info) and not reader.ref_info[mem_idx]['is_object']:
+        writer.objects[mem_idx] = MemoryBlockDef(new_blob)
+        _update_entry_mem_size(reader, writer, mem_idx, len(new_blob))
+        _log.info("Enbaya blob %d replaced: %d tracks, %d→%d bytes",
+                  blob_ref, num_tracks, len(orig_data), len(new_blob))
+        return True
+
+    _log.warning("Could not replace enbaya blob ref %d", blob_ref)
+    return False

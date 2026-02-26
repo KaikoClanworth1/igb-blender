@@ -103,16 +103,11 @@ def extract_animations(reader, skeleton=None) -> List[ParsedAnimation]:
     Returns:
         List of ParsedAnimation.
     """
-    # Find animations via igAnimationDatabase or directly
-    anim_dbs = reader.get_objects_by_type(b"igAnimationDatabase")
-    if anim_dbs:
-        anim_list_obj = _find_anim_list(reader, anim_dbs[0])
-        if anim_list_obj:
-            anim_objs = reader.resolve_object_list(anim_list_obj)
-        else:
-            anim_objs = reader.get_objects_by_type(b"igAnimation")
-    else:
-        anim_objs = reader.get_objects_by_type(b"igAnimation")
+    # Direct type scan — this reliably finds ALL igAnimation objects in the
+    # file regardless of how the igAnimationDatabase/igAnimationList stores
+    # its references (some files have list formats that resolve_object_list
+    # cannot handle correctly).
+    anim_objs = reader.get_objects_by_type(b"igAnimation")
 
     # Cache for decompressed Enbaya blobs (shared across animations in the same file).
     # Key: igEnbayaAnimationSource object index -> decompressed per-track keyframes.
@@ -135,15 +130,7 @@ def extract_animation_names(reader) -> List[Tuple[str, float]]:
     Returns:
         List of (name, duration_ms) tuples.
     """
-    anim_dbs = reader.get_objects_by_type(b"igAnimationDatabase")
-    if anim_dbs:
-        anim_list_obj = _find_anim_list(reader, anim_dbs[0])
-        if anim_list_obj:
-            anim_objs = reader.resolve_object_list(anim_list_obj)
-        else:
-            anim_objs = reader.get_objects_by_type(b"igAnimation")
-    else:
-        anim_objs = reader.get_objects_by_type(b"igAnimation")
+    anim_objs = reader.get_objects_by_type(b"igAnimation")
 
     results = []
     for obj in anim_objs:
@@ -434,16 +421,34 @@ def _parse_enbaya_source(reader, src_obj, endian, enbaya_cache=None) -> List[Par
         if blob_data is None or len(blob_data) < 80:
             enbaya_cache[cache_key] = None
         else:
-            try:
-                # Decompress to per-track keyframes
-                # Each track is a list of (time_ms, quat_wxyz, trans_xyz) tuples
-                tracks = decompress_enbaya_to_tracks(
-                    blob_data, endian=endian, fps=30.0
-                )
-                enbaya_cache[cache_key] = tracks
-            except Exception:
-                # If decompression fails, cache None and fall back to constant
+            # Validate the enbaya header before attempting decompression.
+            # Many XML2 files have encrypted/obfuscated enbaya blobs where
+            # the header contains garbage. Feeding these to the decoder can
+            # cause hangs (infinite loops) because the garbage track_count
+            # or sample_rate leads to enormous allocations or endless loops.
+            from .enbaya import EnbayaStream as _ES
+            _hdr = _ES(blob_data, endian=endian)
+            _header_ok = (
+                _hdr.track_count >= 1 and _hdr.track_count <= 500 and
+                _hdr.sample_rate >= 10 and _hdr.sample_rate <= 240 and
+                _hdr.duration >= 0.01 and _hdr.duration <= 300 and
+                _hdr.quantization_error >= 1e-6 and
+                _hdr.quantization_error <= 0.5
+            )
+            if not _header_ok:
+                # Encrypted/invalid blob — skip decompression entirely
                 enbaya_cache[cache_key] = None
+            else:
+                try:
+                    # Decompress to per-track keyframes
+                    # Each track is a list of (time_ms, quat_wxyz, trans_xyz)
+                    tracks = decompress_enbaya_to_tracks(
+                        blob_data, endian=endian, fps=30.0
+                    )
+                    enbaya_cache[cache_key] = tracks
+                except Exception:
+                    # If decompression fails, cache None → fall back to constant
+                    enbaya_cache[cache_key] = None
 
     cached = enbaya_cache.get(cache_key)
     if cached is None or track_id >= len(cached):
