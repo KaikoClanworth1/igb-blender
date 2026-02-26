@@ -488,8 +488,15 @@ def _import_igz(context, filepath, operator=None):
             from ..igz_format.igz_materials import (
                 build_texture_path_map, extract_igz_material,
                 resolve_texture_bind, load_external_texture,
+                resolve_all_texture_binds, classify_texture_role,
+                extract_igz_blend_state, extract_igz_blend_function,
+                extract_igz_alpha_state,
             )
-            from .material_builder import build_material as build_mat_func, clear_caches
+            from .material_builder import (
+                build_material as build_mat_func,
+                build_igz_multitex_material,
+                clear_caches,
+            )
 
             clear_caches()
             tex_attr_to_path = build_texture_path_map(reader)
@@ -593,17 +600,18 @@ def _import_igz(context, filepath, operator=None):
 def _build_igz_material(reader, mat_state, tex_attr_to_path,
                         tex_image_cache, mat_cache, filepath, mesh_name,
                         igz_texture_dir=""):
-    """Build a Blender material from IGZ material state.
+    """Build a Blender material from IGZ material state with multi-texture support.
 
-    Uses the material_builder shared with IGB import. Loads external
-    texture IGZ files on demand and caches them.
+    Resolves ALL texture binds accumulated by the scene graph walker,
+    classifies each by filename suffix (diffuse, normal, specular, etc.),
+    and builds a Principled BSDF material with proper node wiring.
 
     Args:
         reader: IGZReader for the geometry file
         mat_state: dict from walk_igz_scene_graph with material/texture objects
         tex_attr_to_path: mapping from igTextureAttr2 offset -> texture file path
         tex_image_cache: dict caching texture_path -> ParsedImage
-        mat_cache: dict caching (mat_offset, texbind_offset) -> bpy.types.Material
+        mat_cache: dict caching cache_key -> bpy.types.Material
         filepath: path to the geometry IGZ file (for relative texture resolution)
         mesh_name: name for the material
         igz_texture_dir: user-specified directory containing materials/ subfolders
@@ -612,65 +620,96 @@ def _build_igz_material(reader, mat_state, tex_attr_to_path,
         bpy.types.Material or None
     """
     from ..igz_format.igz_materials import (
-        extract_igz_material, resolve_texture_bind, load_external_texture,
+        extract_igz_material, resolve_all_texture_binds,
+        load_external_texture, classify_texture_role,
+        extract_igz_blend_state, extract_igz_blend_function,
+        extract_igz_alpha_state, extract_igz_color,
+        TEX_ROLE_DIFFUSE,
     )
-    from .material_builder import build_material as build_mat_func
+    from .material_builder import build_igz_multitex_material
 
     mat_obj = mat_state.get('material_obj')
-    texbind_obj = mat_state.get('texbind_obj')
+    texbind_list = mat_state.get('texbind_list', [])
 
-    # Cache key
+    # --- Build cache key from material + all texture binds ---
     mat_off = mat_obj.global_offset if mat_obj else -1
-    texbind_off = texbind_obj.global_offset if texbind_obj else -1
-    cache_key = (mat_off, texbind_off)
+    bind_offsets = tuple(tb.global_offset for tb in texbind_list)
+    cache_key = (mat_off, bind_offsets)
 
     if cache_key in mat_cache:
         return mat_cache[cache_key]
 
-    # Extract material properties
+    # --- Extract material properties ---
     parsed_mat = None
     if mat_obj is not None:
         parsed_mat = extract_igz_material(reader, mat_obj)
     else:
-        # Create a default white material
         from ..scene_graph.sg_materials import ParsedMaterial
         parsed_mat = ParsedMaterial()
 
-    # Extract texture
-    parsed_tex = None
-    if texbind_obj is not None and tex_attr_to_path:
-        tex_path, unit_id = resolve_texture_bind(
-            reader, texbind_obj, tex_attr_to_path)
-        if tex_path is not None:
-            # Load or get cached external texture
-            parsed_image = tex_image_cache.get(tex_path)
-            if parsed_image is None:
-                parsed_image = load_external_texture(
-                    tex_path,
-                    game_data_dir=igz_texture_dir or None,
-                    filepath=filepath,
-                )
-                if parsed_image is not None:
-                    tex_image_cache[tex_path] = parsed_image
+    # --- Resolve all texture binds to role-classified paths ---
+    role_map = resolve_all_texture_binds(reader, texbind_list, tex_attr_to_path)
 
+    # --- Load external textures for each role ---
+    texture_role_images = {}  # TEX_ROLE_* -> ParsedImage
+    for role, (tex_path, texbind_obj) in role_map.items():
+        parsed_image = tex_image_cache.get(tex_path)
+        if parsed_image is None:
+            parsed_image = load_external_texture(
+                tex_path,
+                game_data_dir=igz_texture_dir or None,
+                filepath=filepath,
+            )
             if parsed_image is not None:
-                from ..scene_graph.sg_materials import ParsedTexture
-                parsed_tex = ParsedTexture()
-                parsed_tex.image = parsed_image
-                parsed_tex.unit_id = unit_id
-                parsed_tex.source_obj = texbind_obj
+                tex_image_cache[tex_path] = parsed_image
 
-    # Build the Blender material
+        if parsed_image is not None:
+            texture_role_images[role] = parsed_image
+
+    # --- Build extra_state from IGZ material state objects ---
+    extra_state = {}
+    blend_state_obj = mat_state.get('blend_state_obj')
+    if blend_state_obj is not None:
+        extra_state['blend_state'] = extract_igz_blend_state(blend_state_obj)
+
+    blend_func_obj = mat_state.get('blend_func_obj')
+    if blend_func_obj is not None:
+        extra_state['blend_func'] = extract_igz_blend_function(blend_func_obj)
+
+    alpha_state_obj = mat_state.get('alpha_state_obj')
+    if alpha_state_obj is not None:
+        extra_state['alpha_state'] = extract_igz_alpha_state(alpha_state_obj)
+
+    color_obj = mat_state.get('color_obj')
+    if color_obj is not None:
+        color = extract_igz_color(reader, color_obj)
+        if color is not None:
+            extra_state['color'] = color
+
+    # --- Determine material name ---
     mat_name = mesh_name
-    if parsed_tex and parsed_tex.image and parsed_tex.image.name:
-        # Use texture filename for material name
-        img_base = parsed_tex.image.name.replace('\\', '/').split('/')[-1]
+    diffuse_img = texture_role_images.get(TEX_ROLE_DIFFUSE)
+    if diffuse_img and diffuse_img.name:
+        img_base = diffuse_img.name.replace('\\', '/').split('/')[-1]
         if '.' in img_base:
             img_base = img_base.rsplit('.', 1)[0]
+        # Strip _d suffix for cleaner name
+        if img_base.lower().endswith('_d'):
+            img_base = img_base[:-2]
         if img_base:
             mat_name = img_base
 
-    bl_mat = build_mat_func(parsed_mat, parsed_tex, name=mat_name)
+    # --- Build the Blender material ---
+    if texture_role_images:
+        bl_mat = build_igz_multitex_material(
+            parsed_mat, texture_role_images,
+            extra_state=extra_state, name=mat_name)
+    else:
+        # No textures loaded — fall back to simple material
+        from .material_builder import build_material as build_mat_func
+        bl_mat = build_mat_func(parsed_mat, None,
+                                extra_state=extra_state, name=mat_name)
+
     mat_cache[cache_key] = bl_mat
     return bl_mat
 

@@ -530,6 +530,194 @@ def _insert_color_multiply(mat, bsdf, color, nodes, links):
     links.new(mix_node.outputs[2], base_color_input)  # Result -> Base Color
 
 
+def build_igz_multitex_material(parsed_material, texture_role_map,
+                                extra_state=None, name="IGZ_Material"):
+    """Create a Blender material from IGZ multi-texture data.
+
+    Builds a Principled BSDF node tree with separate texture slots wired
+    to the correct BSDF inputs based on texture role classification.
+
+    Args:
+        parsed_material: ParsedMaterial from sg_materials
+        texture_role_map: dict mapping TEX_ROLE_* -> ParsedImage
+            Keys: 'diffuse', 'normal', 'specular', 'emissive', 'metallic'
+        extra_state: dict of additional material state (blend, alpha, color)
+        name: base name for the material
+
+    Returns:
+        bpy.types.Material or None
+    """
+    from ..igz_format.igz_materials import (
+        TEX_ROLE_DIFFUSE, TEX_ROLE_NORMAL, TEX_ROLE_SPECULAR,
+        TEX_ROLE_EMISSIVE, TEX_ROLE_METALLIC, TEX_ROLE_CUBEMAP,
+    )
+
+    if parsed_material is None:
+        from ..scene_graph.sg_materials import ParsedMaterial
+        parsed_material = ParsedMaterial()
+
+    if extra_state is None:
+        extra_state = {}
+
+    # --- Cache key includes all texture roles ---
+    mat_idx = _obj_cache_key(parsed_material.source_obj)
+    role_keys = []
+    for role in sorted(texture_role_map.keys()):
+        img = texture_role_map[role]
+        ck = getattr(img, 'cache_key', None) or _obj_cache_key(img.source_obj)
+        role_keys.append((role, ck))
+
+    extra_key_parts = []
+    for key in sorted(extra_state.keys()):
+        val = extra_state[key]
+        if isinstance(val, dict):
+            extra_key_parts.append((key, tuple(sorted(val.items()))))
+        elif isinstance(val, (list, tuple)):
+            extra_key_parts.append((key, tuple(val)))
+        else:
+            extra_key_parts.append((key, val))
+
+    cache_key = ('igz_mt', mat_idx, tuple(role_keys),
+                 tuple(extra_key_parts) if extra_key_parts else ())
+    if cache_key in _material_cache:
+        return _material_cache[cache_key]
+
+    # --- Blend decision ---
+    # For IGZ, build a minimal ParsedTexture for blend heuristics from diffuse
+    diffuse_img = texture_role_map.get(TEX_ROLE_DIFFUSE)
+    temp_tex = None
+    if diffuse_img is not None:
+        from ..scene_graph.sg_materials import ParsedTexture
+        temp_tex = ParsedTexture()
+        temp_tex.image = diffuse_img
+    blend_decision = _decide_blend_mode(parsed_material, temp_tex,
+                                         extra_state, profile=None)
+
+    # --- Create material ---
+    mat = bpy.data.materials.new(name=name)
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    # Output node
+    output_node = nodes.new(type='ShaderNodeOutputMaterial')
+    output_node.location = (600, 0)
+
+    # Principled BSDF
+    bsdf = nodes.new(type='ShaderNodeBsdfPrincipled')
+    bsdf.location = (200, 0)
+    links.new(bsdf.outputs['BSDF'], output_node.inputs['Surface'])
+
+    # Material color properties
+    diffuse = parsed_material.diffuse
+    bsdf.inputs['Base Color'].default_value = (
+        diffuse[0], diffuse[1], diffuse[2], 1.0)
+
+    # Low specular by default for IGZ (shader-driven, not material-driven)
+    bsdf.inputs['Specular IOR Level'].default_value = 0.5
+    bsdf.inputs['Roughness'].default_value = 0.5
+
+    # Alpha from material
+    alpha = parsed_material.alpha
+    if alpha < 0.999 and blend_decision != 'OPAQUE':
+        bsdf.inputs['Alpha'].default_value = alpha
+
+    # --- UV Map node (shared by all textures) ---
+    uv_node = nodes.new(type='ShaderNodeUVMap')
+    uv_node.location = (-900, 0)
+    uv_node.uv_map = "UVMap"
+
+    # --- Wire each texture role ---
+    x_offset = -600
+    y_positions = {
+        TEX_ROLE_DIFFUSE: 300,
+        TEX_ROLE_NORMAL: 0,
+        TEX_ROLE_SPECULAR: -300,
+        TEX_ROLE_EMISSIVE: -600,
+        TEX_ROLE_METALLIC: -900,
+    }
+
+    for role, y_pos in y_positions.items():
+        parsed_image = texture_role_map.get(role)
+        if parsed_image is None:
+            continue
+
+        bl_image = _get_or_create_blender_image(parsed_image)
+        if bl_image is None:
+            continue
+
+        # Create Image Texture node
+        tex_node = nodes.new(type='ShaderNodeTexImage')
+        tex_node.location = (x_offset, y_pos)
+        tex_node.image = bl_image
+        tex_node.label = role.capitalize()
+
+        # Connect UV
+        links.new(uv_node.outputs['UV'], tex_node.inputs['Vector'])
+
+        if role == TEX_ROLE_DIFFUSE:
+            # sRGB color space (default for images in Blender)
+            bl_image.colorspace_settings.name = 'sRGB'
+            links.new(tex_node.outputs['Color'],
+                      bsdf.inputs['Base Color'])
+            # Alpha from diffuse texture if blending
+            if blend_decision in ('CLIP', 'BLEND'):
+                links.new(tex_node.outputs['Alpha'],
+                          bsdf.inputs['Alpha'])
+
+        elif role == TEX_ROLE_NORMAL:
+            # Normal maps must be Non-Color
+            bl_image.colorspace_settings.name = 'Non-Color'
+            # Insert Normal Map node
+            nmap_node = nodes.new(type='ShaderNodeNormalMap')
+            nmap_node.location = (x_offset + 300, y_pos)
+            nmap_node.space = 'TANGENT'
+            nmap_node.uv_map = "UVMap"
+            links.new(tex_node.outputs['Color'],
+                      nmap_node.inputs['Color'])
+            links.new(nmap_node.outputs['Normal'],
+                      bsdf.inputs['Normal'])
+
+        elif role == TEX_ROLE_SPECULAR:
+            # Specular is Non-Color data
+            bl_image.colorspace_settings.name = 'Non-Color'
+            links.new(tex_node.outputs['Color'],
+                      bsdf.inputs['Specular IOR Level'])
+
+        elif role == TEX_ROLE_EMISSIVE:
+            bl_image.colorspace_settings.name = 'sRGB'
+            links.new(tex_node.outputs['Color'],
+                      bsdf.inputs['Emission Color'])
+            bsdf.inputs['Emission Strength'].default_value = 1.0
+
+        elif role == TEX_ROLE_METALLIC:
+            bl_image.colorspace_settings.name = 'Non-Color'
+            links.new(tex_node.outputs['Color'],
+                      bsdf.inputs['Metallic'])
+
+    # --- Store custom properties ---
+    mat["igb_diffuse"] = list(parsed_material.diffuse)
+    mat["igb_ambient"] = list(parsed_material.ambient)
+    mat["igb_specular"] = list(parsed_material.specular)
+    mat["igb_emission"] = list(parsed_material.emission)
+    mat["igb_shininess"] = parsed_material.shininess
+    mat["igb_flags"] = parsed_material.flags
+    mat["igz_format"] = True  # Mark as IGZ-sourced
+
+    # Store texture roles for debugging/export
+    for role, img in texture_role_map.items():
+        if img.name:
+            mat[f"igz_tex_{role}"] = img.name
+
+    # --- Apply extra state (blend, alpha, color, cull) ---
+    _apply_extra_state(mat, bsdf, extra_state, nodes, links, blend_decision)
+    _apply_blend_decision(mat, blend_decision, extra_state)
+
+    _material_cache[cache_key] = mat
+    return mat
+
+
 def _add_texture_to_material(mat, bsdf, parsed_texture, links, nodes,
                              blend_decision='OPAQUE', profile=None):
     """Add a texture to a material's node tree.

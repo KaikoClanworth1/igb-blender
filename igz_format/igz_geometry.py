@@ -497,8 +497,11 @@ def _walk_node(reader, allocator, obj, transform, material_state, results, ances
 
     ancestors.add(obj.global_offset)
 
-    # Copy material state so children can override without affecting siblings
+    # Copy material state so children can override without affecting siblings.
+    # Deep-copy texbind_list to prevent sibling contamination.
     state = dict(material_state)
+    if 'texbind_list' in state:
+        state['texbind_list'] = list(state['texbind_list'])
 
     # Collect attributes if this is an igAttrSet or igGeometry
     attrs = _get_attr_list(reader, obj)
@@ -510,6 +513,11 @@ def _walk_node(reader, allocator, obj, transform, material_state, results, ances
         elif attr.type_name in ('igMuaMaterialAttr', 'igMaterialAttr'):
             state['material_obj'] = attr
         elif attr.type_name in ('igTextureBindAttr2', 'igTextureBindAttr'):
+            # Accumulate ALL texture binds (multi-texturing)
+            if 'texbind_list' not in state:
+                state['texbind_list'] = []
+            state['texbind_list'].append(attr)
+            # Keep single texbind_obj for backward compat (last one wins)
             state['texbind_obj'] = attr
         elif attr.type_name == 'igColorAttr':
             state['color_obj'] = attr
@@ -517,8 +525,20 @@ def _walk_node(reader, allocator, obj, transform, material_state, results, ances
             state['blend_func_obj'] = attr
         elif attr.type_name in ('igBlendStateAttr',):
             state['blend_state_obj'] = attr
+        elif attr.type_name in ('igAlphaStateAttr',):
+            state['alpha_state_obj'] = attr
+        elif attr.type_name in ('igAlphaFunctionAttr',):
+            state['alpha_func_obj'] = attr
         elif attr.type_name in ('igTextureStateAttr',):
             state['tex_state_obj'] = attr
+        elif attr.type_name in ('igShaderParametersAttr',):
+            state['shader_params_obj'] = attr
+        elif attr.type_name in ('igCullFaceAttr',):
+            state['cull_face_obj'] = attr
+        elif attr.type_name in ('igGlobalColorStateAttr',):
+            state['global_color_state_obj'] = attr
+        elif attr.type_name in ('igMaterialModeAttr',):
+            state['material_mode_obj'] = attr
 
     # If this node has geometry, extract it
     if geom_attr is not None:

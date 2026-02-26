@@ -13,6 +13,10 @@ Material/texture hierarchy in the scene graph:
   igTextureBindAttr2 -> igTextureAttr2 (via ROFS at +0x18)
   igSceneTexturesInfo -> igStringRefList (parallel array with igTextureAttr2List)
 
+Multi-texturing: scene graph nodes accumulate multiple igTextureBindAttr2 attrs.
+Texture roles are determined by filename suffix:
+  _d = diffuse/albedo, _n = normal map, _s = specular, _e = emissive, _m = metallic
+
 Format hashes (from EXNM in texture IGZ files):
   0x883C45B2 = DXT1 (BC1)
   0x05ECD805 = DXT5 (BC3)
@@ -21,6 +25,7 @@ Format hashes (from EXNM in texture IGZ files):
 
 import struct
 import os
+import re
 
 from ..scene_graph.sg_materials import (
     ParsedMaterial, ParsedTexture, ParsedImage,
@@ -34,6 +39,61 @@ _FORMAT_HASHES = {
     0x05ECD805: PFMT_RGBA_DXT5,
     0xB718471E: PFMT_RGBA_DXT5,
 }
+
+# --- Texture role classification ---
+
+# Texture role constants
+TEX_ROLE_DIFFUSE = 'diffuse'
+TEX_ROLE_NORMAL = 'normal'
+TEX_ROLE_SPECULAR = 'specular'
+TEX_ROLE_EMISSIVE = 'emissive'
+TEX_ROLE_METALLIC = 'metallic'
+TEX_ROLE_CUBEMAP = 'cubemap'
+TEX_ROLE_UNKNOWN = 'unknown'
+
+# Suffix pattern: match _d, _n, _s, _e, _m before .igz extension
+_SUFFIX_RE = re.compile(r'_([dnsem])\.igz$', re.IGNORECASE)
+_CUBEMAP_RE = re.compile(r'_cubemap\.igz$', re.IGNORECASE)
+
+_SUFFIX_TO_ROLE = {
+    'd': TEX_ROLE_DIFFUSE,
+    'n': TEX_ROLE_NORMAL,
+    's': TEX_ROLE_SPECULAR,
+    'e': TEX_ROLE_EMISSIVE,
+    'm': TEX_ROLE_METALLIC,
+}
+
+
+def classify_texture_role(tex_path):
+    """Classify a texture's role from its filename suffix.
+
+    MUA2 texture naming convention:
+        somename_d.igz -> diffuse
+        somename_n.igz -> normal map
+        somename_s.igz -> specular
+        somename_e.igz -> emissive
+        somename_m.igz -> metallic/mask
+
+    Args:
+        tex_path: texture file path (relative or absolute)
+
+    Returns:
+        One of TEX_ROLE_* constants
+    """
+    if tex_path is None:
+        return TEX_ROLE_UNKNOWN
+
+    basename = os.path.basename(tex_path).lower()
+
+    if _CUBEMAP_RE.search(basename):
+        return TEX_ROLE_CUBEMAP
+
+    m = _SUFFIX_RE.search(basename)
+    if m:
+        return _SUFFIX_TO_ROLE.get(m.group(1).lower(), TEX_ROLE_UNKNOWN)
+
+    # No recognized suffix — assume diffuse (most common)
+    return TEX_ROLE_DIFFUSE
 
 
 def extract_igz_material(reader, mat_obj):
@@ -186,31 +246,33 @@ def build_texture_path_map(reader, game_data_dir=None):
 
 
 def resolve_texture_bind(reader, texbind_obj, tex_attr_to_path):
-    """Given an igTextureBindAttr2, find the linked texture path.
+    """Given an igTextureBindAttr2, find the linked texture path and sampler slot.
 
     igTextureBindAttr2 (40B):
+        +0x10: sampler_slot (u16) — actual hardware sampler register (0-5)
         +0x18: ROFS -> igTextureAttr2
-        +0x20: slot/unit ID (u32, 0=diffuse typically)
+        +0x20: unit_id (u32) — always 0xFFFFFFFF in MUA2 (unused)
 
     Returns:
-        (texture_file_path, unit_id) or (None, 0)
+        (texture_file_path, sampler_slot) or (None, 0)
     """
     # Get linked igTextureAttr2
     tex_attr = texbind_obj.get_ref(0x18)
     if tex_attr is None:
         return None, 0
 
-    unit_id = 0
+    # Read actual sampler slot from +0x10 (u16)
+    sampler_slot = 0
     try:
-        unit_id = texbind_obj.read_u32(0x20)
-        if unit_id == 0xFFFFFFFF:
-            unit_id = 0
+        sampler_slot = texbind_obj.read_u16(0x10)
+        if sampler_slot == 0xFFFF:
+            sampler_slot = 0
     except (struct.error, IndexError):
         pass
 
     # Look up path
     path = tex_attr_to_path.get(tex_attr.global_offset)
-    return path, unit_id
+    return path, sampler_slot
 
 
 def load_external_texture(tex_path, game_data_dir=None, filepath=None):
@@ -455,3 +517,87 @@ def _find_texture_file(tex_path, game_data_dir=None, geometry_filepath=None):
         search_dir = parent
 
     return None
+
+
+# ===================================================================
+# IGZ-specific state attribute extraction (v6 binary layout)
+# ===================================================================
+
+def extract_igz_blend_state(blend_state_obj):
+    """Extract blend state from an IGZ igBlendStateAttr (32 bytes).
+
+    +0x18: enabled (u32) — 1=blend ON, 0=OFF
+
+    Returns:
+        dict with 'enabled' key
+    """
+    try:
+        enabled = blend_state_obj.read_u32(0x18)
+        return {'enabled': bool(enabled)}
+    except (struct.error, IndexError):
+        return {'enabled': False}
+
+
+def extract_igz_blend_function(blend_func_obj):
+    """Extract blend function from an IGZ igBlendFunctionAttr (64 bytes).
+
+    +0x18: src_blend (u32) — e.g. 4 = SRC_ALPHA
+    +0x1C: dst_blend (u32) — e.g. 5 = ONE_MINUS_SRC_ALPHA
+
+    Returns:
+        dict with 'src', 'dst' keys
+    """
+    try:
+        src = blend_func_obj.read_u32(0x18)
+        dst = blend_func_obj.read_u32(0x1C)
+        return {'src': src, 'dst': dst}
+    except (struct.error, IndexError):
+        return {'src': 4, 'dst': 5}
+
+
+def extract_igz_alpha_state(alpha_state_obj):
+    """Extract alpha test state from an IGZ igAlphaStateAttr (32 bytes).
+
+    +0x18: enabled (u32) — 1=alpha test ON, 0=OFF
+
+    Returns:
+        dict with 'enabled' key
+    """
+    try:
+        enabled = alpha_state_obj.read_u32(0x18)
+        return {'enabled': bool(enabled)}
+    except (struct.error, IndexError):
+        return {'enabled': False}
+
+
+def resolve_all_texture_binds(reader, texbind_list, tex_attr_to_path):
+    """Resolve ALL texture binds for a geometry node into a role-classified dict.
+
+    Iterates through the accumulated texbind_list from the scene graph walker,
+    resolves each to a texture file path, classifies by filename suffix, and
+    returns a dict mapping role -> (path, texbind_obj).
+
+    If multiple textures map to the same role, the last one wins (scene graph
+    child overrides parent, matching the inheritance order).
+
+    Args:
+        reader: IGZReader instance
+        texbind_list: list of igTextureBindAttr2 IGZObject instances
+        tex_attr_to_path: dict from build_texture_path_map()
+
+    Returns:
+        dict mapping TEX_ROLE_* -> (texture_file_path, texbind_obj)
+    """
+    role_map = {}
+    if not texbind_list:
+        return role_map
+
+    for texbind_obj in texbind_list:
+        path, sampler_slot = resolve_texture_bind(reader, texbind_obj,
+                                                   tex_attr_to_path)
+        if path is None:
+            continue
+        role = classify_texture_role(path)
+        role_map[role] = (path, texbind_obj)
+
+    return role_map

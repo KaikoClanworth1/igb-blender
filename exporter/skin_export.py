@@ -52,9 +52,14 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         return False
 
     # ---- 2. Apply export scale to skeleton data ----
-    scale_factor = armature_obj.get("igb_export_scale", 1.0)
-    if isinstance(scale_factor, (list, tuple)):
-        scale_factor = 1.0
+    # Combine igb_export_scale with armature's actual object scale
+    custom_scale = armature_obj.get("igb_export_scale", 1.0)
+    if isinstance(custom_scale, (list, tuple)):
+        custom_scale = 1.0
+    from mathutils import Vector
+    obj_scale = armature_obj.matrix_world.to_scale()
+    obj_scale_uniform = (obj_scale.x + obj_scale.y + obj_scale.z) / 3.0
+    scale_factor = custom_scale * obj_scale_uniform
     _apply_scale_to_skeleton(skeleton_data, scale_factor)
 
     # NOTE: No axis rotation is applied to skeleton data here.
@@ -194,10 +199,16 @@ def _transform_mesh_for_export(mesh_export, armature_obj):
         arm_rot_q = combined_q
         has_rotation = True
 
-    # Get export scale factor
-    scale_factor = armature_obj.get("igb_export_scale", 1.0)
-    if isinstance(scale_factor, (list, tuple)):
-        scale_factor = 1.0
+    # Get export scale factor: combine igb_export_scale custom property
+    # with the armature's actual object scale (uniform axis average).
+    # This way, if the user scales the armature in Object Mode, the
+    # exported mesh reflects that scale.
+    custom_scale = armature_obj.get("igb_export_scale", 1.0)
+    if isinstance(custom_scale, (list, tuple)):
+        custom_scale = 1.0
+    obj_scale = armature_obj.matrix_world.to_scale()
+    obj_scale_uniform = (obj_scale.x + obj_scale.y + obj_scale.z) / 3.0
+    scale_factor = custom_scale * obj_scale_uniform
     has_scale = abs(scale_factor - 1.0) > 0.001
 
     if not has_rotation and not has_scale:
