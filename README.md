@@ -4,7 +4,7 @@ A Blender 4.4 addon for importing and exporting Alchemy Engine IGB/IGZ files use
 
 Includes a full map maker toolkit, actor/skeleton pipeline, and rig converter for bringing custom characters into the game.
 
-Created by **Kaiko**.
+Created by **Kaiko** with the aid of **Claude**.
 
 ---
 
