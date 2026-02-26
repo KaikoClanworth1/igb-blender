@@ -33,6 +33,7 @@ The standalone Conversation Editor and Menu Editor windows require PySide6. You 
 
 | Game | Platform | Import | Export |
 |------|----------|--------|--------|
+| X-Men Legends I  | PS2, Xbox | IGB | IGB |
 | X-Men Legends II | PC | IGB | IGB |
 | X-Men Legends II | PS2, PSP, Xbox | IGB | - |
 | Marvel Ultimate Alliance | PC | IGB | IGB |
