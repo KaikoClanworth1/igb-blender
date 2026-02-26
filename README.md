@@ -223,6 +223,9 @@ Browse game model assets from the `models/` directory.
 - **Asset Library** - Batch import an entire category for use as Blender assets.
 
 #### MM Conversations
+
+> **Beta:** The external Conversation Editor GUI and Menu Editor are in beta.
+
 Build NPC dialogue trees that become PKGB conversation files.
 
 - **Conversation List** - Create, remove, and select conversations.
@@ -256,7 +259,7 @@ Compile all your map data into game-ready files.
 - **Compile XMLB** - Converts XML to the game's binary XMLB format.
 - **Build All** - Runs the full pipeline (XML generation + XMLB compilation + IGB export) in one click.
 - **Collision Preview** - Visualize what the exported collision looks like.
-- **Menu Editor** - Opens an external window for editing the game's menu files.
+- **Menu Editor** *(Beta)* - Opens an external window for editing the game's menu files.
 
 ---
 
