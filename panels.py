@@ -17,6 +17,7 @@ Quick-access batch tools for modifying IGB material properties:
   blend state, and color tint — applied to all scene materials at once.
 """
 
+import os
 import bpy
 from bpy.types import Operator, Panel
 from bpy.props import (BoolProperty, FloatProperty, FloatVectorProperty,
@@ -2018,6 +2019,124 @@ class IGB_PT_Extras(Panel):
 # Credits sub-panel (collapsible)
 # ===========================================================================
 
+class IGB_OT_update_addon(Operator):
+    """Download the latest addon version from GitHub and install it"""
+    bl_idname = "igb.update_addon"
+    bl_label = "Update Addon"
+
+    _thread = None
+    _timer = None
+    _result = None  # (success: bool, message: str)
+
+    def execute(self, context):
+        # Launch download in background thread
+        import threading
+        IGB_OT_update_addon._result = None
+        addon_dir = os.path.dirname(os.path.abspath(__file__))
+        IGB_OT_update_addon._thread = threading.Thread(
+            target=self._download_and_install, args=(addon_dir,))
+        IGB_OT_update_addon._thread.start()
+
+        # Start modal timer to check completion
+        wm = context.window_manager
+        IGB_OT_update_addon._timer = wm.event_timer_add(0.5, window=context.window)
+        wm.modal_handler_add(self)
+        self.report({'INFO'}, "Downloading update from GitHub...")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+
+        if IGB_OT_update_addon._thread is not None and IGB_OT_update_addon._thread.is_alive():
+            return {'PASS_THROUGH'}
+
+        # Thread finished
+        wm = context.window_manager
+        if IGB_OT_update_addon._timer is not None:
+            wm.event_timer_remove(IGB_OT_update_addon._timer)
+            IGB_OT_update_addon._timer = None
+
+        result = IGB_OT_update_addon._result
+        if result is None:
+            self.report({'ERROR'}, "Update failed: no result from download thread")
+            return {'CANCELLED'}
+
+        success, message = result
+        self.report({'INFO'} if success else {'ERROR'}, message)
+        return {'FINISHED'} if success else {'CANCELLED'}
+
+    @staticmethod
+    def _download_and_install(addon_dir):
+        import urllib.request
+        import zipfile
+        import tempfile
+        import shutil
+
+        zip_url = "https://github.com/KaikoClanworth1/igb-blender/archive/refs/heads/master.zip"
+
+        try:
+            # Download zip to temp file
+            tmp_zip = os.path.join(tempfile.gettempdir(), "igb_blender_update.zip")
+            urllib.request.urlretrieve(zip_url, tmp_zip)
+
+            # Extract to temp dir
+            tmp_extract = os.path.join(tempfile.gettempdir(), "igb_blender_extract")
+            if os.path.exists(tmp_extract):
+                shutil.rmtree(tmp_extract)
+
+            with zipfile.ZipFile(tmp_zip, 'r') as zf:
+                zf.extractall(tmp_extract)
+
+            # Find the root folder inside the zip (e.g., igb-blender-master/)
+            extracted_items = os.listdir(tmp_extract)
+            if len(extracted_items) == 1 and os.path.isdir(
+                    os.path.join(tmp_extract, extracted_items[0])):
+                src_root = os.path.join(tmp_extract, extracted_items[0])
+            else:
+                src_root = tmp_extract
+
+            # Copy all files from extracted zip over the addon directory
+            for dirpath, dirnames, filenames in os.walk(src_root):
+                # Skip .git directories
+                dirnames[:] = [d for d in dirnames
+                               if d != '.git' and d != '__pycache__']
+
+                rel_dir = os.path.relpath(dirpath, src_root)
+                dst_dir = os.path.join(addon_dir, rel_dir) if rel_dir != '.' else addon_dir
+
+                os.makedirs(dst_dir, exist_ok=True)
+
+                for fname in filenames:
+                    src_file = os.path.join(dirpath, fname)
+                    dst_file = os.path.join(dst_dir, fname)
+                    shutil.copy2(src_file, dst_file)
+
+            # Clear all __pycache__ directories
+            for dirpath, dirnames, _ in os.walk(addon_dir):
+                for d in dirnames:
+                    if d == '__pycache__':
+                        shutil.rmtree(os.path.join(dirpath, d),
+                                      ignore_errors=True)
+
+            # Cleanup temp files
+            try:
+                os.remove(tmp_zip)
+                shutil.rmtree(tmp_extract, ignore_errors=True)
+            except OSError:
+                pass
+
+            IGB_OT_update_addon._result = (
+                True,
+                "Update complete! Please restart Blender to apply changes."
+            )
+
+        except Exception as e:
+            IGB_OT_update_addon._result = (
+                False, f"Update failed: {e}"
+            )
+
+
 class IGB_PT_Credits(Panel):
     """Credits and references"""
     bl_label = "Credits & References"
@@ -2030,8 +2149,15 @@ class IGB_PT_Credits(Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="IGB Format Addon by Kaiko")
+
+        from . import bl_info
+        version = bl_info.get("version", (0, 0, 0))
+        layout.label(text=f"IGB Format Addon v{version[0]}.{version[1]}.{version[2]} by Kaiko")
         layout.separator()
+
+        layout.operator("igb.update_addon", icon='URL')
+        layout.separator()
+
         layout.label(text="Reference projects:")
         col = layout.column(align=True)
         col.scale_y = 0.8
@@ -2322,6 +2448,7 @@ classes = (
     IGB_OT_set_all_shininess,
     IGB_OT_set_all_shader,
     IGB_OT_merge_duplicate_materials,
+    IGB_OT_update_addon,
     # IGB Tab panels (parent before children)
     IGB_PT_Main,
     IGB_PT_ImportExport,
