@@ -131,8 +131,6 @@ def import_actor(context, anim_filepath, skin_filepaths=None,
             )
             if mesh_objs:
                 for mobj in mesh_objs:
-                    # Store template path for skin export
-                    mobj["igb_skin_template"] = skin_path
                     skin_objects.append((variant_name, mobj))
 
         # Hide non-first skin variants (e.g., 1802 when 1801 is primary).
@@ -545,21 +543,14 @@ def _count_weighted_vertices(mesh_obj):
 
 
 def collect_skin_segments(props, skins_index):
-    """Collect all mesh objects belonging to a skin entry.
+    """Collect all mesh objects belonging to a skin.
 
-    Always includes every mesh registered in the skins list — the user
-    explicitly added them and they are all part of the current export.
-
-    Additionally, for imported skins with an ``igb_skin_template`` path,
-    checks armature children not in the skins list as a safety net
-    (handles sibling meshes that weren't explicitly added to the list).
-
-    This is the single source of truth for which meshes constitute a skin,
-    used by the Segments panel, segment toggle, and skin export operator.
+    Returns every mesh registered in the skins list.  The skins list is the
+    user's explicit declaration of what to export — no template matching.
 
     Args:
         props: ACTOR_SceneProperties instance (``context.scene.igb_actor``).
-        skins_index: Index into ``props.skins``.
+        skins_index: Index into ``props.skins`` (used to validate the call).
 
     Returns:
         List of (mesh_obj, is_outline) tuples, or empty list.
@@ -569,37 +560,22 @@ def collect_skin_segments(props, skins_index):
     if skins_index >= len(props.skins):
         return []
 
+    # Verify the selected entry is valid
     item = props.skins[skins_index]
     mesh_obj = bpy.data.objects.get(item.object_name)
     if mesh_obj is None or mesh_obj.type != 'MESH':
         return []
 
-    result = [(mesh_obj, bool(mesh_obj.get("igb_is_outline", False)))]
-    seen = {mesh_obj.name}
+    result = []
+    seen = set()
 
-    # Include ALL meshes in the skins list — they were explicitly added
-    # by the user (via import, Add Mesh as Skin, Add Segment, etc.).
-    # No template matching needed: if it's in the list, it belongs.
     for skin_item in props.skins:
         if skin_item.object_name in seen:
             continue
-        sibling = bpy.data.objects.get(skin_item.object_name)
-        if sibling and sibling.type == 'MESH':
-            result.append((sibling, bool(sibling.get("igb_is_outline", False))))
-            seen.add(sibling.name)
-
-    # Safety net: for imported skins, also check armature children not in
-    # the skins list (e.g., outline meshes that weren't explicitly added).
-    source_file = mesh_obj.get("igb_skin_template", "")
-    if source_file:
-        armature_obj = bpy.data.objects.get(props.active_armature)
-        if armature_obj:
-            for child in armature_obj.children:
-                if child.type != 'MESH' or child.name in seen:
-                    continue
-                if child.get("igb_skin_template", "") == source_file:
-                    result.append((child, bool(child.get("igb_is_outline", False))))
-                    seen.add(child.name)
+        obj = bpy.data.objects.get(skin_item.object_name)
+        if obj and obj.type == 'MESH':
+            result.append((obj, bool(obj.get("igb_is_outline", False))))
+            seen.add(skin_item.object_name)
 
     return result
 

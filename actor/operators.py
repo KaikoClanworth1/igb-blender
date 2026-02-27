@@ -494,8 +494,6 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             source_path = ""
             if item.filepath and os.path.exists(item.filepath):
                 source_path = item.filepath
-            elif mesh_obj:
-                source_path = mesh_obj.get("igb_skin_template", "")
             if source_path and os.path.exists(source_path):
                 dirname = os.path.dirname(source_path)
                 basename = os.path.splitext(os.path.basename(source_path))[0]
@@ -1444,9 +1442,6 @@ def _populate_import_results(context, props, armature_obj, skin_objects, actions
             item.name = variant_name
         item.object_name = mesh_obj.name
         item.is_visible = not mesh_obj.hide_viewport
-        template_path = mesh_obj.get("igb_skin_template", "")
-        if template_path:
-            item.filepath = template_path
 
     # Populate animations list
     props.animations.clear()
@@ -1627,11 +1622,6 @@ class ACTOR_OT_add_segment(Operator):
             self.report({'ERROR'}, "No active armature")
             return {'CANCELLED'}
 
-        # Get the active skin's template path so siblings share it
-        active_skin = props.skins[props.skins_index]
-        active_mesh = bpy.data.objects.get(active_skin.object_name)
-        template = active_mesh.get("igb_skin_template", "") if active_mesh else ""
-
         seg_flags = 0 if self.segment_visible else 2
 
         existing_names = {item.object_name for item in props.skins}
@@ -1656,10 +1646,6 @@ class ACTOR_OT_add_segment(Operator):
             if not has_armature_mod:
                 mod = obj.modifiers.new(name="Armature", type='ARMATURE')
                 mod.object = armature_obj
-
-            # Set template to match the active skin so they group together
-            if template:
-                obj["igb_skin_template"] = template
 
             # Auto-detect outline from name
             is_outline = "_outline" in obj.name.lower()
@@ -1687,7 +1673,6 @@ class ACTOR_OT_add_segment(Operator):
             item = props.skins.add()
             item.name = f"{obj.name} (outline)" if is_outline else obj.name
             item.object_name = obj.name
-            item.filepath = template
             item.is_visible = not obj.hide_viewport
             added += 1
 
