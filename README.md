@@ -159,6 +159,18 @@ Manages the skin mesh variants attached to an actor.
 - **Import / Export Skin** - Load or save individual skin IGB files.
 - **Add / Remove** - Attach a Blender mesh as a new skin or remove one.
 
+#### Segments
+
+Manages toggleable sub-parts on actor skins. Some characters have pieces that can be shown or hidden per skin — for example, Bishop has drawn guns (in hands) and holstered guns (on hips) controlled by segments.
+
+- **Segment Groups** - Segments are grouped by name. Each group shows its main mesh and outline mesh together, with vertex counts and blend weight status.
+- **Visibility Toggle** (eye icon) - Click to show/hide a segment. This sets the igSegment `_nodeFlags` field: `0` = visible, `2` = hidden. The game reads these flags to decide what to render for each skin.
+- **Body Group** - Meshes without a segment name are grouped under "Body". These are always visible and cannot be toggled.
+- **Round-Trip** - Segment names, flags, and structure are fully preserved through import and export. Exported files use `igSegment → igGroup` wrapping with the correct names and visibility flags.
+
+**How segments work in-game:**
+Each skin file (e.g. `1801.igb`, `1802.igb`) can have different segment visibility. For example, one Bishop skin might show drawn guns with holstered guns hidden, while another shows only holstered guns. Toggle the segments in the panel before exporting to set which parts are visible for that skin.
+
 #### Animations
 
 > **Note:** Animation import and export are currently broken and under active development.
