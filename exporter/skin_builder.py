@@ -595,10 +595,10 @@ class SkinBuilder:
             ])
 
             # Build children and collect segment refs for the attr list.
-            # Vanilla igAttrSet has segments in BOTH _attrList AND _childList:
+            # Vanilla 1801.igb (Bishop) has segments in BOTH _attrList AND _childList:
             #   _attrList: [ColorAttr, MaterialAttr, TexBind, TexState, igGeometry, igSegment...]
             #   _childList: [igGeometry, igSegment...]
-            # The game uses the attr list to discover segments for toggling.
+            # Files without segments (0102.igb, 0103.igb) only have attrs in _attrList.
             main_child_refs = []
             main_scene_refs = []  # geometry + segment refs for attr list
             for gi, sub in main_geom_entries:
@@ -724,9 +724,10 @@ class SkinBuilder:
             ])
             # OverrideAttrSet children: body outline is direct, segment outlines
             # get igSegment → igGroup wrapping (vanilla structure).
-            # Segments go in BOTH child list AND attr list (same as main branch).
+            # NOTE: igOverrideAttrSet's _attrList should ONLY contain override
+            # attrs (AlphaFunction, AlphaState) — NOT scene graph nodes.
+            # Vanilla confirms this in 0102.igb, 0103.igb, 0104.igb.
             override_child_refs = []
-            override_scene_refs = []  # geometry + segment refs for attr list
             for gi, sub in outline_geom_entries:
                 seg_name = sub.get('segment_name', '')
                 seg_flags = sub.get('segment_flags', 0)
@@ -764,11 +765,9 @@ class SkinBuilder:
                         (7, seg_children, 'ObjectRef', 4),
                     ])
                     override_child_refs.append(seg_idx)
-                    override_scene_refs.append(seg_idx)
                 else:
                     # Body outline: direct child of OverrideAttrSet (no segment wrapper)
                     override_child_refs.append(gi)
-                    override_scene_refs.append(gi)
 
             override_child_data = struct.pack(
                 "<" + "i" * len(override_child_refs), *override_child_refs)
@@ -779,9 +778,8 @@ class SkinBuilder:
                 (4, override_child_mb, 'MemoryRef', 4),
             ])
 
-            # Attr list: alpha attrs + body outline geometry + outline segments
+            # Attr list: ONLY override attrs (vanilla: AlphaFunction + AlphaState)
             override_attrs = [alpha_func_idx, alpha_state_idx]
-            override_attrs.extend(override_scene_refs)
 
             override_attr_data = struct.pack("<" + "i" * len(override_attrs), *override_attrs)
             override_attr_mb = self._add_mem(MO_OBJECT, override_attr_data)
