@@ -449,35 +449,14 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
                         "skeleton data for from-scratch export.")
             return {'CANCELLED'}
 
-        # Collect all mesh objects for this skin (main + outline)
-        # Identify siblings by matching the source skin file path
-        source_file = mesh_obj.get("igb_skin_template", "")
-        mesh_objs = [(mesh_obj, bool(mesh_obj.get("igb_is_outline", False)))]
-
-        # Find outline/sibling meshes from the skins list
-        for skin_item in props.skins:
-            if skin_item.object_name == item.object_name:
-                continue
-            sibling = bpy.data.objects.get(skin_item.object_name)
-            if sibling is None or sibling.type != 'MESH':
-                continue
-            # Check if it shares the same source file
-            sibling_source = sibling.get("igb_skin_template", "")
-            if source_file and sibling_source == source_file:
-                is_outline = bool(sibling.get("igb_is_outline", False))
-                mesh_objs.append((sibling, is_outline))
-
-        # Also search child meshes of the armature not in skins list
-        for child in armature_obj.children:
-            if child.type != 'MESH':
-                continue
-            # Skip if already collected
-            if any(m.name == child.name for m, _ in mesh_objs):
-                continue
-            child_source = child.get("igb_skin_template", "")
-            if source_file and child_source == source_file:
-                is_outline = bool(child.get("igb_is_outline", False))
-                mesh_objs.append((child, is_outline))
+        # Collect all mesh objects for this skin using collect_skin_segments
+        # This only uses meshes registered in the skins list (no armature
+        # children scan — export only what's explicitly in the panel).
+        from .actor_import import collect_skin_segments
+        segments = collect_skin_segments(props, props.skins_index)
+        mesh_objs = segments if segments else [
+            (mesh_obj, bool(mesh_obj.get("igb_is_outline", False)))
+        ]
 
         self.report({'INFO'},
                     f"Exporting {len(mesh_objs)} mesh part(s) "
@@ -1273,8 +1252,21 @@ class ACTOR_OT_select_skins(Operator):
 
 
 def _populate_import_results(context, props, armature_obj, skin_objects, actions):
-    """Populate the panel lists after a successful import."""
-    props.active_armature = armature_obj.name
+    """Populate the panel lists after a successful import.
+
+    Saves the previous armature's state before switching, then populates
+    the new armature's skins and animations from the import result.
+    """
+    from . import properties as actor_props
+
+    # Save the outgoing armature's state before we overwrite the lists
+    old_armature = props.active_armature
+    if old_armature and old_armature != armature_obj.name:
+        actor_props._save_armature_state(props, old_armature)
+
+    # Set the new armature (bypass update callback since we're populating directly)
+    props["active_armature"] = armature_obj.name
+    actor_props._prev_armature = armature_obj.name
     props.anim_file = armature_obj.get("igb_anim_file", "")
 
     # Populate skins list
@@ -1302,6 +1294,9 @@ def _populate_import_results(context, props, armature_obj, skin_objects, actions
         item.duration_ms = action.get("igb_duration_ms", 0.0)
         item.track_count = action.get("igb_track_count", 0)
         item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
+
+    # Save the newly populated state so switching away and back restores it
+    actor_props._save_armature_state(props, armature_obj.name)
 
 
 def _fix_nondeforming_bone_orientations(armature_obj):
@@ -1392,6 +1387,218 @@ def _ensure_igb_material_properties(mesh_obj):
         _set("igb_color_a", 1.0)
 
 
+class ACTOR_OT_refresh_segments(Operator):
+    """Recompute segment diagnostics (blend weight counts) for the active skin"""
+    bl_idname = "actor.refresh_segments"
+    bl_label = "Refresh Segment Info"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (props.active_armature and
+                len(props.skins) > 0 and
+                props.skins_index < len(props.skins))
+
+    def execute(self, context):
+        from .actor_import import _count_weighted_vertices, collect_skin_segments
+
+        props = context.scene.igb_actor
+        segments = collect_skin_segments(props, props.skins_index)
+
+        if not segments:
+            self.report({'WARNING'}, "No segments found for active skin")
+            return {'CANCELLED'}
+
+        count = 0
+        for seg_mesh, _ in segments:
+            seg_mesh["igb_weighted_vert_count"] = _count_weighted_vertices(seg_mesh)
+            count += 1
+
+        self.report({'INFO'}, f"Updated diagnostics for {count} segment(s)")
+        return {'FINISHED'}
+
+
+class ACTOR_OT_add_segment(Operator):
+    """Add the selected mesh as a segment to the active skin"""
+    bl_idname = "actor.add_segment"
+    bl_label = "Add Segment"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        if not props.active_armature:
+            return False
+        if not (len(props.skins) > 0 and props.skins_index < len(props.skins)):
+            return False
+        # Need a mesh selected
+        for obj in context.selected_objects:
+            if obj.type == 'MESH':
+                return True
+        return False
+
+    def execute(self, context):
+        props = context.scene.igb_actor
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if armature_obj is None:
+            self.report({'ERROR'}, "No active armature")
+            return {'CANCELLED'}
+
+        # Get the active skin's template path so siblings share it
+        active_skin = props.skins[props.skins_index]
+        active_mesh = bpy.data.objects.get(active_skin.object_name)
+        template = active_mesh.get("igb_skin_template", "") if active_mesh else ""
+
+        existing_names = {item.object_name for item in props.skins}
+        added = 0
+
+        for obj in context.selected_objects:
+            if obj.type != 'MESH':
+                continue
+            if obj.name in existing_names:
+                continue
+
+            # Parent to armature if not already
+            if obj.parent != armature_obj:
+                obj.parent = armature_obj
+                obj.parent_type = 'OBJECT'
+
+            # Add Armature modifier if not present
+            has_armature_mod = any(
+                m.type == 'ARMATURE' and m.object == armature_obj
+                for m in obj.modifiers
+            )
+            if not has_armature_mod:
+                mod = obj.modifiers.new(name="Armature", type='ARMATURE')
+                mod.object = armature_obj
+
+            # Set template to match the active skin so they group together
+            if template:
+                obj["igb_skin_template"] = template
+
+            # Auto-detect outline from name
+            is_outline = "_outline" in obj.name.lower()
+            obj["igb_is_outline"] = is_outline
+
+            item = props.skins.add()
+            item.name = f"{obj.name} (outline)" if is_outline else obj.name
+            item.object_name = obj.name
+            item.filepath = template
+            item.is_visible = not obj.hide_viewport
+            added += 1
+
+        if added > 0:
+            self.report({'INFO'}, f"Added {added} segment(s)")
+            return {'FINISHED'}
+        else:
+            self.report({'WARNING'}, "No new meshes to add as segments")
+            return {'CANCELLED'}
+
+
+class ACTOR_OT_remove_segment(Operator):
+    """Remove a segment from the skins list"""
+    bl_idname = "actor.remove_segment"
+    bl_label = "Remove Segment"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    segment_object_name: StringProperty(
+        name="Segment Object",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (len(props.skins) > 0 and
+                props.skins_index < len(props.skins))
+
+    def execute(self, context):
+        props = context.scene.igb_actor
+
+        if not self.segment_object_name:
+            self.report({'WARNING'}, "No segment specified")
+            return {'CANCELLED'}
+
+        # Find and remove the segment from skins list
+        for i, item in enumerate(props.skins):
+            if item.object_name == self.segment_object_name:
+                props.skins.remove(i)
+                # Adjust skins_index if needed
+                if props.skins_index >= len(props.skins) and len(props.skins) > 0:
+                    props.skins_index = len(props.skins) - 1
+                self.report({'INFO'},
+                            f"Removed segment '{self.segment_object_name}'")
+                return {'FINISHED'}
+
+        self.report({'WARNING'},
+                    f"Segment '{self.segment_object_name}' not found in skins list")
+        return {'CANCELLED'}
+
+
+class ACTOR_OT_toggle_segment(Operator):
+    """Toggle segment visibility (visible/hidden) for export"""
+    bl_idname = "actor.toggle_segment"
+    bl_label = "Toggle Segment"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    segment_name: StringProperty(
+        name="Segment Name",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (props.active_armature and
+                len(props.skins) > 0 and
+                props.skins_index < len(props.skins))
+
+    def execute(self, context):
+        from .actor_import import collect_skin_segments
+
+        props = context.scene.igb_actor
+        segments = collect_skin_segments(props, props.skins_index)
+
+        if not segments or not self.segment_name:
+            self.report({'WARNING'}, "No segment specified")
+            return {'CANCELLED'}
+
+        # Find all meshes matching this base segment name (main + outline pair)
+        # Main segments: igb_segment_name = "gun_left"
+        # Outline segments: igb_segment_name = "gun_left_outline"
+        matched = []
+        for seg_mesh, _is_outline in segments:
+            mesh_seg = seg_mesh.get("igb_segment_name", "")
+            # Strip _outline suffix for comparison
+            base_seg = mesh_seg
+            if base_seg.endswith("_outline"):
+                base_seg = base_seg[:-8]
+            if base_seg == self.segment_name:
+                matched.append(seg_mesh)
+
+        if not matched:
+            self.report({'WARNING'},
+                        f"No meshes found for segment '{self.segment_name}'")
+            return {'CANCELLED'}
+
+        # Toggle: if currently hidden (flags & 2), make visible, else hide
+        current_flags = matched[0].get("igb_segment_flags", 0)
+        new_hidden = not bool(current_flags & 2)
+        new_flags = 2 if new_hidden else 0
+
+        for mesh_obj in matched:
+            mesh_obj["igb_segment_flags"] = new_flags
+            mesh_obj.hide_viewport = new_hidden
+            mesh_obj.hide_render = new_hidden
+
+        state = "Hidden" if new_hidden else "Visible"
+        self.report({'INFO'},
+                    f"Segment '{self.segment_name}': {state} "
+                    f"({len(matched)} mesh(es))")
+        return {'FINISHED'}
+
+
 _classes = (
     ACTOR_OT_import_actor,
     ACTOR_OT_import_skin,
@@ -1410,6 +1617,10 @@ _classes = (
     ACTOR_OT_convert_rig,
     ACTOR_OT_add_mesh_as_skin,
     ACTOR_OT_remove_skin,
+    ACTOR_OT_refresh_segments,
+    ACTOR_OT_add_segment,
+    ACTOR_OT_remove_segment,
+    ACTOR_OT_toggle_segment,
 )
 
 

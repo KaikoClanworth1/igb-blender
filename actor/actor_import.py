@@ -135,9 +135,11 @@ def import_actor(context, anim_filepath, skin_filepaths=None,
                     mobj["igb_skin_template"] = skin_path
                     skin_objects.append((variant_name, mobj))
 
-        # Hide all but the first skin
-        for i, (vname, obj) in enumerate(skin_objects):
-            if i > 0:
+        # Hide non-first skin variants (e.g., 1802 when 1801 is primary).
+        # Within a variant, segment visibility is set by igSegment flags (above).
+        first_variant = skin_objects[0][0] if skin_objects else None
+        for vname, obj in skin_objects:
+            if vname != first_variant:
                 obj.hide_viewport = True
                 obj.hide_render = True
 
@@ -229,7 +231,12 @@ def _import_skin_file(context, filepath, skeleton, armature_obj,
         node_name = state.get('node_name', '')
         is_outline = state.get('is_outline', False)
         if is_outline:
-            part_name = f"{mesh_name}_outline"
+            # For multi-segment skins (e.g., Bishop with guns), use node_name
+            # to distinguish outlines: gun_left_outline vs 1801_outline
+            if node_name and len(collector.instances) > 2:
+                part_name = f"{mesh_name}_{node_name}"
+            else:
+                part_name = f"{mesh_name}_outline"
         elif node_name and len(collector.instances) > 1:
             part_name = f"{mesh_name}_{node_name}"
         elif len(collector.instances) > 1:
@@ -249,9 +256,13 @@ def _import_skin_file(context, filepath, skeleton, armature_obj,
         bms_indices = state.get('bms_indices')
         assign_vertex_groups(mesh_obj, geom, vgroup_skeleton, bms_indices)
 
-        # Apply transform if present
-        if transform:
-            _apply_transform(mesh_obj, transform)
+        # Cache blend weight diagnostic for Segments panel
+        mesh_obj["igb_weighted_vert_count"] = _count_weighted_vertices(mesh_obj)
+
+        # NOTE: igTransform in IGB skin scene graphs is metadata (pivot point),
+        # NOT a vertex offset.  Skin vertices are stored in armature/bind-pose
+        # space already.  Applying the transform would double-offset guns etc.
+        # So we leave mesh_obj.matrix_local as identity.
 
         # Parent to armature with Armature modifier
         parent_to_armature(mesh_obj, armature_obj)
@@ -264,6 +275,18 @@ def _import_skin_file(context, filepath, skeleton, armature_obj,
         # Store metadata for export
         mesh_obj["igb_is_outline"] = is_outline
         mesh_obj["igb_geom_part_index"] = i
+
+        # Store segment metadata (igSegment name and visibility flags)
+        segment_name = state.get('segment_name', '')
+        segment_flags = state.get('segment_flags', 0)
+        mesh_obj["igb_segment_name"] = segment_name
+        mesh_obj["igb_segment_flags"] = segment_flags
+
+        # Set Blender object visibility based on segment flags
+        # flag bit 1 (value 2) = hidden/inactive
+        if segment_flags & 2:
+            mesh_obj.hide_viewport = True
+            mesh_obj.hide_render = True
 
         # Import materials if requested
         if options.get('import_materials', True):
@@ -500,6 +523,79 @@ def _apply_transform(mesh_obj, transform):
     mesh_obj.matrix_world = m
 
 
+def _count_weighted_vertices(mesh_obj):
+    """Count vertices with at least one non-zero vertex group weight.
+
+    Used by the Segments panel to diagnose skinning issues.
+
+    Returns:
+        int: number of vertices that have at least one non-zero weight.
+    """
+    if not mesh_obj.vertex_groups:
+        return 0
+
+    mesh = mesh_obj.data
+    weighted = 0
+    for v in mesh.vertices:
+        for g in v.groups:
+            if g.weight > 0.0:
+                weighted += 1
+                break
+    return weighted
+
+
+def collect_skin_segments(props, skins_index):
+    """Collect all mesh objects belonging to a skin entry.
+
+    Finds the main mesh and all sibling meshes (outline, etc.) that share
+    the same ``igb_skin_template`` path.  This is the single source of truth
+    for which meshes constitute a skin, used by both the Segments panel and
+    the skin export operator.
+
+    Args:
+        props: ACTOR_SceneProperties instance (``context.scene.igb_actor``).
+        skins_index: Index into ``props.skins``.
+
+    Returns:
+        List of (mesh_obj, is_outline) tuples, or empty list.
+    """
+    import bpy
+
+    if skins_index >= len(props.skins):
+        return []
+
+    item = props.skins[skins_index]
+    mesh_obj = bpy.data.objects.get(item.object_name)
+    if mesh_obj is None or mesh_obj.type != 'MESH':
+        return []
+
+    source_file = mesh_obj.get("igb_skin_template", "")
+    result = [(mesh_obj, bool(mesh_obj.get("igb_is_outline", False)))]
+    seen = {mesh_obj.name}
+
+    # Find siblings in skins list with matching source file
+    for skin_item in props.skins:
+        if skin_item.object_name in seen:
+            continue
+        sibling = bpy.data.objects.get(skin_item.object_name)
+        if sibling and sibling.type == 'MESH':
+            if source_file and sibling.get("igb_skin_template", "") == source_file:
+                result.append((sibling, bool(sibling.get("igb_is_outline", False))))
+                seen.add(sibling.name)
+
+    # Find siblings among armature children not in skins list
+    armature_obj = bpy.data.objects.get(props.active_armature)
+    if armature_obj:
+        for child in armature_obj.children:
+            if child.type != 'MESH' or child.name in seen:
+                continue
+            if source_file and child.get("igb_skin_template", "") == source_file:
+                result.append((child, bool(child.get("igb_is_outline", False))))
+                seen.add(child.name)
+
+    return result
+
+
 class _SkinGeometryCollector:
     """Simple visitor to collect geometry from a skin scene graph."""
 
@@ -514,6 +610,9 @@ class _SkinGeometryCollector:
         self._texbind_obj = None
         self._bms_indices = None
 
+        # Segment context stack: [(name, flags), ...]
+        self._segment_stack = []
+
     def visit_material_attr(self, attr, parent):
         self._material_obj = attr
 
@@ -524,6 +623,15 @@ class _SkinGeometryCollector:
         """Track igBlendMatrixSelect for bone index remapping."""
         from .skinning import extract_bms_indices
         self._bms_indices = extract_bms_indices(self.reader, attr)
+
+    def enter_segment(self, name, flags):
+        """Called when entering an igSegment node."""
+        self._segment_stack.append((name, flags))
+
+    def exit_segment(self):
+        """Called when leaving an igSegment node."""
+        if self._segment_stack:
+            self._segment_stack.pop()
 
     def visit_geometry_attr(self, attr, transform, parent):
         # Get the parent node's name (igGeometry inherits igNamedObject, name at slot 2)
@@ -538,12 +646,20 @@ class _SkinGeometryCollector:
         # has black material with no texture (front-face culling outline technique)
         is_outline = "_outline" in node_name.lower()
 
+        # Current segment context (innermost igSegment ancestor)
+        segment_name = ''
+        segment_flags = 0
+        if self._segment_stack:
+            segment_name, segment_flags = self._segment_stack[-1]
+
         state = {
             'material_obj': self._material_obj,
             'texbind_obj': self._texbind_obj,
             'bms_indices': self._bms_indices,
             'node_name': node_name,
             'is_outline': is_outline,
+            'segment_name': segment_name,
+            'segment_flags': segment_flags,
         }
         idx = attr.index
         self.geom_attrs[idx] = attr

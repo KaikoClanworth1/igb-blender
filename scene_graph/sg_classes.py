@@ -190,6 +190,14 @@ class SceneGraph:
 
         local_transform = parent_transform
 
+        # Track igSegment enter (for segment name/flags propagation)
+        is_segment = obj.is_type(b"igSegment")
+        if is_segment and hasattr(visitor, 'enter_segment'):
+            visitor.enter_segment(
+                self._get_node_name(obj),
+                self._get_node_flags(obj),
+            )
+
         # Handle transform nodes
         if obj.is_type(b"igTransform"):
             matrix = self._get_transform_matrix(obj)
@@ -267,9 +275,29 @@ class SceneGraph:
         for child in children:
             self._visit_node(child, visitor, local_transform, ancestors)
 
+        # Track igSegment exit
+        if is_segment and hasattr(visitor, 'exit_segment'):
+            visitor.exit_segment()
+
         # Remove from ancestor path when backtracking
         # (allows this node to be visited again from a different parent)
         ancestors.discard(obj.index)
+
+    def _get_node_name(self, obj):
+        """Read name (slot 2 String) from any igNamedObject."""
+        for slot, val, fi in obj._raw_fields:
+            if slot == 2 and fi.short_name == b"String":
+                if isinstance(val, bytes):
+                    return val.decode('utf-8', errors='replace')
+                return val if isinstance(val, str) else ''
+        return ''
+
+    def _get_node_flags(self, obj):
+        """Read _nodeFlags (slot 5 Int) from any igNode. Default 0."""
+        for slot, val, fi in obj._raw_fields:
+            if slot == 5 and fi.short_name in (b"Int", b"UInt"):
+                return int(val)
+        return 0
 
     def _get_transform_matrix(self, transform_obj):
         """Extract 4x4 matrix from igTransform."""

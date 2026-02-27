@@ -386,7 +386,9 @@ class SkinBuilder:
               |     +-- igGeometry (main body)
               +-- igAttrSet "PromotedAttr" (outline mesh branch)
                     +-- igOverrideAttrSet (alpha attrs)
-                          +-- igGeometry (outline body)
+                          +-- igSegment (outline wrapper)
+                                +-- igGroup (outline wrapper)
+                                      +-- igGeometry (outline body)
 
         Args:
             submeshes: list of dicts, each with keys:
@@ -429,7 +431,7 @@ class SkinBuilder:
         shared_clut_data = None  # (palette_data, index_data, width, height) for CLUT mode
         shared_tex_name = ''
         shared_material = _default_material()
-        outline_material = _default_material()
+        outline_material = _default_outline_material()
 
         for sub in submeshes:
             if not sub.get('is_outline', False):
@@ -456,8 +458,8 @@ class SkinBuilder:
             )
 
         # ---- 4. Build per-submesh geometry objects ----
-        main_geom_indices = []
-        outline_geom_indices = []
+        main_geom_entries = []    # [(geom_idx, sub_dict), ...]
+        outline_geom_entries = []  # [(geom_idx, sub_dict), ...]
         all_bbox_mins = []
         all_bbox_maxs = []
 
@@ -532,11 +534,17 @@ class SkinBuilder:
                 (4, -1, 'MemoryRef', 4),
             ])
 
-            # Geometry name: use export name (vanilla uses "0601", "0601_outline" etc.)
+            # Geometry name: use segment name when available (vanilla: "gun_left", "1801")
+            # Outline segment names already include "_outline" (e.g., "gun_left_outline")
+            seg_name = sub.get('segment_name', '')
             if is_outline:
-                geom_name = (skin_name + '_outline') if skin_name else ''
+                if seg_name:
+                    # seg_name already ends in _outline (e.g., "gun_left_outline")
+                    geom_name = seg_name
+                else:
+                    geom_name = (skin_name + '_outline') if skin_name else ''
             else:
-                geom_name = skin_name
+                geom_name = seg_name if seg_name else skin_name
 
             geometry_idx = self._add_obj(MO_GEOMETRY, [
                 (2, geom_name, 'String', 4),
@@ -548,9 +556,9 @@ class SkinBuilder:
             ])
 
             if is_outline:
-                outline_geom_indices.append(geometry_idx)
+                outline_geom_entries.append((geometry_idx, sub))
             else:
-                main_geom_indices.append(geometry_idx)
+                main_geom_entries.append((geometry_idx, sub))
 
         # ---- 5. Assemble scene graph (matching vanilla structure exactly) ----
         union_min = (
@@ -568,10 +576,10 @@ class SkinBuilder:
 
         # ---- 5a. Main mesh branch ----
         # Vanilla: igAttrSet "PromotedAttr" [ColorAttr, MaterialAttr, TextureBindAttr, TextureStateAttr]
-        #            -> igGeometry (direct children)
-        # IGB Materials panel can add: CullFaceAttr, LightingStateAttr,
-        # AlphaFunctionAttr, AlphaStateAttr
-        if main_geom_indices:
+        #            -> igGeometry (body, direct child)
+        #            -> igSegment "gun_left" (flags) -> igGroup -> igGeometry (segment parts)
+        # Render state attrs (CullFace, Lighting, Alpha) belong ONLY on the outline branch.
+        if main_geom_entries:
             main_tex_state_idx = self._add_obj(MO_TEXTURE_STATE_ATTR, [
                 (2, 0, 'Short', 2),
                 (4, 1, 'Bool', 1),
@@ -586,40 +594,14 @@ class SkinBuilder:
                 (4, color_val, 'Vec4f', 16),
             ])
 
-            # Base attrs: [ColorAttr, MaterialAttr, TextureBindAttr, TextureStateAttr]
+            # Main mesh attrs: [ColorAttr, MaterialAttr, TextureBindAttr, TextureStateAttr]
+            # IMPORTANT: Do NOT add CullFace/Lighting/Alpha attrs here.
+            # In vanilla skin files, those attrs belong ONLY on the outline branch:
+            #   - CullFaceAttr + LightingStateAttr → outline AttrSet
+            #   - AlphaFunctionAttr + AlphaStateAttr → outline OverrideAttrSet
+            # Adding them to the main mesh breaks the vanilla render state pattern.
             main_attrs = [main_color_idx, main_material_idx,
                           shared_tex_bind_idx, main_tex_state_idx]
-
-            # Optional render state attrs from IGB Materials panel
-            if shared_material.get('cull_face_enabled'):
-                cull_mode = shared_material.get('cull_face_mode', 0)
-                cull_idx = self._add_obj(MO_CULL_FACE_ATTR, [
-                    (2, 0, 'Short', 2),
-                    (4, 1, 'Bool', 1),
-                    (5, cull_mode, 'Enum', 4),
-                ])
-                main_attrs.append(cull_idx)
-
-            if 'lighting_enabled' in shared_material:
-                lighting_idx = self._add_obj(MO_LIGHTING_STATE_ATTR, [
-                    (2, 0, 'Short', 2),
-                    (4, 1 if shared_material['lighting_enabled'] else 0, 'Bool', 1),
-                ])
-                main_attrs.append(lighting_idx)
-
-            if shared_material.get('alpha_test_enabled'):
-                alpha_func = shared_material.get('alpha_func', 6)
-                alpha_ref = shared_material.get('alpha_ref', 0.5)
-                af_idx = self._add_obj(MO_ALPHA_FUNCTION_ATTR, [
-                    (2, 0, 'Short', 2),
-                    (4, alpha_func, 'Enum', 4),
-                    (5, alpha_ref, 'Float', 4),
-                ])
-                as_idx = self._add_obj(MO_ALPHA_STATE_ATTR, [
-                    (2, 0, 'Short', 2),
-                    (4, 1, 'Bool', 1),
-                ])
-                main_attrs.extend([af_idx, as_idx])
 
             main_attr_data = struct.pack("<" + "i" * len(main_attrs), *main_attrs)
             main_attr_mb = self._add_mem(MO_OBJECT, main_attr_data)
@@ -629,13 +611,50 @@ class SkinBuilder:
                 (4, main_attr_mb, 'MemoryRef', 4),
             ])
 
-            # Children = all main geometry nodes
+            # Children: body geometry is direct, segments get igSegment→igGroup wrapping
+            main_child_refs = []
+            for gi, sub in main_geom_entries:
+                seg_name = sub.get('segment_name', '')
+                seg_flags = sub.get('segment_flags', 0)
+                if seg_name:
+                    # Wrap in igSegment → igGroup (vanilla structure for toggleable parts)
+                    grp_child_data = struct.pack("<i", gi)
+                    grp_child_mb = self._add_mem(MO_OBJECT, grp_child_data)
+                    grp_children = self._add_obj(MO_NODE_LIST, [
+                        (2, 1, 'Int', 4),
+                        (3, 1, 'Int', 4),
+                        (4, grp_child_mb, 'MemoryRef', 4),
+                    ])
+                    grp_idx = self._add_obj(MO_GROUP, [
+                        (2, seg_name, 'String', 4),
+                        (3, -1, 'ObjectRef', 4),
+                        (5, 0, 'Int', 4),
+                        (7, grp_children, 'ObjectRef', 4),
+                    ])
+                    seg_child_data = struct.pack("<i", grp_idx)
+                    seg_child_mb = self._add_mem(MO_OBJECT, seg_child_data)
+                    seg_children = self._add_obj(MO_NODE_LIST, [
+                        (2, 1, 'Int', 4),
+                        (3, 1, 'Int', 4),
+                        (4, seg_child_mb, 'MemoryRef', 4),
+                    ])
+                    seg_idx = self._add_obj(MO_SEGMENT, [
+                        (2, seg_name, 'String', 4),
+                        (3, -1, 'ObjectRef', 4),
+                        (5, seg_flags, 'Int', 4),
+                        (7, seg_children, 'ObjectRef', 4),
+                    ])
+                    main_child_refs.append(seg_idx)
+                else:
+                    # Body geometry — direct child of AttrSet
+                    main_child_refs.append(gi)
+
             main_child_data = struct.pack(
-                "<" + "i" * len(main_geom_indices), *main_geom_indices)
+                "<" + "i" * len(main_child_refs), *main_child_refs)
             main_child_mb = self._add_mem(MO_OBJECT, main_child_data)
             main_children = self._add_obj(MO_NODE_LIST, [
-                (2, len(main_geom_indices), 'Int', 4),
-                (3, len(main_geom_indices), 'Int', 4),
+                (2, len(main_child_refs), 'Int', 4),
+                (3, len(main_child_refs), 'Int', 4),
                 (4, main_child_mb, 'MemoryRef', 4),
             ])
 
@@ -652,11 +671,12 @@ class SkinBuilder:
         # ---- 5b. Outline mesh branch ----
         # Vanilla: igAttrSet "PromotedAttr" [ColorAttr, MaterialAttr, TextureStateAttr, CullFaceAttr, LightingStateAttr]
         #            -> igOverrideAttrSet [AlphaFunctionAttr, AlphaStateAttr]
-        #                 -> igGeometry (direct children)
-        if outline_geom_indices:
+        #                 -> igSegment (name, flags) -> igGroup -> igGeometry
+        if outline_geom_entries:
+            # Vanilla outline: texturing DISABLED (silhouette doesn't need texture)
             outline_tex_state_idx = self._add_obj(MO_TEXTURE_STATE_ATTR, [
                 (2, 0, 'Short', 2),
-                (4, 1, 'Bool', 1),
+                (4, 0, 'Bool', 1),     # disabled (vanilla: texture OFF for outlines)
                 (5, 0, 'Int', 4),
             ])
             outline_material_idx = self._build_material(outline_material)
@@ -688,10 +708,11 @@ class SkinBuilder:
             ])
 
             # igOverrideAttrSet with alpha attrs
+            # Vanilla: GL_GEQUAL (6) with ref=0.99 — only opaque pixels pass
             alpha_func_idx = self._add_obj(MO_ALPHA_FUNCTION_ATTR, [
                 (2, 0, 'Short', 2),
-                (4, 5, 'Enum', 4),     # GL_GREATER
-                (5, 0.0, 'Float', 4),
+                (4, 6, 'Enum', 4),     # GL_GEQUAL (vanilla value)
+                (5, 0.99, 'Float', 4), # ref=0.99 (vanilla value)
             ])
             alpha_state_idx = self._add_obj(MO_ALPHA_STATE_ATTR, [
                 (2, 0, 'Short', 2),
@@ -706,13 +727,56 @@ class SkinBuilder:
                 (4, override_attr_mb, 'MemoryRef', 4),
             ])
 
-            # OverrideAttrSet children = all outline geometry nodes
+            # OverrideAttrSet children: body outline is direct, segment outlines
+            # get igSegment → igGroup wrapping (vanilla structure).
+            override_child_refs = []
+            for gi, sub in outline_geom_entries:
+                seg_name = sub.get('segment_name', '')
+                seg_flags = sub.get('segment_flags', 0)
+
+                if seg_name:
+                    # Segment outline: wrap in igSegment → igGroup
+                    # seg_name already includes "_outline" (e.g., "gun_left_outline")
+                    outline_seg_name = seg_name
+
+                    grp_child_data = struct.pack("<i", gi)
+                    grp_child_mb = self._add_mem(MO_OBJECT, grp_child_data)
+                    grp_children = self._add_obj(MO_NODE_LIST, [
+                        (2, 1, 'Int', 4),
+                        (3, 1, 'Int', 4),
+                        (4, grp_child_mb, 'MemoryRef', 4),
+                    ])
+                    grp_idx = self._add_obj(MO_GROUP, [
+                        (2, outline_seg_name, 'String', 4),
+                        (3, -1, 'ObjectRef', 4),
+                        (5, 0, 'Int', 4),
+                        (7, grp_children, 'ObjectRef', 4),
+                    ])
+
+                    seg_child_data = struct.pack("<i", grp_idx)
+                    seg_child_mb = self._add_mem(MO_OBJECT, seg_child_data)
+                    seg_children = self._add_obj(MO_NODE_LIST, [
+                        (2, 1, 'Int', 4),
+                        (3, 1, 'Int', 4),
+                        (4, seg_child_mb, 'MemoryRef', 4),
+                    ])
+                    seg_idx = self._add_obj(MO_SEGMENT, [
+                        (2, outline_seg_name, 'String', 4),
+                        (3, -1, 'ObjectRef', 4),
+                        (5, seg_flags, 'Int', 4),
+                        (7, seg_children, 'ObjectRef', 4),
+                    ])
+                    override_child_refs.append(seg_idx)
+                else:
+                    # Body outline: direct child of OverrideAttrSet (no segment wrapper)
+                    override_child_refs.append(gi)
+
             override_child_data = struct.pack(
-                "<" + "i" * len(outline_geom_indices), *outline_geom_indices)
+                "<" + "i" * len(override_child_refs), *override_child_refs)
             override_child_mb = self._add_mem(MO_OBJECT, override_child_data)
             override_children = self._add_obj(MO_NODE_LIST, [
-                (2, len(outline_geom_indices), 'Int', 4),
-                (3, len(outline_geom_indices), 'Int', 4),
+                (2, len(override_child_refs), 'Int', 4),
+                (3, len(override_child_refs), 'Int', 4),
                 (4, override_child_mb, 'MemoryRef', 4),
             ])
 
@@ -1370,5 +1434,17 @@ def _default_material():
         'specular': (0.0, 0.0, 0.0, 1.0),
         'emission': (0.0, 0.0, 0.0, 1.0),
         'shininess': 0.0,
-        'flags': 31,
+        'flags': 0,
+    }
+
+
+def _default_outline_material():
+    """Default material for outline meshes — all black, matching vanilla."""
+    return {
+        'diffuse': (0.0, 0.0, 0.0, 1.0),
+        'ambient': (0.0, 0.0, 0.0, 1.0),
+        'specular': (0.0, 0.0, 0.0, 1.0),
+        'emission': (0.0, 0.0, 0.0, 0.0),
+        'shininess': 0.0,
+        'flags': 0,
     }

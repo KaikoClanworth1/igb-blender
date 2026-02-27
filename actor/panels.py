@@ -178,6 +178,110 @@ class ACTOR_PT_Skins(Panel):
         row.operator("actor.remove_skin", icon='REMOVE')
 
 
+class ACTOR_PT_Segments(Panel):
+    """Segment management and diagnostics for the selected skin"""
+    bl_label = "Segments"
+    bl_idname = "ACTOR_PT_Segments"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "IGB Actors"
+    bl_parent_id = "ACTOR_PT_Skins"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (props.active_armature != "" and
+                len(props.skins) > 0 and
+                props.skins_index < len(props.skins))
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.igb_actor
+
+        from ..actor.actor_import import collect_skin_segments
+
+        segments = collect_skin_segments(props, props.skins_index)
+
+        if not segments:
+            layout.label(text="No segments found.", icon='INFO')
+            return
+
+        # Group meshes by base segment name (strip _outline suffix to pair)
+        groups = {}  # base_name -> {'main': [], 'outline': [], 'flags': int}
+        for seg_mesh, is_outline in segments:
+            seg_name = seg_mesh.get("igb_segment_name", "")
+            seg_flags = seg_mesh.get("igb_segment_flags", 0)
+            # Base name: strip _outline suffix for grouping
+            # Outline segments are named "gun_left_outline" — strip suffix
+            base = seg_name
+            if base.endswith("_outline"):
+                base = base[:-8]  # strip "_outline"
+            if not base:
+                base = ""  # body group
+            if base not in groups:
+                groups[base] = {'main': [], 'outline': [], 'flags': seg_flags}
+            if is_outline:
+                groups[base]['outline'].append(seg_mesh)
+            else:
+                groups[base]['main'].append(seg_mesh)
+
+        # Draw body group first, then named segments
+        sorted_names = sorted(groups.keys(), key=lambda n: (n != "", n))
+
+        for base_name in sorted_names:
+            grp = groups[base_name]
+            is_body = (base_name == "")
+            display_name = "Body" if is_body else base_name
+            seg_flags = grp['flags']
+            is_hidden = bool(seg_flags & 2)
+
+            box = layout.box()
+
+            # Header row: name + visibility toggle (if not body)
+            header = box.row(align=True)
+            header.label(text=display_name,
+                         icon='MESH_DATA' if is_body else 'OBJECT_DATA')
+
+            if not is_body:
+                vis_icon = 'HIDE_ON' if is_hidden else 'HIDE_OFF'
+                vis_text = "Hidden" if is_hidden else "Visible"
+                op = header.operator("actor.toggle_segment",
+                                     text=vis_text, icon=vis_icon,
+                                     depress=not is_hidden)
+                op.segment_name = base_name
+
+            # Sub-meshes
+            col = box.column(align=True)
+            all_meshes = grp['main'] + grp['outline']
+            for mesh_obj in all_meshes:
+                mesh_outline = bool(mesh_obj.get("igb_is_outline", False))
+                vert_count = len(mesh_obj.data.vertices) if mesh_obj.data else 0
+                vgroup_count = len(mesh_obj.vertex_groups)
+                weighted = mesh_obj.get("igb_weighted_vert_count", -1)
+
+                mesh_icon = 'MOD_WIREFRAME' if mesh_outline else 'MESH_DATA'
+                mesh_type = "Outline" if mesh_outline else "Main"
+
+                row = col.row(align=True)
+                row.label(text=f"{mesh_type}: {mesh_obj.name}", icon=mesh_icon)
+
+                sub = col.row(align=True)
+                sub.label(text=f"  {vert_count}v, {vgroup_count} groups")
+
+                # Weight diagnostic
+                if weighted >= 0 and vert_count > 0:
+                    ratio = weighted / vert_count
+                    w_icon = 'CHECKMARK' if ratio > 0.99 else 'ERROR'
+                    sub.label(text=f"{weighted}/{vert_count}", icon=w_icon)
+
+        # Buttons
+        layout.separator()
+        row = layout.row(align=True)
+        row.operator("actor.add_segment", icon='ADD')
+        row.operator("actor.refresh_segments", text="Refresh", icon='FILE_REFRESH')
+
+
 class ACTOR_PT_Animations(Panel):
     """Animation management section"""
     bl_label = "Animations"
@@ -358,6 +462,7 @@ _classes = (
     ACTOR_PT_Main,
     ACTOR_PT_Import,
     ACTOR_PT_Skins,
+    ACTOR_PT_Segments,
     ACTOR_PT_Animations,
     ACTOR_PT_Materials,
 )

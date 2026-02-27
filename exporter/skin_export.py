@@ -101,16 +101,34 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             # Fallback for meshes without vertex groups
             mesh_export = extract_mesh(mesh_obj, uv_v_flip=True)
 
+        # IGB skin files store vertices in armature/bind-pose space.
+        # igTransform nodes (e.g., on Bishop's drawn guns) are scene graph
+        # metadata — they do NOT offset vertex positions.  We skip baking
+        # matrix_local here; vertices from extract_skin_mesh are already
+        # in the correct space.
+
         # Apply armature world rotation + export scale to vertex data
         _transform_mesh_for_export(mesh_export, armature_obj)
 
         num_verts = len(mesh_export.positions)
         num_tris = len(mesh_export.indices) // 3
         has_blend = bool(mesh_export.blend_weights)
+        # Check if blend data is actually meaningful (not all zeros)
+        weighted_verts = 0
+        if has_blend:
+            weighted_verts = sum(
+                1 for w in mesh_export.blend_weights if any(x > 0 for x in w))
 
         _report(operator, 'INFO',
                 f"{'Outline' if is_outline else 'Main'} mesh '{mesh_obj.name}': "
-                f"{num_verts} verts, {num_tris} tris, blend_data={has_blend}")
+                f"{num_verts} verts, {num_tris} tris, "
+                f"weighted={weighted_verts}/{num_verts}")
+
+        if has_blend and weighted_verts == 0 and num_verts > 0:
+            _report(operator, 'WARNING',
+                    f"Mesh '{mesh_obj.name}' has vertex groups but ALL blend "
+                    f"weights are zero! The mesh will not deform. Check that "
+                    f"vertex group names match skeleton bone names.")
 
         # Extract material (with IGB custom properties for render state)
         material = _extract_material_props(mesh_obj)
@@ -122,6 +140,8 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             'material': material,
             'texture_name': tex_name,
             'is_outline': is_outline,
+            'segment_name': mesh_obj.get('igb_segment_name', ''),
+            'segment_flags': mesh_obj.get('igb_segment_flags', 0),
         }
 
         if texture_mode == 'clut':

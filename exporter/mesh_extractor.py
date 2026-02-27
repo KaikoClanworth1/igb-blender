@@ -220,6 +220,21 @@ def extract_skin_mesh(bl_object, armature_obj, skeleton, bms_indices=None,
             if not has_conflict and not bms_out_of_range:
                 bone_name_to_bm[bone.name] = eff_bm
 
+    # Also map CURRENT armature bone names to bm_idx.  This handles the
+    # case where bones were renamed in Blender (e.g. by the rig converter
+    # or manual edits).  Blender auto-renames vertex groups when bone names
+    # change, so vertex groups follow the armature names — but the stored
+    # skeleton data (igb_skin_bone_info_list) still has the original names.
+    # Without this fallback, ALL influences on renamed-bone meshes would be
+    # silently skipped, producing all-zero blend weights.
+    if armature_obj is not None and armature_obj.type == 'ARMATURE':
+        for pb in armature_obj.pose.bones:
+            if pb.name in bone_name_to_bm:
+                continue  # Already mapped (name unchanged)
+            bm_idx = pb.get("igb_skin_bm_idx")
+            if bm_idx is not None and bm_idx >= 0:
+                bone_name_to_bm[pb.name] = bm_idx
+
     # Build reverse BMS palette: global_bm_idx -> local_blend_idx
     # If BMS exists, vertex blend indices are local (0..N) remapped to
     # global bm_idx via bms_indices[local] = global. For export we reverse this.
@@ -404,17 +419,27 @@ def _extract_blend_data(bl_mesh, bl_object, mesh_export,
     mesh_export.blend_weights = blend_weights
     mesh_export.blend_indices = blend_indices
 
+    # Count actually-weighted vertices (at least one non-zero weight)
+    weighted_verts = sum(1 for w in blend_weights if any(x > 0 for x in w))
+
     # Diagnostics
     if unmapped_bones:
-        print(f"SKIN EXPORT: {len(unmapped_bones)} bone(s) not in blend index map "
-              f"(non-deforming/out-of-range): {sorted(unmapped_bones)}")
+        print(f"SKIN EXPORT [{bl_object.name}]: {len(unmapped_bones)} bone(s) not in "
+              f"blend index map: {sorted(unmapped_bones)}")
     if bms_unmapped_count > 0:
-        print(f"SKIN EXPORT: {bms_unmapped_count} influence(s) skipped "
-              f"(bm_idx not in BMS palette)")
+        print(f"SKIN EXPORT [{bl_object.name}]: {bms_unmapped_count} influence(s) "
+              f"skipped (bm_idx not in BMS palette)")
     if zero_weight_verts > 0:
-        print(f"SKIN EXPORT: {zero_weight_verts} vertex(es) with zero total weight "
-              f"(defaulting to bone 0)")
-    print(f"SKIN EXPORT: {num_unique} unique verts, "
+        print(f"SKIN EXPORT [{bl_object.name}]: {zero_weight_verts}/{num_unique} "
+              f"vertex(es) with zero total weight")
+    if weighted_verts == 0 and num_unique > 0 and len(vgroup_names) > 0:
+        print(f"WARNING [{bl_object.name}]: ALL {num_unique} vertices have zero "
+              f"blend weights despite having {len(vgroup_names)} vertex groups! "
+              f"Vertex group names may not match skeleton bone names. "
+              f"Groups: {sorted(vgroup_names.values())[:5]}... "
+              f"Skeleton: {sorted(bone_name_to_bm.keys())[:5]}...")
+    print(f"SKIN EXPORT [{bl_object.name}]: {num_unique} unique verts, "
+          f"{weighted_verts}/{num_unique} weighted, "
           f"{len(bone_name_to_bm)} mapped bones, "
           f"BMS size={len(global_to_local) if global_to_local else 'N/A'}")
 
