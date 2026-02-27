@@ -90,7 +90,58 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         # Outlines are skinned too (they deform with the character).
         skel_adapter = _SkeletonAdapter(skeleton_data)
 
-        # Check if this mesh has vertex groups (needed for skin extraction)
+        # ALL geometry under igBlendMatrixSelect MUST be skinned.
+        # If a mesh has no vertex groups (common for user-added segments),
+        # create a temporary vertex group so it goes through the skinned
+        # extraction path with correct coordinate-space handling.
+        # extract_skin_mesh() forces REST pose and evaluates via depsgraph,
+        # giving bind-pose positions; extract_mesh() gives object-local
+        # positions which may be in a different space — causing the mesh
+        # to be invisible or misplaced in-game.
+        import bpy
+        temp_vg_name = None
+        has_vertex_groups = bool(mesh_obj.vertex_groups)
+
+        if not has_vertex_groups:
+            # Find the first bone name that exists in both the skeleton and
+            # the armature.  Prefer "Bip01" as the default anchor bone.
+            first_bone_name = None
+            if armature_obj and armature_obj.type == 'ARMATURE':
+                # Try Bip01 first (root bone in XML2 skeletons)
+                if "Bip01" in armature_obj.data.bones:
+                    first_bone_name = "Bip01"
+                else:
+                    # Fall back to any bone that has a valid bm_idx
+                    for bone_info in skeleton_data.get('bones', []):
+                        bname = bone_info.get('name', '')
+                        if bone_info.get('bm_idx', -1) >= 0 and bname:
+                            if bname in armature_obj.data.bones:
+                                first_bone_name = bname
+                                break
+                    # Last resort: any armature bone
+                    if first_bone_name is None and armature_obj.data.bones:
+                        first_bone_name = armature_obj.data.bones[0].name
+
+            if first_bone_name:
+                _report(operator, 'WARNING',
+                        f"Mesh '{mesh_obj.name}' has no vertex groups. "
+                        f"Creating temporary weight to bone '{first_bone_name}' "
+                        f"so it exports as skinned geometry. For proper "
+                        f"deformation, weight-paint to the correct bones.")
+                temp_vg_name = first_bone_name
+                vg = mesh_obj.vertex_groups.new(name=first_bone_name)
+                # Assign ALL vertices with weight 1.0
+                vert_count = len(mesh_obj.data.vertices)
+                vg.add(list(range(vert_count)), 1.0, 'REPLACE')
+            else:
+                _report(operator, 'WARNING',
+                        f"Mesh '{mesh_obj.name}' has no vertex groups and "
+                        f"no matching bone found. Falling back to unskinned "
+                        f"extraction — segment may not be visible in-game.")
+
+        # Extract mesh data via the skinned path (forces REST pose, correct
+        # coordinate space).  Only fall back to unskinned if we truly have
+        # no vertex groups at all.
         has_vertex_groups = bool(mesh_obj.vertex_groups)
         if has_vertex_groups:
             mesh_export = extract_skin_mesh(
@@ -100,6 +151,12 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         else:
             # Fallback for meshes without vertex groups
             mesh_export = extract_mesh(mesh_obj, uv_v_flip=True)
+
+        # Clean up temporary vertex group
+        if temp_vg_name is not None:
+            vg_to_remove = mesh_obj.vertex_groups.get(temp_vg_name)
+            if vg_to_remove is not None:
+                mesh_obj.vertex_groups.remove(vg_to_remove)
 
         # IGB skin files store vertices in armature/bind-pose space.
         # igTransform nodes (e.g., on Bishop's drawn guns) are scene graph
@@ -119,20 +176,9 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             weighted_verts = sum(
                 1 for w in mesh_export.blend_weights if any(x > 0 for x in w))
 
-        # ALL geometry under igBlendMatrixSelect MUST be skinned (have blend
-        # weights/indices).  Unskinned meshes (format 0x10003) will be invisible
-        # because the game's skin renderer expects blend data on every geometry.
-        # If a mesh has no blend data, auto-assign all vertices to BMS bone 0
-        # (typically Bip01) so it at least renders.  This commonly happens when
-        # the user adds a segment mesh that lacks vertex groups.
+        # Safety net: if extraction still produced no blend data (shouldn't
+        # happen with temp VG, but just in case), auto-assign to bone 0.
         if num_verts > 0 and not has_blend:
-            _report(operator, 'WARNING',
-                    f"Mesh '{mesh_obj.name}' has no vertex groups / blend "
-                    f"weights. Auto-assigning all {num_verts} vertices to "
-                    f"bone index 0 (BMS[0]) so it renders under the skin. "
-                    f"For proper deformation, add vertex groups matching "
-                    f"skeleton bone names.")
-            # BMS index 0 = first bone in BMS palette
             mesh_export.blend_weights = [(1.0, 0.0, 0.0, 0.0)] * num_verts
             mesh_export.blend_indices = [(0, 0, 0, 0)] * num_verts
             has_blend = True
