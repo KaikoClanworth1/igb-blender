@@ -594,30 +594,18 @@ class SkinBuilder:
                 (4, color_val, 'Vec4f', 16),
             ])
 
-            # Main mesh attrs: [ColorAttr, MaterialAttr, TextureBindAttr, TextureStateAttr]
-            # IMPORTANT: Do NOT add CullFace/Lighting/Alpha attrs here.
-            # In vanilla skin files, those attrs belong ONLY on the outline branch:
-            #   - CullFaceAttr + LightingStateAttr → outline AttrSet
-            #   - AlphaFunctionAttr + AlphaStateAttr → outline OverrideAttrSet
-            # Adding them to the main mesh breaks the vanilla render state pattern.
-            main_attrs = [main_color_idx, main_material_idx,
-                          shared_tex_bind_idx, main_tex_state_idx]
-
-            main_attr_data = struct.pack("<" + "i" * len(main_attrs), *main_attrs)
-            main_attr_mb = self._add_mem(MO_OBJECT, main_attr_data)
-            main_attr_list = self._add_obj(MO_ATTR_LIST, [
-                (2, len(main_attrs), 'Int', 4),
-                (3, len(main_attrs), 'Int', 4),
-                (4, main_attr_mb, 'MemoryRef', 4),
-            ])
-
-            # Children: body geometry is direct, segments get igSegment→igGroup wrapping
+            # Build children and collect segment refs for the attr list.
+            # Vanilla igAttrSet has segments in BOTH _attrList AND _childList:
+            #   _attrList: [ColorAttr, MaterialAttr, TexBind, TexState, igGeometry, igSegment...]
+            #   _childList: [igGeometry, igSegment...]
+            # The game uses the attr list to discover segments for toggling.
             main_child_refs = []
+            main_scene_refs = []  # geometry + segment refs for attr list
             for gi, sub in main_geom_entries:
                 seg_name = sub.get('segment_name', '')
                 seg_flags = sub.get('segment_flags', 0)
                 if seg_name:
-                    # Wrap in igSegment → igGroup (vanilla structure for toggleable parts)
+                    # Wrap in igSegment → igGroup (vanilla structure)
                     grp_child_data = struct.pack("<i", gi)
                     grp_child_mb = self._add_mem(MO_OBJECT, grp_child_data)
                     grp_children = self._add_obj(MO_NODE_LIST, [
@@ -645,9 +633,11 @@ class SkinBuilder:
                         (7, seg_children, 'ObjectRef', 4),
                     ])
                     main_child_refs.append(seg_idx)
+                    main_scene_refs.append(seg_idx)
                 else:
                     # Body geometry — direct child of AttrSet
                     main_child_refs.append(gi)
+                    main_scene_refs.append(gi)
 
             main_child_data = struct.pack(
                 "<" + "i" * len(main_child_refs), *main_child_refs)
@@ -656,6 +646,20 @@ class SkinBuilder:
                 (2, len(main_child_refs), 'Int', 4),
                 (3, len(main_child_refs), 'Int', 4),
                 (4, main_child_mb, 'MemoryRef', 4),
+            ])
+
+            # Attr list: render state attrs + body geometry + segments
+            # (vanilla: segments appear in both attr list and child list)
+            main_attrs = [main_color_idx, main_material_idx,
+                          shared_tex_bind_idx, main_tex_state_idx]
+            main_attrs.extend(main_scene_refs)
+
+            main_attr_data = struct.pack("<" + "i" * len(main_attrs), *main_attrs)
+            main_attr_mb = self._add_mem(MO_OBJECT, main_attr_data)
+            main_attr_list = self._add_obj(MO_ATTR_LIST, [
+                (2, len(main_attrs), 'Int', 4),
+                (3, len(main_attrs), 'Int', 4),
+                (4, main_attr_mb, 'MemoryRef', 4),
             ])
 
             main_attrset = self._add_obj(MO_ATTR_SET, [
@@ -718,18 +722,11 @@ class SkinBuilder:
                 (2, 0, 'Short', 2),
                 (4, 1, 'Bool', 1),
             ])
-            override_attrs = [alpha_func_idx, alpha_state_idx]
-            override_attr_data = struct.pack("<" + "i" * len(override_attrs), *override_attrs)
-            override_attr_mb = self._add_mem(MO_OBJECT, override_attr_data)
-            override_attr_list = self._add_obj(MO_ATTR_LIST, [
-                (2, len(override_attrs), 'Int', 4),
-                (3, len(override_attrs), 'Int', 4),
-                (4, override_attr_mb, 'MemoryRef', 4),
-            ])
-
             # OverrideAttrSet children: body outline is direct, segment outlines
             # get igSegment → igGroup wrapping (vanilla structure).
+            # Segments go in BOTH child list AND attr list (same as main branch).
             override_child_refs = []
+            override_scene_refs = []  # geometry + segment refs for attr list
             for gi, sub in outline_geom_entries:
                 seg_name = sub.get('segment_name', '')
                 seg_flags = sub.get('segment_flags', 0)
@@ -767,9 +764,11 @@ class SkinBuilder:
                         (7, seg_children, 'ObjectRef', 4),
                     ])
                     override_child_refs.append(seg_idx)
+                    override_scene_refs.append(seg_idx)
                 else:
                     # Body outline: direct child of OverrideAttrSet (no segment wrapper)
                     override_child_refs.append(gi)
+                    override_scene_refs.append(gi)
 
             override_child_data = struct.pack(
                 "<" + "i" * len(override_child_refs), *override_child_refs)
@@ -778,6 +777,18 @@ class SkinBuilder:
                 (2, len(override_child_refs), 'Int', 4),
                 (3, len(override_child_refs), 'Int', 4),
                 (4, override_child_mb, 'MemoryRef', 4),
+            ])
+
+            # Attr list: alpha attrs + body outline geometry + outline segments
+            override_attrs = [alpha_func_idx, alpha_state_idx]
+            override_attrs.extend(override_scene_refs)
+
+            override_attr_data = struct.pack("<" + "i" * len(override_attrs), *override_attrs)
+            override_attr_mb = self._add_mem(MO_OBJECT, override_attr_data)
+            override_attr_list = self._add_obj(MO_ATTR_LIST, [
+                (2, len(override_attrs), 'Int', 4),
+                (3, len(override_attrs), 'Int', 4),
+                (4, override_attr_mb, 'MemoryRef', 4),
             ])
 
             override_idx = self._add_obj(MO_OVERRIDE_ATTR_SET, [
