@@ -547,13 +547,12 @@ def _count_weighted_vertices(mesh_obj):
 def collect_skin_segments(props, skins_index):
     """Collect all mesh objects belonging to a skin entry.
 
-    For imported skins with an ``igb_skin_template`` path, finds all sibling
-    meshes sharing that template (across both the skins list and armature
-    children).
+    Always includes every mesh registered in the skins list — the user
+    explicitly added them and they are all part of the current export.
 
-    For custom/user-created skins without a template, includes ALL meshes
-    registered in the skins list — since they were explicitly added by the
-    user and are all part of the same skin.
+    Additionally, for imported skins with an ``igb_skin_template`` path,
+    checks armature children not in the skins list as a safety net
+    (handles sibling meshes that weren't explicitly added to the list).
 
     This is the single source of truth for which meshes constitute a skin,
     used by the Segments panel, segment toggle, and skin export operator.
@@ -575,22 +574,24 @@ def collect_skin_segments(props, skins_index):
     if mesh_obj is None or mesh_obj.type != 'MESH':
         return []
 
-    source_file = mesh_obj.get("igb_skin_template", "")
     result = [(mesh_obj, bool(mesh_obj.get("igb_is_outline", False)))]
     seen = {mesh_obj.name}
 
-    if source_file:
-        # Template-based matching: find siblings with the same source IGB file
-        for skin_item in props.skins:
-            if skin_item.object_name in seen:
-                continue
-            sibling = bpy.data.objects.get(skin_item.object_name)
-            if sibling and sibling.type == 'MESH':
-                if sibling.get("igb_skin_template", "") == source_file:
-                    result.append((sibling, bool(sibling.get("igb_is_outline", False))))
-                    seen.add(sibling.name)
+    # Include ALL meshes in the skins list — they were explicitly added
+    # by the user (via import, Add Mesh as Skin, Add Segment, etc.).
+    # No template matching needed: if it's in the list, it belongs.
+    for skin_item in props.skins:
+        if skin_item.object_name in seen:
+            continue
+        sibling = bpy.data.objects.get(skin_item.object_name)
+        if sibling and sibling.type == 'MESH':
+            result.append((sibling, bool(sibling.get("igb_is_outline", False))))
+            seen.add(sibling.name)
 
-        # Also check armature children not in skins list
+    # Safety net: for imported skins, also check armature children not in
+    # the skins list (e.g., outline meshes that weren't explicitly added).
+    source_file = mesh_obj.get("igb_skin_template", "")
+    if source_file:
         armature_obj = bpy.data.objects.get(props.active_armature)
         if armature_obj:
             for child in armature_obj.children:
@@ -599,16 +600,6 @@ def collect_skin_segments(props, skins_index):
                 if child.get("igb_skin_template", "") == source_file:
                     result.append((child, bool(child.get("igb_is_outline", False))))
                     seen.add(child.name)
-    else:
-        # No template (custom/user-created skin): include ALL meshes
-        # registered in the skins list, since the user explicitly added them.
-        for skin_item in props.skins:
-            if skin_item.object_name in seen:
-                continue
-            sibling = bpy.data.objects.get(skin_item.object_name)
-            if sibling and sibling.type == 'MESH':
-                result.append((sibling, bool(sibling.get("igb_is_outline", False))))
-                seen.add(sibling.name)
 
     return result
 
