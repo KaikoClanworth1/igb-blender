@@ -119,6 +119,25 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             weighted_verts = sum(
                 1 for w in mesh_export.blend_weights if any(x > 0 for x in w))
 
+        # ALL geometry under igBlendMatrixSelect MUST be skinned (have blend
+        # weights/indices).  Unskinned meshes (format 0x10003) will be invisible
+        # because the game's skin renderer expects blend data on every geometry.
+        # If a mesh has no blend data, auto-assign all vertices to BMS bone 0
+        # (typically Bip01) so it at least renders.  This commonly happens when
+        # the user adds a segment mesh that lacks vertex groups.
+        if num_verts > 0 and not has_blend:
+            _report(operator, 'WARNING',
+                    f"Mesh '{mesh_obj.name}' has no vertex groups / blend "
+                    f"weights. Auto-assigning all {num_verts} vertices to "
+                    f"bone index 0 (BMS[0]) so it renders under the skin. "
+                    f"For proper deformation, add vertex groups matching "
+                    f"skeleton bone names.")
+            # BMS index 0 = first bone in BMS palette
+            mesh_export.blend_weights = [(1.0, 0.0, 0.0, 0.0)] * num_verts
+            mesh_export.blend_indices = [(0, 0, 0, 0)] * num_verts
+            has_blend = True
+            weighted_verts = num_verts
+
         _report(operator, 'INFO',
                 f"{'Outline' if is_outline else 'Main'} mesh '{mesh_obj.name}': "
                 f"{num_verts} verts, {num_tris} tris, "
