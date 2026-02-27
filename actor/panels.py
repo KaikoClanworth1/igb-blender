@@ -106,19 +106,24 @@ class ACTOR_PT_Import(Panel):
         col.separator()
         col.prop(props, "game_preset")
 
-        # Rig Converter — show when an armature is selected but not yet
-        # set up for IGB export (no igb_skin_bone_info_list property)
+        # Skin Setup — show when an armature is selected.
+        # Detects whether it's a Bip01 rig or needs conversion.
         obj = context.active_object
         if obj and obj.type == 'ARMATURE':
             has_igb_data = "igb_skin_bone_info_list" in obj
             layout.separator()
             box = layout.box()
-            box.label(text="Rig Converter", icon='ARMATURE_DATA')
+            box.label(text="Skin Setup", icon='ARMATURE_DATA')
             if has_igb_data:
-                box.label(text="Armature has XML2 skeleton data", icon='CHECKMARK')
+                box.label(text="Armature has XML2 skeleton data",
+                          icon='CHECKMARK')
             else:
-                box.label(text="Convert Unity/Mixamo rig for IGB export")
-            box.operator("actor.convert_rig", icon='FILE_REFRESH')
+                has_bip01 = "Bip01" in obj.data.bones
+                if has_bip01:
+                    box.label(text="Bip01 rig — will configure for export")
+                else:
+                    box.label(text="Non-XML2 rig — will convert and setup")
+            box.operator("actor.setup_skin", icon='FILE_REFRESH')
 
         # Active armature info
         if props.active_armature:
@@ -238,7 +243,7 @@ class ACTOR_PT_Segments(Panel):
 
             box = layout.box()
 
-            # Header row: name + visibility toggle (if not body)
+            # Header row: name + visibility toggle + remove (if not body)
             header = box.row(align=True)
             header.label(text=display_name,
                          icon='MESH_DATA' if is_body else 'OBJECT_DATA')
@@ -250,6 +255,13 @@ class ACTOR_PT_Segments(Panel):
                                      text=vis_text, icon=vis_icon,
                                      depress=not is_hidden)
                 op.segment_name = base_name
+
+                # Remove button for this segment group
+                all_seg_meshes = grp['main'] + grp['outline']
+                if all_seg_meshes:
+                    op_rem = header.operator("actor.remove_segment",
+                                            text="", icon='X')
+                    op_rem.segment_name = base_name
 
             # Sub-meshes
             col = box.column(align=True)

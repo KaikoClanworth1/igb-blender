@@ -149,7 +149,14 @@ Everything for working with game characters: skeletons, skins, animations, and r
 - **Game Directory** - Set the path to your game install (so the addon can find actor IGB files in `actors/`).
 - **Import Actor** - Pick a character and import their full skeleton, skin meshes, and animations.
 - **Import Options** - Toggle whether to import skins, animations, and/or materials.
-- **Rig Converter** - Appears when you select a non-IGB armature (e.g. from VRChat/Unity/Mixamo). Converts the bone hierarchy, names, and transforms to match XML2's skeleton format so the character works in-game.
+- **Skin Setup** - Appears when you select any armature. Detects whether the rig is already an XML2 Bip01 skeleton or a foreign rig (VRChat/Unity/Mixamo) and handles each case:
+  - **Existing Bip01 rigs** - Computes and stores the skeleton metadata needed for export (inverse bind matrices, bone translations, bone info) without modifying the rig or mesh. Bones stay exactly where they are.
+  - **Non-XML2 rigs** - Full conversion: renames bones to XML2 names, rebuilds the hierarchy, creates missing bones, computes skeleton data, and round-trips the mesh through export/reimport for a clean game-ready result.
+- **Rig Profile** - Selects the bone naming convention of the source rig (VRChat, Mixamo, or Mixamo Alt).
+- **Target Pose** - Choose the output pose for converted rigs:
+  - **T-Pose (Recommended)** - Arms horizontal. Required for compatibility with the game's existing animations (idle, walk, attack, etc.). If the source model is in A-pose, the converter will automatically repose the mesh and shape keys to T-pose.
+  - **A-Pose** - Arms angled ~45° downward. Use only if you are providing custom animations for the character. **Warning:** A-pose support is experimental. The game's built-in animations assume T-pose and will cause visible arm deformation on A-pose exports. A-pose may also produce unexpected results with some source rigs — if you see broken mesh or wrong arm positions, switch to T-pose.
+- **Auto Scale / Target Height** - Scales the rig to match XML2 character proportions (~68 game units tall). The scale factor is stored as a property and applied at export time — the Blender model is not resized.
 
 #### Skins
 Manages the skin mesh variants attached to an actor.

@@ -542,6 +542,124 @@ class ACTOR_OT_export_animations(Operator, ExportHelper):
         return {'RUNNING_MODAL'}
 
 
+def _round_trip_skin(context, armature_obj, props, operator=None):
+    """Full round-trip: export to game-scale IGB, delete original, reimport fresh.
+
+    Exports the rig + child meshes at full game scale (with igb_export_scale
+    and axis rotation applied), then deletes the original armature and all
+    child meshes, and reimports the exported IGB as a completely fresh actor.
+
+    This gives a clean IGB-compatible model usable for XML2 animation testing.
+    """
+    import tempfile
+
+    def _report(level, msg):
+        if operator:
+            operator.report(level, msg)
+
+    # Collect child meshes
+    mesh_children = [c for c in armature_obj.children if c.type == 'MESH']
+    if not mesh_children:
+        _report({'INFO'}, "No child meshes to round-trip")
+        return
+
+    # Check that skeleton data exists
+    if "igb_skin_bone_translations" not in armature_obj:
+        _report({'WARNING'},
+                "No skeleton data on armature, skipping round-trip")
+        return
+
+    try:
+        from ..exporter.skin_export import export_skin
+        from .actor_import import import_actor
+
+        # 1. Export to temp IGB at FULL game scale.
+        tmp_path = os.path.join(tempfile.gettempdir(),
+                                f"{armature_obj.name}_roundtrip.igb")
+
+        mesh_objs = [(c, False) for c in mesh_children]
+        success = export_skin(
+            filepath=tmp_path,
+            mesh_objs=mesh_objs,
+            armature_obj=armature_obj,
+            operator=operator,
+            swap_rb=False,
+            texture_mode='clut',
+        )
+
+        if not success:
+            _report({'WARNING'},
+                    "Round-trip export failed, keeping original meshes")
+            return
+
+        # 2. Find old collection
+        old_collection = None
+        for coll in bpy.data.collections:
+            if armature_obj.name in coll.objects:
+                old_collection = coll
+                break
+
+        # 3. Delete original armature and ALL child meshes
+        children_to_remove = list(armature_obj.children)
+        for child in children_to_remove:
+            bpy.data.objects.remove(child, do_unlink=True)
+        bpy.data.objects.remove(armature_obj, do_unlink=True)
+        armature_obj = None
+
+        # Remove old empty collection
+        if old_collection and len(old_collection.objects) == 0:
+            bpy.data.collections.remove(old_collection)
+
+        # 4. Reimport the temp IGB as a completely fresh actor.
+        result = import_actor(
+            context, tmp_path,
+            skin_filepaths=[("default", tmp_path)],
+            operator=operator,
+            options={
+                'import_skins': True,
+                'import_animations': False,
+                'import_materials': True,
+                'game_preset': 'xml2_pc',
+            },
+        )
+
+        if result is None:
+            _report({'ERROR'}, "Round-trip reimport failed")
+            return
+
+        new_armature, skin_objects, actions = result
+
+        # 5. Set game-scale properties
+        new_armature["igb_export_scale"] = 1.0
+        new_armature["igb_converted_rig"] = False
+
+        # 5b. Fix non-deforming bone orientations
+        _fix_nondeforming_bone_orientations(new_armature)
+
+        # 5c. Add default IGB material properties
+        for _, mesh_obj in skin_objects:
+            _ensure_igb_material_properties(mesh_obj)
+
+        # 6. Update panel state
+        _populate_import_results(context, props, new_armature,
+                                 skin_objects, actions)
+
+        _report({'INFO'},
+                f"Round-trip complete: game-scale actor with "
+                f"{len(skin_objects)} mesh(es)")
+
+        # 7. Clean up temp file
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    except Exception as e:
+        _report({'WARNING'}, f"Round-trip failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 class ACTOR_OT_convert_rig(Operator):
     """Convert a Unity Humanoid or Mixamo armature to the XML2 Bip01 skeleton"""
     bl_idname = "actor.convert_rig"
@@ -572,6 +690,17 @@ class ACTOR_OT_convert_rig(Operator):
         max=500.0,
     )
 
+    target_pose: EnumProperty(
+        name="Target Pose",
+        items=[
+            ('T_POSE', "T-Pose (Recommended)",
+             "Repose arms to T-pose for XML2 animation compatibility"),
+            ('A_POSE', "A-Pose",
+             "Keep A-pose arm orientation (for custom animations or other games)"),
+        ],
+        default='T_POSE',
+    )
+
     @classmethod
     def poll(cls, context):
         obj = context.active_object
@@ -583,13 +712,19 @@ class ACTOR_OT_convert_rig(Operator):
         armature_obj = context.active_object
         result = convert_rig(armature_obj, profile=self.rig_profile,
                              auto_scale=self.auto_scale,
-                             target_height=self.target_height)
+                             target_height=self.target_height,
+                             target_pose=self.target_pose)
 
         if result['success']:
+            pose_info = ""
+            src = result.get('source_pose', 'UNKNOWN')
+            if src != 'UNKNOWN':
+                pose_info = f" (detected {src} → {self.target_pose})"
             self.report(
                 {'INFO'},
                 f"Converted rig: {result['mapped']} mapped, "
-                f"{result['added']} added, {result['removed']} removed")
+                f"{result['added']} added, {result['removed']} removed"
+                f"{pose_info}")
             # Set as active armature in the IGB Actors panel
             props = context.scene.igb_actor
             props.active_armature = armature_obj.name
@@ -606,144 +741,173 @@ class ACTOR_OT_convert_rig(Operator):
 
             # Round-trip: export skin to temp IGB then reimport for a clean
             # IGB-compatible mesh that responds correctly to XML2 animations.
-            self._round_trip_skin(context, armature_obj, props)
+            _round_trip_skin(context, armature_obj, props, operator=self)
 
             return {'FINISHED'}
         else:
             self.report({'ERROR'}, result['error'])
             return {'CANCELLED'}
 
-    def _round_trip_skin(self, context, armature_obj, props):
-        """Full round-trip: export to game-scale IGB, delete original, reimport fresh.
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
 
-        Exports the converted rig + child meshes at full game scale (with
-        igb_export_scale and axis rotation applied), then deletes the original
-        armature and all child meshes, and reimports the exported IGB as a
-        completely fresh actor at game scale.
 
-        This gives a clean IGB-compatible model usable for XML2 animation testing.
-        """
-        import tempfile
+class ACTOR_OT_setup_skin(Operator):
+    """Auto-setup an armature for IGB skin export.
 
-        # Collect child meshes
-        mesh_children = [c for c in armature_obj.children if c.type == 'MESH']
-        if not mesh_children:
-            self.report({'INFO'}, "No child meshes to round-trip")
-            return
+    Detects whether the rig is already an XML2 Bip01 skeleton or needs
+    conversion. For Bip01 rigs: computes skeleton data and configures
+    properties. For non-Bip01 rigs: runs full conversion pipeline.
+    Either way, performs a round-trip export/reimport for a clean
+    IGB-compatible model ready for in-game use.
+    """
+    bl_idname = "actor.setup_skin"
+    bl_label = "Setup Skin"
+    bl_options = {'REGISTER', 'UNDO'}
 
-        # Check that skeleton data exists (convert_rig stores it)
-        if "igb_skin_bone_translations" not in armature_obj:
-            self.report({'WARNING'},
-                        "No skeleton data on armature, skipping round-trip")
-            return
+    # --- Conversion options (only used for non-Bip01 rigs) ---
+    rig_profile: EnumProperty(
+        name="Source Rig",
+        items=[
+            ('AUTO', "Auto-Detect", "Detect Unity or Mixamo automatically"),
+            ('UNITY', "Unity Humanoid", "Unity Humanoid bone naming"),
+            ('MIXAMO', "Mixamo", "Mixamo bone naming (mixamorig: prefix)"),
+        ],
+        default='AUTO',
+    )
 
-        try:
-            from ..exporter.skin_export import export_skin
-            from .actor_import import import_actor
+    target_pose: EnumProperty(
+        name="Target Pose",
+        items=[
+            ('T_POSE', "T-Pose (Recommended)",
+             "Repose arms to T-pose for XML2 animation compatibility"),
+            ('A_POSE', "A-Pose",
+             "Keep A-pose arm orientation (for custom animations)"),
+        ],
+        default='T_POSE',
+    )
 
-            # 1. Export to temp IGB at FULL game scale.
-            #    export_skin() applies igb_export_scale (~67x) to skeleton
-            #    translations + inv_joint matrices, and applies axis rotation
-            #    (igb_converted_rig) + scale to mesh vertex data.
-            tmp_path = os.path.join(tempfile.gettempdir(),
-                                    f"{armature_obj.name}_roundtrip.igb")
+    # --- Shared options ---
+    auto_scale: BoolProperty(
+        name="Auto Scale",
+        description="Automatically scale the rig to match XML2 character proportions",
+        default=True,
+    )
 
-            mesh_objs = [(c, False) for c in mesh_children]
-            success = export_skin(
-                filepath=tmp_path,
-                mesh_objs=mesh_objs,
-                armature_obj=armature_obj,
-                operator=self,
-                swap_rb=False,
-                texture_mode='clut',
-            )
+    target_height: FloatProperty(
+        name="Target Height",
+        description="Target character height in game units "
+                    "(XML2 characters are ~68 units tall)",
+        default=68.0,
+        min=10.0,
+        max=500.0,
+    )
 
-            if not success:
-                self.report({'WARNING'},
-                            "Round-trip export failed, keeping original meshes")
-                return
-
-            # 2. Find old collection (to clean up after deleting armature)
-            old_collection = None
-            for coll in bpy.data.collections:
-                if armature_obj.name in coll.objects:
-                    old_collection = coll
-                    break
-
-            # 3. Delete original armature and ALL child meshes
-            children_to_remove = list(armature_obj.children)
-            for child in children_to_remove:
-                bpy.data.objects.remove(child, do_unlink=True)
-            bpy.data.objects.remove(armature_obj, do_unlink=True)
-            armature_obj = None  # No longer valid
-
-            # Remove old empty collection
-            if old_collection and len(old_collection.objects) == 0:
-                bpy.data.collections.remove(old_collection)
-
-            # 4. Reimport the temp IGB as a completely fresh actor.
-            #    Pass it as both the animation file AND skin file.
-            #    extract_skeleton() finds igSkeleton directly in the skin IGB,
-            #    inv_joint matrices provide bone positions at game scale,
-            #    and _import_skin_file() reads the geometry back.
-            result = import_actor(
-                context, tmp_path,
-                skin_filepaths=[("default", tmp_path)],
-                operator=self,
-                options={
-                    'import_skins': True,
-                    'import_animations': False,
-                    'import_materials': True,
-                    'game_preset': 'xml2_pc',
-                },
-            )
-
-            if result is None:
-                self.report({'ERROR'}, "Round-trip reimport failed")
-                return
-
-            new_armature, skin_objects, actions = result
-
-            # 5. The new armature is already at game scale — set export
-            #    scale to 1.0 so future exports don't double-scale.
-            new_armature["igb_export_scale"] = 1.0
-            new_armature["igb_converted_rig"] = False  # Already in game space
-
-            # 5b. Fix non-deforming bone orientations.
-            #     In native XML2 imports, Root/Bip01/Motion get their
-            #     orientation from afakeanim bind_pose (identity quaternion
-            #     → bone tail along Y-forward).  The round-trip has no
-            #     bind_pose, so build_armature defaults to Z-up tails.
-            #     This changes rest_q and rotates all animations by 90°.
-            #     Fix: set these bones to identity orientation (Y-forward).
-            _fix_nondeforming_bone_orientations(new_armature)
-
-            # 5c. Add default IGB material properties to meshes so the
-            #     IGB Materials panel can edit render state.
-            for _, mesh_obj in skin_objects:
-                _ensure_igb_material_properties(mesh_obj)
-
-            # 6. Update panel state with the new actor
-            _populate_import_results(context, props, new_armature,
-                                     skin_objects, actions)
-
-            self.report({'INFO'},
-                        f"Round-trip complete: game-scale actor with "
-                        f"{len(skin_objects)} mesh(es)")
-
-            # 7. Clean up temp file
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-        except Exception as e:
-            self.report({'WARNING'}, f"Round-trip failed: {e}")
-            import traceback
-            traceback.print_exc()
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE'
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        armature_obj = context.active_object
+        has_bip01 = ("Bip01" in armature_obj.data.bones
+                     if armature_obj else False)
+
+        if has_bip01:
+            layout.label(text="Bip01 rig detected", icon='CHECKMARK')
+            layout.label(text="Will compute skeleton data and round-trip")
+        else:
+            layout.label(text="Non-XML2 rig detected", icon='INFO')
+            layout.label(text="Will convert to XML2 and round-trip")
+            layout.separator()
+            layout.prop(self, "rig_profile")
+            layout.prop(self, "target_pose")
+
+        layout.separator()
+        layout.prop(self, "auto_scale")
+        if self.auto_scale:
+            layout.prop(self, "target_height")
+
+    def execute(self, context):
+        armature_obj = context.active_object
+        has_bip01 = "Bip01" in armature_obj.data.bones
+
+        if has_bip01:
+            return self._setup_bip01(context, armature_obj)
+        else:
+            return self._convert_and_setup(context, armature_obj)
+
+    def _convert_and_setup(self, context, armature_obj):
+        """Full conversion path for non-XML2 rigs."""
+        from .rig_converter import convert_rig
+
+        result = convert_rig(armature_obj, profile=self.rig_profile,
+                             auto_scale=self.auto_scale,
+                             target_height=self.target_height,
+                             target_pose=self.target_pose)
+
+        if not result['success']:
+            self.report({'ERROR'}, result['error'])
+            return {'CANCELLED'}
+
+        pose_info = ""
+        src = result.get('source_pose', 'UNKNOWN')
+        if src != 'UNKNOWN':
+            pose_info = f" (detected {src} → {self.target_pose})"
+        self.report(
+            {'INFO'},
+            f"Converted rig: {result['mapped']} mapped, "
+            f"{result['added']} added, {result['removed']} removed"
+            f"{pose_info}")
+
+        props = context.scene.igb_actor
+        props.active_armature = armature_obj.name
+
+        _populate_skins_from_children(props, armature_obj)
+
+        for child in armature_obj.children:
+            if child.type == 'MESH':
+                _ensure_igb_material_properties(child)
+
+        _round_trip_skin(context, armature_obj, props, operator=self)
+        return {'FINISHED'}
+
+    def _setup_bip01(self, context, armature_obj):
+        """Setup path for existing Bip01 rigs.
+
+        Only computes and stores skeleton metadata needed for export.
+        Does NOT modify bone orientations or round-trip the mesh — the
+        model is already in the correct state.
+        """
+        from .rig_converter import setup_bip01_rig
+
+        result = setup_bip01_rig(armature_obj,
+                                 auto_scale=self.auto_scale,
+                                 target_height=self.target_height)
+
+        if not result['success']:
+            self.report({'ERROR'}, result['error'])
+            return {'CANCELLED'}
+
+        props = context.scene.igb_actor
+        props.active_armature = armature_obj.name
+
+        _populate_skins_from_children(props, armature_obj)
+
+        for child in armature_obj.children:
+            if child.type == 'MESH':
+                _ensure_igb_material_properties(child)
+
+        added = result.get('added', 0)
+        msg = "Skin setup complete — skeleton data stored"
+        if added > 0:
+            msg += f", created {added} missing bone(s)"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
 
 
 class ACTOR_OT_add_mesh_as_skin(Operator):
@@ -1425,6 +1589,20 @@ class ACTOR_OT_add_segment(Operator):
     bl_label = "Add Segment"
     bl_options = {'REGISTER', 'UNDO'}
 
+    segment_name: StringProperty(
+        name="Segment Name",
+        description="Name for this segment (e.g. 'gun_left', 'cape'). "
+                    "Leave empty to add as part of the body (no segment wrapping)",
+        default="",
+    )
+
+    segment_visible: BoolProperty(
+        name="Visible",
+        description="If checked, segment starts visible. "
+                    "If unchecked, segment starts hidden (flag bit 1 set)",
+        default=True,
+    )
+
     @classmethod
     def poll(cls, context):
         props = context.scene.igb_actor
@@ -1438,6 +1616,10 @@ class ACTOR_OT_add_segment(Operator):
                 return True
         return False
 
+    def invoke(self, context, event):
+        # Show dialog so user can set segment name and visibility
+        return context.window_manager.invoke_props_dialog(self)
+
     def execute(self, context):
         props = context.scene.igb_actor
         armature_obj = bpy.data.objects.get(props.active_armature)
@@ -1449,6 +1631,8 @@ class ACTOR_OT_add_segment(Operator):
         active_skin = props.skins[props.skins_index]
         active_mesh = bpy.data.objects.get(active_skin.object_name)
         template = active_mesh.get("igb_skin_template", "") if active_mesh else ""
+
+        seg_flags = 0 if self.segment_visible else 2
 
         existing_names = {item.object_name for item in props.skins}
         added = 0
@@ -1481,6 +1665,25 @@ class ACTOR_OT_add_segment(Operator):
             is_outline = "_outline" in obj.name.lower()
             obj["igb_is_outline"] = is_outline
 
+            # Set segment properties
+            if self.segment_name:
+                if is_outline:
+                    obj["igb_segment_name"] = self.segment_name + "_outline"
+                else:
+                    obj["igb_segment_name"] = self.segment_name
+            else:
+                obj["igb_segment_name"] = ""
+
+            obj["igb_segment_flags"] = seg_flags
+
+            # Apply Blender visibility to match segment flags
+            if seg_flags & 2:
+                obj.hide_viewport = True
+                obj.hide_render = True
+            else:
+                obj.hide_viewport = False
+                obj.hide_render = False
+
             item = props.skins.add()
             item.name = f"{obj.name} (outline)" if is_outline else obj.name
             item.object_name = obj.name
@@ -1489,7 +1692,10 @@ class ACTOR_OT_add_segment(Operator):
             added += 1
 
         if added > 0:
-            self.report({'INFO'}, f"Added {added} segment(s)")
+            vis_text = "visible" if self.segment_visible else "hidden"
+            seg_text = f"'{self.segment_name}'" if self.segment_name else "body"
+            self.report({'INFO'},
+                        f"Added {added} mesh(es) as {seg_text} segment ({vis_text})")
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "No new meshes to add as segments")
@@ -1497,13 +1703,15 @@ class ACTOR_OT_add_segment(Operator):
 
 
 class ACTOR_OT_remove_segment(Operator):
-    """Remove a segment from the skins list"""
+    """Remove all meshes in a segment group from the skins list"""
     bl_idname = "actor.remove_segment"
     bl_label = "Remove Segment"
     bl_options = {'REGISTER', 'UNDO'}
 
-    segment_object_name: StringProperty(
-        name="Segment Object",
+    segment_name: StringProperty(
+        name="Segment Name",
+        description="Base segment name (e.g. 'gun_left'). "
+                    "Removes both main and outline meshes for this segment",
         default="",
     )
 
@@ -1516,24 +1724,41 @@ class ACTOR_OT_remove_segment(Operator):
     def execute(self, context):
         props = context.scene.igb_actor
 
-        if not self.segment_object_name:
+        if not self.segment_name:
             self.report({'WARNING'}, "No segment specified")
             return {'CANCELLED'}
 
-        # Find and remove the segment from skins list
-        for i, item in enumerate(props.skins):
-            if item.object_name == self.segment_object_name:
-                props.skins.remove(i)
-                # Adjust skins_index if needed
-                if props.skins_index >= len(props.skins) and len(props.skins) > 0:
-                    props.skins_index = len(props.skins) - 1
-                self.report({'INFO'},
-                            f"Removed segment '{self.segment_object_name}'")
-                return {'FINISHED'}
+        # Collect indices of skins list entries that belong to this segment
+        # A mesh belongs to segment "gun_left" if its igb_segment_name is
+        # "gun_left" or "gun_left_outline"
+        matching_names = {self.segment_name, self.segment_name + "_outline"}
+        indices_to_remove = []
 
-        self.report({'WARNING'},
-                    f"Segment '{self.segment_object_name}' not found in skins list")
-        return {'CANCELLED'}
+        for i, item in enumerate(props.skins):
+            mesh_obj = bpy.data.objects.get(item.object_name)
+            if mesh_obj is None:
+                continue
+            seg = mesh_obj.get("igb_segment_name", "")
+            if seg in matching_names:
+                indices_to_remove.append(i)
+
+        if not indices_to_remove:
+            self.report({'WARNING'},
+                        f"No meshes found for segment '{self.segment_name}'")
+            return {'CANCELLED'}
+
+        # Remove in reverse order so indices stay valid
+        for i in reversed(indices_to_remove):
+            props.skins.remove(i)
+
+        # Adjust skins_index if needed
+        if props.skins_index >= len(props.skins) and len(props.skins) > 0:
+            props.skins_index = len(props.skins) - 1
+
+        self.report({'INFO'},
+                    f"Removed {len(indices_to_remove)} mesh(es) "
+                    f"from segment '{self.segment_name}'")
+        return {'FINISHED'}
 
 
 class ACTOR_OT_toggle_segment(Operator):
@@ -1615,6 +1840,7 @@ _classes = (
     ACTOR_OT_export_skin,
     ACTOR_OT_export_animations,
     ACTOR_OT_convert_rig,
+    ACTOR_OT_setup_skin,
     ACTOR_OT_add_mesh_as_skin,
     ACTOR_OT_remove_skin,
     ACTOR_OT_refresh_segments,

@@ -575,10 +575,326 @@ def _apply_transforms_and_scale(armature_obj, target_height=68.0, auto_scale=Tru
 
 
 # ============================================================================
+# Pose Detection & Reposing
+# ============================================================================
+
+# Arm-chain bones that need reposing when converting between A-pose and T-pose.
+# These are the bones whose rest orientation changes between the two poses.
+ARM_CHAIN_BONES = {
+    "Bip01 L Clavicle", "Bip01 L UpperArm", "Bip01 L Forearm", "Bip01 L Hand",
+    "Bip01 L Finger0", "Bip01 L Finger01", "Bip01 L Finger1", "Bip01 L Finger11",
+    "Bip01 R Clavicle", "Bip01 R UpperArm", "Bip01 R Forearm", "Bip01 R Hand",
+    "Bip01 R Finger0", "Bip01 R Finger01", "Bip01 R Finger1", "Bip01 R Finger11",
+}
+
+
+def _detect_source_pose(armature_obj, rename_map=None):
+    """Detect whether the source rig is in T-pose or A-pose.
+
+    Measures the elevation angle of UpperArm bones relative to the horizontal
+    plane.  Uses PRE-rename bone names (the original Unity/Mixamo names) via
+    the rename_map to find the UpperArm bones before they've been renamed.
+
+    Args:
+        armature_obj: Blender armature object (before rename).
+        rename_map: Dict mapping old_name -> xml2_name.  If None, assumes
+                    bones already have XML2 names.
+
+    Returns:
+        'T_POSE' if arms are nearly horizontal (< 15° from XY plane),
+        'A_POSE' if arms are angled down (25-65° below horizontal),
+        'UNKNOWN' if detection fails or angle is ambiguous.
+    """
+    import math
+
+    # Build reverse map: xml2_name -> current_bone_name
+    if rename_map:
+        reverse = {v: k for k, v in rename_map.items()}
+    else:
+        reverse = {}
+
+    angles = []
+    for side_upper, side_fore in [
+        ("Bip01 L UpperArm", "Bip01 L Forearm"),
+        ("Bip01 R UpperArm", "Bip01 R Forearm"),
+    ]:
+        # Resolve to current bone names
+        upper_name = reverse.get(side_upper, side_upper)
+        fore_name = reverse.get(side_fore, side_fore)
+
+        upper_bone = armature_obj.data.bones.get(upper_name)
+        fore_bone = armature_obj.data.bones.get(fore_name)
+
+        if upper_bone is None:
+            continue
+
+        # Arm direction: upperarm head -> forearm head (or upperarm tail)
+        if fore_bone is not None:
+            arm_dir = fore_bone.head_local - upper_bone.head_local
+        else:
+            arm_dir = upper_bone.tail_local - upper_bone.head_local
+
+        if arm_dir.length < 0.0001:
+            continue
+
+        # Elevation angle from horizontal (XY plane in Blender Z-up)
+        horizontal_len = math.sqrt(arm_dir.x ** 2 + arm_dir.y ** 2)
+        elevation = math.degrees(math.atan2(abs(arm_dir.z), horizontal_len))
+        angles.append(elevation)
+
+    if not angles:
+        return 'UNKNOWN'
+
+    avg_angle = sum(angles) / len(angles)
+
+    if avg_angle < 15.0:
+        return 'T_POSE'
+    elif 25.0 <= avg_angle <= 65.0:
+        return 'A_POSE'
+    else:
+        return 'UNKNOWN'
+
+
+def _repose_meshes(armature_obj, source_pose, target_pose):
+    """Repose mesh vertices and shape keys from source pose to target pose.
+
+    When source_pose != target_pose, this rotates the arm-chain bones in pose
+    mode to match the target, then manually computes deformed vertex positions
+    (because VRChat models have 100-200+ shape keys which prevent using
+    bpy.ops.object.modifier_apply()).
+
+    The algorithm:
+    1. Measure the actual arm angle from the rest pose
+    2. Compute the delta rotation needed to reach the target angle
+    3. Set pose bone rotations for the arm chain
+    4. For each child mesh:
+       a. Compute deformed base mesh positions via weighted bone transforms
+       b. Transform shape key offsets by per-vertex weighted rotation
+       c. Write new positions back
+    5. Apply pose as new rest pose on the armature
+
+    Args:
+        armature_obj: Blender armature (already renamed to XML2 bones).
+        source_pose: 'T_POSE' or 'A_POSE'.
+        target_pose: 'T_POSE' or 'A_POSE'.
+    """
+    import bpy
+    import math
+    from mathutils import Matrix, Quaternion, Vector
+
+    if source_pose == target_pose:
+        return
+
+    # --- 1. Measure actual arm angle and compute delta ---
+    # T-pose = 0° elevation, A-pose = ~45° elevation below horizontal.
+    # We measure the actual angle rather than assuming exact 45°.
+    arm_bones_info = []  # (bone_name, measured_angle, side)
+    for side, upper_name, fore_name in [
+        ('L', "Bip01 L UpperArm", "Bip01 L Forearm"),
+        ('R', "Bip01 R UpperArm", "Bip01 R Forearm"),
+    ]:
+        upper_bone = armature_obj.data.bones.get(upper_name)
+        fore_bone = armature_obj.data.bones.get(fore_name)
+        if upper_bone is None:
+            continue
+
+        if fore_bone is not None:
+            arm_dir = fore_bone.head_local - upper_bone.head_local
+        else:
+            arm_dir = upper_bone.tail_local - upper_bone.head_local
+
+        if arm_dir.length < 0.0001:
+            continue
+
+        horizontal_len = math.sqrt(arm_dir.x ** 2 + arm_dir.y ** 2)
+        elevation = math.atan2(arm_dir.z, horizontal_len)  # radians, negative = downward
+        arm_bones_info.append((upper_name, elevation, side))
+
+    if not arm_bones_info:
+        return
+
+    # Target elevation: T-pose = 0°, A-pose = -45° (arms angled down)
+    if target_pose == 'T_POSE':
+        target_elevation = 0.0
+    else:
+        target_elevation = math.radians(-45.0)
+
+    # --- 2. Disconnect all bones so pose rotation works freely ---
+    # Connected bones (use_connect=True) have their head locked to the
+    # parent's tail, which prevents bpy.ops.pose.armature_apply() from
+    # correctly applying the reposed positions as the new rest pose.
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    for eb in armature_obj.data.edit_bones:
+        eb.use_connect = False
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # --- 3. Enter pose mode and set rotations ---
+    bpy.ops.object.mode_set(mode='POSE')
+
+    # Clear all pose transforms first
+    for pb in armature_obj.pose.bones:
+        pb.rotation_mode = 'QUATERNION'
+        pb.rotation_quaternion = Quaternion((1, 0, 0, 0))
+        pb.location = Vector((0, 0, 0))
+        pb.scale = Vector((1, 1, 1))
+
+    # Apply delta rotation to each arm's UpperArm bone.
+    # The rotation is around the bone's local "forward" axis (the axis
+    # pointing outward from shoulder, which is roughly ±Y in Blender space
+    # for a character facing -Y).
+    for upper_name, current_elevation, side in arm_bones_info:
+        delta_angle = target_elevation - current_elevation
+
+        pb = armature_obj.pose.bones.get(upper_name)
+        if pb is None:
+            continue
+
+        # The arm extends outward along bone Y. We want to rotate the arm
+        # up/down, which is a rotation around the arm's outward axis.
+        # In the bone's local space, Y is along the bone, so we rotate
+        # around the bone-local Y axis (roll).
+        # Actually, for arms extending to the side, the up/down rotation
+        # is around the forward axis (which is bone-local X or Z depending
+        # on the bone's roll).
+        #
+        # Simpler approach: compute the rotation axis in armature space.
+        # The arm points outward (roughly ±Y). We want to pitch it up/down.
+        # Rotation axis = arm direction cross up vector = forward/back axis.
+        bone = armature_obj.data.bones[upper_name]
+        arm_dir = bone.tail_local - bone.head_local
+        arm_dir.normalize()
+
+        # Cross with up vector to get rotation axis
+        up = Vector((0, 0, 1))
+        rot_axis = arm_dir.cross(up)
+        if rot_axis.length < 0.0001:
+            continue
+        rot_axis.normalize()
+
+        # Convert to bone-local rotation axis
+        bone_mat = bone.matrix_local.to_3x3()
+        try:
+            local_axis = bone_mat.inverted() @ rot_axis
+        except ValueError:
+            continue
+        local_axis.normalize()
+
+        # Apply the delta as a quaternion in bone-local space
+        delta_q = Quaternion(local_axis, delta_angle)
+        pb.rotation_quaternion = delta_q
+
+    # Force dependency graph update so pose matrices are current
+    bpy.context.view_layer.update()
+
+    # --- 4. Deform mesh vertices manually ---
+    for child in armature_obj.children:
+        if child.type != 'MESH':
+            continue
+
+        mesh = child.data
+        n_verts = len(mesh.vertices)
+
+        # Find the armature modifier
+        arm_mod = None
+        for mod in child.modifiers:
+            if mod.type == 'ARMATURE' and mod.object == armature_obj:
+                arm_mod = mod
+                break
+        if arm_mod is None:
+            continue
+
+        # Precompute per-bone transform: pose_bone.matrix @ rest_bone.matrix_local.inverted()
+        bone_transforms = {}
+        for pb in armature_obj.pose.bones:
+            bone = pb.bone
+            try:
+                rest_inv = bone.matrix_local.inverted()
+            except ValueError:
+                rest_inv = Matrix.Identity(4)
+            bone_transforms[pb.name] = pb.matrix @ rest_inv
+
+        # Precompute per-vertex weighted rotation (for shape key offsets)
+        # and deformed positions (for base mesh)
+        new_positions = [None] * n_verts
+        per_vertex_matrices = [None] * n_verts
+
+        for vi, vert in enumerate(mesh.vertices):
+            # Gather bone weights for this vertex
+            weighted_mat = Matrix.Identity(4) * 0  # zero matrix
+            total_weight = 0.0
+
+            for g in vert.groups:
+                vg = child.vertex_groups[g.group]
+                bt = bone_transforms.get(vg.name)
+                if bt is None:
+                    continue
+                w = g.weight
+                if w < 0.0001:
+                    continue
+                for r in range(4):
+                    for c in range(4):
+                        weighted_mat[r][c] += bt[r][c] * w
+                total_weight += w
+
+            if total_weight < 0.0001:
+                # No valid bone weights — keep original position
+                new_positions[vi] = vert.co.copy()
+                per_vertex_matrices[vi] = Matrix.Identity(4)
+                continue
+
+            # Normalize
+            for r in range(4):
+                for c in range(4):
+                    weighted_mat[r][c] /= total_weight
+
+            per_vertex_matrices[vi] = weighted_mat
+            new_positions[vi] = weighted_mat @ vert.co
+
+        # Write deformed positions to base mesh
+        for vi, pos in enumerate(new_positions):
+            if pos is not None:
+                mesh.vertices[vi].co = pos
+
+        # Transform shape key offsets
+        if mesh.shape_keys and mesh.shape_keys.key_blocks:
+            basis = mesh.shape_keys.key_blocks[0]
+            basis_coords = [Vector(v.co) for v in basis.data]
+
+            # Update basis to match new deformed positions
+            for vi, pos in enumerate(new_positions):
+                if pos is not None:
+                    basis.data[vi].co = pos
+
+            # For each non-basis shape key, rotate the offset vector
+            for sk in mesh.shape_keys.key_blocks[1:]:
+                for vi in range(n_verts):
+                    original_offset = Vector(sk.data[vi].co) - basis_coords[vi]
+                    if original_offset.length < 0.00001:
+                        # Zero offset — just update to new basis
+                        sk.data[vi].co = new_positions[vi]
+                        continue
+
+                    # Rotate the offset by the per-vertex weighted rotation
+                    mat = per_vertex_matrices[vi]
+                    rot_mat = mat.to_3x3()
+                    rotated_offset = rot_mat @ original_offset
+                    sk.data[vi].co = new_positions[vi] + rotated_offset
+
+        mesh.update()
+
+    # --- 5. Apply pose as rest pose ---
+    bpy.ops.pose.armature_apply()
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+
+# ============================================================================
 # Main Conversion Function
 # ============================================================================
 
-def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.0):
+def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.0,
+                target_pose='T_POSE'):
     """Convert an armature from Unity/Mixamo naming to XML2 Bip01 convention.
 
     This is the main entry point. It:
@@ -588,18 +904,21 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     3. Merges extra vertex weights into nearest mapped bones
     4. Removes unmapped bones
     5. Creates missing XML2 bones as dummies
-    6. Computes inverse joint matrices and bone translations
-    7. Stores all required custom properties for IGB export
+    6. Detects source pose and reposes if needed
+    7. Computes inverse joint matrices and bone translations
+    8. Stores all required custom properties for IGB export
 
     Args:
         armature_obj: Blender armature object.
         profile: 'AUTO', 'UNITY', or 'MIXAMO'.
         auto_scale: If True, auto-scale rig to match XML2 character proportions.
         target_height: Target character height in game units (default ~80).
+        target_pose: 'T_POSE' or 'A_POSE'. Target arm pose for export.
+                     T_POSE recommended for XML2 animation compatibility.
 
     Returns:
         dict with keys: success (bool), mapped (int), added (int),
-        removed (int), error (str or None).
+        removed (int), source_pose (str), error (str or None).
     """
     import bpy
     from mathutils import Matrix, Vector
@@ -635,6 +954,9 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
         return {'success': False,
                 'error': f"No bones matched the {profile} naming convention.",
                 'mapped': 0, 'added': 0, 'removed': 0}
+
+    # ---- 2b. Detect source pose (before rename, using rename_map) ----
+    source_pose = _detect_source_pose(armature_obj, rename_map)
 
     # ---- 3. Merge vertex weights for extra bones ----
     # Build reverse rename map: xml2_name -> current_bone_name
@@ -810,11 +1132,20 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
+    # ---- 7b. Repose if source pose != target pose ----
+    # Must happen AFTER bone rename + hierarchy setup but BEFORE computing
+    # bind matrices, so that arm bone positions reflect the target pose.
+    if source_pose != 'UNKNOWN' and source_pose != target_pose:
+        _repose_meshes(armature_obj, source_pose, target_pose)
+
     # ---- 8. Compute inverse joint matrices from rest pose ----
-    inv_matrices = _compute_inv_joint_matrices(armature_obj)
+    # T-pose target: use hardcoded NATIVE_BONE_ROTATIONS (animation compat)
+    # A-pose target: compute rotations from actual bone orientations
+    use_native = (target_pose == 'T_POSE')
+    inv_matrices = _compute_inv_joint_matrices(armature_obj, use_native)
 
     # ---- 9. Compute bone translations ----
-    translations = _compute_bone_translations(armature_obj)
+    translations = _compute_bone_translations(armature_obj, use_native)
 
     # ---- 9b. Force non-deforming root bones to native translations ----
     # Bip01 Z must be exactly ~41.82 game units for correct menu placement,
@@ -836,6 +1167,184 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
         'mapped': mapped_count,
         'added': added_count,
         'removed': removed_count,
+        'source_pose': source_pose,
+        'error': None,
+    }
+
+
+def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
+    """Setup an existing Bip01 rig for IGB skin export.
+
+    Unlike convert_rig(), this does NOT rename or reparent bones — it assumes
+    the armature already uses XML2 bone naming (Bip01, Bip01 Pelvis, etc.).
+    It creates any missing XML2 bones, fixes the parent hierarchy, computes
+    inverse joint matrices and bone translations, and stores all required
+    custom properties for the skin exporter.
+
+    Use this for:
+    - Native XML2 rigs from other importers or manual creation
+    - Rigs that already have Bip01 naming but lack IGB export properties
+    - Re-setting up a rig whose properties were lost or need refreshing
+
+    Args:
+        armature_obj: Blender armature object with XML2 bone names.
+        auto_scale: If True, auto-scale rig to match XML2 character proportions.
+        target_height: Target character height in game units (default ~68).
+
+    Returns:
+        dict with keys: success (bool), added (int), error (str or None).
+    """
+    import bpy
+    from mathutils import Vector
+
+    if armature_obj is None or armature_obj.type != 'ARMATURE':
+        return {'success': False, 'added': 0,
+                'error': "No armature selected"}
+
+    # Check that it actually has Bip01
+    if "Bip01" not in armature_obj.data.bones:
+        return {'success': False, 'added': 0,
+                'error': "Armature has no 'Bip01' bone. "
+                         "Use Convert Rig for non-XML2 rigs."}
+
+    # ---- 0. Apply object transforms and auto-scale ----
+    _apply_transforms_and_scale(armature_obj, target_height, auto_scale)
+
+    # ---- 1. Enter edit mode: create missing bones, fix hierarchy ----
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    edit_bones = armature_obj.data.edit_bones
+    added_count = 0
+    newly_created = set()  # Track which bones we create (vs already existed)
+
+    # Disconnect all bones (XML2 bones are never connected)
+    for eb in edit_bones:
+        eb.use_connect = False
+
+    # Compute a reference bone length for dummies
+    bone_lengths = [eb.length for eb in edit_bones if eb.length > 0.001]
+    avg_bone_len = (sum(bone_lengths) / len(bone_lengths)
+                    if bone_lengths else 0.05)
+
+    # Create missing XML2 bones
+    current_names = {eb.name for eb in edit_bones}
+    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+        display_name = name if name else "Bone_000"
+        if display_name in current_names:
+            continue
+
+        eb = edit_bones.new(display_name)
+        small_len = avg_bone_len * 0.3
+
+        if parent_idx >= 0:
+            parent_bone_name = XML2_SKELETON[parent_idx][0]
+            if not parent_bone_name:
+                parent_bone_name = "Bone_000"
+            parent_eb = edit_bones.get(parent_bone_name)
+            if parent_eb:
+                eb.parent = parent_eb
+                eb.head = parent_eb.tail.copy()
+
+                # Smart placement for common bones
+                if name == "Bip01 Spine2":
+                    neck_eb = edit_bones.get("Bip01 Neck")
+                    if neck_eb:
+                        eb.head = (parent_eb.tail + neck_eb.head) * 0.5
+                elif name.startswith("Bip01 Ponytail"):
+                    head_eb = edit_bones.get("Bip01 Head")
+                    if head_eb:
+                        eb.head = head_eb.tail.copy()
+                        if name == "Bip01 Ponytail11":
+                            pony1 = edit_bones.get("Bip01 Ponytail1")
+                            if pony1:
+                                eb.head = pony1.tail.copy()
+
+                parent_dir = parent_eb.tail - parent_eb.head
+                if parent_dir.length > 0.001:
+                    eb.tail = eb.head + parent_dir.normalized() * small_len
+                else:
+                    eb.tail = eb.head + Vector((0, small_len, 0))
+            else:
+                eb.head = Vector((0, 0, 0))
+                eb.tail = Vector((0, small_len, 0))
+        else:
+            eb.head = Vector((0, 0, 0))
+            eb.tail = Vector((0, small_len, 0))
+
+        eb.use_connect = False
+        added_count += 1
+        newly_created.add(display_name)
+        current_names.add(display_name)
+
+    # Fix parent hierarchy for ALL XML2 bones
+    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+        display_name = name if name else "Bone_000"
+        eb = edit_bones.get(display_name)
+        if not eb:
+            continue
+        if parent_idx >= 0:
+            parent_name = XML2_SKELETON[parent_idx][0]
+            parent_display = parent_name if parent_name else "Bone_000"
+            parent_eb = edit_bones.get(parent_display)
+            if parent_eb and eb.parent != parent_eb:
+                eb.parent = parent_eb
+
+    # Position structural bones — ONLY if they were newly created.
+    # Existing bones (Bip01, Motion, Bone_000) are already in the correct
+    # position and must NOT be moved.  Bip01 controls the model's facing
+    # direction, and Motion / Bone_000 must stay at the origin.
+    pelvis_eb = edit_bones.get("Bip01 Pelvis")
+
+    if "Bip01" in newly_created:
+        bip01_eb = edit_bones.get("Bip01")
+        if pelvis_eb and bip01_eb:
+            bip01_eb.head = pelvis_eb.head.copy()
+            bip01_eb.tail = (bip01_eb.head
+                             + Vector((0, 0, avg_bone_len * 0.3)))
+
+    if "Motion" in newly_created:
+        motion_eb = edit_bones.get("Motion")
+        if motion_eb:
+            motion_eb.head = Vector((0, 0, 0))
+            motion_eb.tail = Vector((0, avg_bone_len * 0.3, 0))
+
+    if "Bone_000" in newly_created:
+        bone000_eb = edit_bones.get("Bone_000")
+        if bone000_eb:
+            bone000_eb.head = Vector((0, 0, 0))
+            bone000_eb.tail = Vector((0, avg_bone_len * 0.3, 0))
+
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # ---- 2. Compute and store skeleton data ----
+    # Always use native T-pose rotations (NATIVE_BONE_ROTATIONS) since
+    # existing Bip01 rigs are expected to be in T-pose orientation.
+    use_native = True
+    inv_matrices = _compute_inv_joint_matrices(armature_obj, use_native)
+    translations = _compute_bone_translations(armature_obj, use_native)
+
+    export_scale = armature_obj.get("igb_export_scale", 1.0)
+    _force_native_root_translations(translations, export_scale)
+
+    _store_skeleton_properties(armature_obj, inv_matrices, translations)
+
+    # CRITICAL: Override igb_converted_rig to False for existing Bip01 rigs.
+    # _store_skeleton_properties() sets it to True (which tells the exporter
+    # to apply +90° Z rotation to mesh vertices for Blender→game conversion).
+    # But an existing Bip01 rig is already in the correct XML2 orientation —
+    # the mesh does NOT need any rotation applied during export.
+    armature_obj["igb_converted_rig"] = False
+
+    # NOTE: Do NOT call _update_bone_display() here.  The bones are
+    # already oriented correctly in the existing Bip01 rig — rewriting
+    # tails would rotate them to match hardcoded XML2 orientations and
+    # break the visual pose that's already correct.
+
+    return {
+        'success': True,
+        'added': added_count,
         'error': None,
     }
 
@@ -943,6 +1452,9 @@ def _update_bone_display(armature_obj):
     function sets each bone's tail to point along the native XML2 bone axis
     so the skeleton visually matches the game layout.
 
+    Bone lengths are computed from the distance to the nearest child bone
+    (matching the XML2 hierarchy) so bones look natural and proportional.
+
     This is purely cosmetic — all export data (inv_bind, translations) is
     already stored as custom properties and is not affected by tail changes.
     """
@@ -958,7 +1470,42 @@ def _update_bone_display(armature_obj):
 
     edit_bones = armature_obj.data.edit_bones
 
+    # Build XML2 parent->children map for natural bone length computation
+    xml2_children = {}  # parent_name -> [child_name, ...]
+    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+        if parent_idx >= 0:
+            parent_name = XML2_SKELETON[parent_idx][0]
+            parent_display = parent_name if parent_name else "Bone_000"
+            display_name = name if name else "Bone_000"
+            xml2_children.setdefault(parent_display, []).append(display_name)
+
+    # Compute a fallback bone length from the armature's Z extent
+    min_z = float('inf')
+    max_z = float('-inf')
     for eb in edit_bones:
+        min_z = min(min_z, eb.head.z)
+        max_z = max(max_z, eb.head.z)
+    armature_height = max(max_z - min_z, 0.1)
+    default_bone_len = armature_height * 0.03  # ~3% of height
+
+    for eb in edit_bones:
+        # Compute bone length from distance to nearest child
+        children = xml2_children.get(eb.name, [])
+        bone_len = 0.0
+        if children:
+            min_child_dist = float('inf')
+            for child_name in children:
+                child_eb = edit_bones.get(child_name)
+                if child_eb:
+                    dist = (child_eb.head - eb.head).length
+                    if dist > 0.001:
+                        min_child_dist = min(min_child_dist, dist)
+            if min_child_dist < float('inf'):
+                bone_len = min_child_dist * 0.8  # 80% of distance to child
+
+        if bone_len < 0.001:
+            bone_len = default_bone_len
+
         native_q = NATIVE_BONE_ROTATIONS.get(eb.name)
         if native_q:
             # Convert native rotation: Alchemy -> Blender, game space -> armature
@@ -968,11 +1515,9 @@ def _update_bone_display(armature_obj):
 
             # Bone Y axis = tail direction in Blender convention
             bone_dir = rot_mat @ Vector((0, 1, 0))
-            bone_len = max(eb.length, 0.02)
             eb.tail = eb.head + bone_dir * bone_len
         else:
             # Non-deforming bones (Bone_000, Bip01, Motion): point upward
-            bone_len = max(eb.length, 0.02)
             eb.tail = eb.head + Vector((0, 0, bone_len))
 
     bpy.ops.object.mode_set(mode='OBJECT')
@@ -1003,11 +1548,38 @@ def _get_game_rotation(armature_obj):
     return game_q.to_matrix().to_4x4()
 
 
-def _build_native_bind_matrix(name, bone, game_rot):
+def _compute_bone_rotation_alchemy(bone, game_rot):
+    """Derive a bone's bind-pose rotation in Alchemy convention from its rest matrix.
+
+    Used for A-pose export where we can't use the hardcoded T-pose
+    NATIVE_BONE_ROTATIONS.  Instead, we compute the rotation from the bone's
+    actual rest-pose orientation in game space.
+
+    Args:
+        bone: Blender bone (from armature.data.bones).
+        game_rot: 4x4 rotation matrix from Blender-local to game space.
+
+    Returns:
+        Quaternion in Blender convention (already conjugated from Alchemy).
+    """
+    from mathutils import Quaternion
+
+    # bone.matrix_local is the bone's rest transform in armature space.
+    # Convert to game space and extract the rotation.
+    game_mat = game_rot @ bone.matrix_local
+    q_blender = game_mat.to_quaternion()
+    return q_blender
+
+
+def _build_native_bind_matrix(name, bone, game_rot, use_native_rotations=True):
     """Build a bind matrix using native XML2 orientation + custom bone position.
 
     For deforming bones: native rotation + rig's game-space bone position.
     For non-deforming / unmapped: identity rotation at game-space position.
+
+    When use_native_rotations=False (A-pose export), computes the bone's
+    actual orientation from its rest matrix instead of using hardcoded
+    T-pose quaternions.
 
     CRITICAL — Quaternion convention:
     NATIVE_BONE_ROTATIONS are in Alchemy convention (conjugate of Blender).
@@ -1017,6 +1589,8 @@ def _build_native_bind_matrix(name, bone, game_rot):
         name: XML2 bone name.
         bone: Blender bone.
         game_rot: 4x4 rotation matrix from Blender-local to game space.
+        use_native_rotations: If True, use T-pose NATIVE_BONE_ROTATIONS.
+                              If False, compute from actual bone orientation.
 
     Returns:
         4x4 Matrix: bone's bind transform in game space (unscaled).
@@ -1025,27 +1599,44 @@ def _build_native_bind_matrix(name, bone, game_rot):
 
     bone_pos_game = game_rot @ bone.head_local
 
-    native_q = NATIVE_BONE_ROTATIONS.get(name)
-    if native_q:
-        # Conjugate: Alchemy convention -> Blender convention
-        q_blender = Quaternion(native_q).conjugated()
-        rot_4x4 = q_blender.to_matrix().to_4x4()
-        return Matrix.Translation(bone_pos_game) @ rot_4x4
+    if use_native_rotations:
+        native_q = NATIVE_BONE_ROTATIONS.get(name)
+        if native_q:
+            # Conjugate: Alchemy convention -> Blender convention
+            q_blender = Quaternion(native_q).conjugated()
+            rot_4x4 = q_blender.to_matrix().to_4x4()
+            return Matrix.Translation(bone_pos_game) @ rot_4x4
+        else:
+            return Matrix.Translation(bone_pos_game)
     else:
-        return Matrix.Translation(bone_pos_game)
+        # A-pose: compute rotation from actual bone orientation
+        if name in NATIVE_BONE_ROTATIONS:  # only deforming bones
+            q_blender = _compute_bone_rotation_alchemy(bone, game_rot)
+            rot_4x4 = q_blender.to_matrix().to_4x4()
+            return Matrix.Translation(bone_pos_game) @ rot_4x4
+        else:
+            return Matrix.Translation(bone_pos_game)
 
 
-def _compute_inv_joint_matrices(armature_obj):
-    """Compute inverse joint matrices from native rotations + custom positions.
+def _compute_inv_joint_matrices(armature_obj, use_native_rotations=True):
+    """Compute inverse joint matrices from rotations + custom positions.
 
     For each deforming bone (bm_idx >= 0), builds a bind matrix from:
-        - NATIVE_BONE_ROTATIONS quaternion  (correct orientation for animations)
-        - game_rot @ bone.head_local        (rig's own position in game space)
+        - Rotation (native T-pose or computed from actual bone orientation)
+        - game_rot @ bone.head_local (rig's own position in game space)
+
+    When use_native_rotations=True (T-pose target), uses NATIVE_BONE_ROTATIONS.
+    When use_native_rotations=False (A-pose target), computes from bone rest pose.
 
     Uses custom bone positions so the skeleton matches the mesh proportions.
     The exporter scales both mesh and skeleton by igb_export_scale.
 
     Stored in ROW-MAJOR order (Alchemy convention).
+
+    Args:
+        armature_obj: Blender armature object.
+        use_native_rotations: If True, use T-pose rotations. If False, compute
+                              from actual bone orientations (A-pose).
 
     Returns:
         List of 35 entries (one per XML2 bone), each either a 16-float list
@@ -1065,7 +1656,8 @@ def _compute_inv_joint_matrices(armature_obj):
         if bone is None:
             continue
 
-        bind_game = _build_native_bind_matrix(name, bone, game_rot)
+        bind_game = _build_native_bind_matrix(name, bone, game_rot,
+                                               use_native_rotations)
 
         try:
             inv_bind = bind_game.inverted()
@@ -1083,7 +1675,7 @@ def _compute_inv_joint_matrices(armature_obj):
     return result
 
 
-def _compute_bone_translations(armature_obj):
+def _compute_bone_translations(armature_obj, use_native_rotations=True):
     """Compute bone translations (parent-local offsets) from custom positions.
 
     Alchemy FK reconstructs bone world positions as:
@@ -1092,6 +1684,11 @@ def _compute_bone_translations(armature_obj):
     translation = inv(parent_bind) @ child_game_pos  (4D point, take xyz)
 
     For root bones (parent_idx < 0): translation = game-space world position.
+
+    Args:
+        armature_obj: Blender armature object.
+        use_native_rotations: If True, use T-pose rotations for parent bind.
+                              If False, compute from actual bone orientations.
 
     Returns:
         List of 35 [x, y, z] lists, indexed by bone index.
@@ -1131,7 +1728,7 @@ def _compute_bone_translations(armature_obj):
                 continue
 
             parent_bind = _build_native_bind_matrix(
-                parent_name, parent_bone, game_rot)
+                parent_name, parent_bone, game_rot, use_native_rotations)
             try:
                 local_pos = parent_bind.inverted() @ bone_pos_game
                 result[idx] = [local_pos.x, local_pos.y, local_pos.z]
