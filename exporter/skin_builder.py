@@ -594,13 +594,12 @@ class SkinBuilder:
                 (4, color_val, 'Vec4f', 16),
             ])
 
-            # Build children and collect segment refs for the attr list.
-            # Vanilla 1801.igb (Bishop) has segments in BOTH _attrList AND _childList:
-            #   _attrList: [ColorAttr, MaterialAttr, TexBind, TexState, igGeometry, igSegment...]
-            #   _childList: [igGeometry, igSegment...]
-            # Files without segments (0102.igb, 0103.igb) only have attrs in _attrList.
+            # Build children list.
+            # Vanilla 1801.igb (Bishop) has scene refs in BOTH _attrList AND _childList,
+            # but vanilla 0102/0103/0104 only have attrs in _attrList. Adding scene refs
+            # to _attrList from our builder crashes the game (likely due to subtle
+            # structural differences in how entries are built). Keep attr list clean.
             main_child_refs = []
-            main_scene_refs = []  # geometry + segment refs for attr list
             for gi, sub in main_geom_entries:
                 seg_name = sub.get('segment_name', '')
                 seg_flags = sub.get('segment_flags', 0)
@@ -633,11 +632,9 @@ class SkinBuilder:
                         (7, seg_children, 'ObjectRef', 4),
                     ])
                     main_child_refs.append(seg_idx)
-                    main_scene_refs.append(seg_idx)
                 else:
                     # Body geometry — direct child of AttrSet
                     main_child_refs.append(gi)
-                    main_scene_refs.append(gi)
 
             main_child_data = struct.pack(
                 "<" + "i" * len(main_child_refs), *main_child_refs)
@@ -648,11 +645,11 @@ class SkinBuilder:
                 (4, main_child_mb, 'MemoryRef', 4),
             ])
 
-            # Attr list: render state attrs + body geometry + segments
-            # (vanilla: segments appear in both attr list and child list)
+            # Attr list: ONLY render state attrs (no scene graph nodes)
+            # Vanilla 1801.igb includes scene refs here but our builder's output
+            # crashes when we do that — likely entry/index structure differences.
             main_attrs = [main_color_idx, main_material_idx,
                           shared_tex_bind_idx, main_tex_state_idx]
-            main_attrs.extend(main_scene_refs)
 
             main_attr_data = struct.pack("<" + "i" * len(main_attrs), *main_attrs)
             main_attr_mb = self._add_mem(MO_OBJECT, main_attr_data)
