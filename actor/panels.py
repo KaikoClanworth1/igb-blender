@@ -243,20 +243,30 @@ class ACTOR_PT_Segments(Panel):
 
             box = layout.box()
 
-            # Header row: name + visibility toggle + remove (if not body)
+            # Header row: name + action buttons
             header = box.row(align=True)
             header.label(text=display_name,
                          icon='MESH_DATA' if is_body else 'OBJECT_DATA')
 
+            # Select button — works for both body and segments
+            op_sel = header.operator("actor.select_segment",
+                                     text="", icon='RESTRICT_SELECT_OFF')
+            op_sel.segment_name = base_name
+
             if not is_body:
+                # Rename button
+                op_ren = header.operator("actor.rename_segment",
+                                         text="", icon='GREASEPENCIL')
+                op_ren.old_name = base_name
+
+                # Visibility toggle
                 vis_icon = 'HIDE_ON' if is_hidden else 'HIDE_OFF'
-                vis_text = "Hidden" if is_hidden else "Visible"
                 op = header.operator("actor.toggle_segment",
-                                     text=vis_text, icon=vis_icon,
+                                     text="", icon=vis_icon,
                                      depress=not is_hidden)
                 op.segment_name = base_name
 
-                # Remove button for this segment group
+                # Remove button
                 all_seg_meshes = grp['main'] + grp['outline']
                 if all_seg_meshes:
                     op_rem = header.operator("actor.remove_segment",

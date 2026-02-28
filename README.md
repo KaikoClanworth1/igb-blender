@@ -170,13 +170,27 @@ Manages the skin mesh variants attached to an actor.
 
 Manages toggleable sub-parts on actor skins. Some characters have pieces that can be shown or hidden per skin — for example, Bishop has drawn guns (in hands) and holstered guns (on hips) controlled by segments.
 
-- **Segment Groups** - Segments are grouped by name. Each group shows its main mesh and outline mesh together, with vertex counts and blend weight status.
-- **Visibility Toggle** (eye icon) - Click to show/hide a segment. This sets the igSegment `_nodeFlags` field: `0` = visible, `2` = hidden. The game reads these flags to decide what to render for each skin.
-- **Body Group** - Meshes without a segment name are grouped under "Body". These are always visible and cannot be toggled.
-- **Round-Trip** - Segment names, flags, and structure are fully preserved through import and export. Exported files use `igSegment → igGroup` wrapping with the correct names and visibility flags.
+- **Segment Groups** - Segments are grouped by base name. Each group shows its main mesh and outline mesh together, with vertex counts and blend weight diagnostics.
+- **Add Segment** - Select one or more mesh objects, click **Add Segment**, and enter a name (e.g. `gun_left`, `cape`). The addon auto-detects outline meshes from the object name (anything containing `_outline`), parents meshes to the armature, adds an Armature modifier, and registers them in the skins list. Leave the name empty to add meshes as part of the body (no segment wrapping).
+- **Rename Segment** (pencil icon) - Rename an existing segment group. Updates `igb_segment_name` on all meshes in the group (both main and outline variants). Setting the name to empty converts segment meshes into body meshes.
+- **Select Segment** (cursor icon) - Selects all meshes belonging to a segment group in the viewport and makes the last one active. Works for both body and named segments.
+- **Visibility Toggle** (eye icon) - Click to show/hide a segment. This sets the igSegment `_nodeFlags` field: `0` = visible, `2` = hidden. Also toggles Blender viewport/render visibility to match. The game reads these flags to decide what to render for each skin.
+- **Remove Segment** (X icon) - Removes all meshes in a segment group from the skins list. The mesh objects remain in the scene but are no longer part of the export.
+- **Refresh** - Recomputes blend weight diagnostics for all segment meshes.
+- **Body Group** - Meshes without a segment name are grouped under "Body". These are always visible and cannot be toggled or removed.
+- **Round-Trip** - Segment names, flags, and structure are fully preserved through import and export.
+
+**How to create segments for a custom skin:**
+
+1. Model your segment mesh in Blender (e.g. a weapon, cape, or helmet piece).
+2. If the segment needs an outline, duplicate the mesh and add `_outline` to its name.
+3. Select the segment meshes, then click **Add Segment** in the Segments panel.
+4. Enter a segment name (e.g. `gun_left`). The addon pairs main and outline meshes automatically.
+5. Use the **Visibility Toggle** to set whether the segment starts visible or hidden for this skin.
+6. Export the skin — each segment gets its own `igSegment` node in the IGB file.
 
 **How segments work in-game:**
-Each skin file (e.g. `1801.igb`, `1802.igb`) can have different segment visibility. For example, one Bishop skin might show drawn guns with holstered guns hidden, while another shows only holstered guns. Toggle the segments in the panel before exporting to set which parts are visible for that skin.
+Each skin file (e.g. `1801.igb`, `1802.igb`) can have different segment visibility. For example, one Bishop skin might show drawn guns with holstered guns hidden, while another shows only holstered guns. Toggle the segments in the panel before exporting to set which parts are visible for that skin. The game can also control segments at runtime through herostat `Multipart` blocks and powerstyle `ce_skinsegment` events.
 
 #### Animations
 

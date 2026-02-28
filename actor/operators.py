@@ -1746,6 +1746,136 @@ class ACTOR_OT_remove_segment(Operator):
         return {'FINISHED'}
 
 
+class ACTOR_OT_rename_segment(Operator):
+    """Rename a segment group (updates all meshes in the group)"""
+    bl_idname = "actor.rename_segment"
+    bl_label = "Rename Segment"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    old_name: StringProperty(
+        name="Current Name",
+        description="Current base segment name",
+        default="",
+    )
+
+    new_name: StringProperty(
+        name="New Name",
+        description="New segment name (e.g. 'gun_left', 'cape'). "
+                    "Leave empty to convert segment meshes to body meshes",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (props.active_armature and
+                len(props.skins) > 0 and
+                props.skins_index < len(props.skins))
+
+    def invoke(self, context, event):
+        self.new_name = self.old_name
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "new_name")
+
+    def execute(self, context):
+        from .actor_import import collect_skin_segments
+
+        props = context.scene.igb_actor
+        segments = collect_skin_segments(props, props.skins_index)
+
+        if not self.old_name:
+            self.report({'WARNING'}, "Cannot rename the body group")
+            return {'CANCELLED'}
+
+        new_name = self.new_name.strip()
+        if new_name == self.old_name:
+            return {'CANCELLED'}
+
+        # Find all meshes matching the old base segment name
+        count = 0
+        for seg_mesh, _is_outline in segments:
+            mesh_seg = seg_mesh.get("igb_segment_name", "")
+            base_seg = mesh_seg
+            is_outline_seg = base_seg.endswith("_outline")
+            if is_outline_seg:
+                base_seg = base_seg[:-8]
+            if base_seg != self.old_name:
+                continue
+
+            # Set new segment name
+            if new_name:
+                if is_outline_seg:
+                    seg_mesh["igb_segment_name"] = new_name + "_outline"
+                else:
+                    seg_mesh["igb_segment_name"] = new_name
+            else:
+                # Converting to body — clear segment name
+                seg_mesh["igb_segment_name"] = ""
+            count += 1
+
+        if count == 0:
+            self.report({'WARNING'},
+                        f"No meshes found for segment '{self.old_name}'")
+            return {'CANCELLED'}
+
+        target = f"'{new_name}'" if new_name else "body"
+        self.report({'INFO'},
+                    f"Renamed segment '{self.old_name}' → {target} "
+                    f"({count} mesh(es))")
+        return {'FINISHED'}
+
+
+class ACTOR_OT_select_segment(Operator):
+    """Select all meshes belonging to a segment group"""
+    bl_idname = "actor.select_segment"
+    bl_label = "Select Segment Meshes"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    segment_name: StringProperty(
+        name="Segment Name",
+        description="Base segment name to select (empty = body)",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (props.active_armature and
+                len(props.skins) > 0 and
+                props.skins_index < len(props.skins))
+
+    def execute(self, context):
+        from .actor_import import collect_skin_segments
+
+        props = context.scene.igb_actor
+        segments = collect_skin_segments(props, props.skins_index)
+
+        # Deselect all first
+        bpy.ops.object.select_all(action='DESELECT')
+
+        count = 0
+        last_obj = None
+        for seg_mesh, _is_outline in segments:
+            mesh_seg = seg_mesh.get("igb_segment_name", "")
+            base_seg = mesh_seg
+            if base_seg.endswith("_outline"):
+                base_seg = base_seg[:-8]
+            if base_seg == self.segment_name:
+                seg_mesh.select_set(True)
+                last_obj = seg_mesh
+                count += 1
+
+        if last_obj:
+            context.view_layer.objects.active = last_obj
+
+        name = f"'{self.segment_name}'" if self.segment_name else "body"
+        self.report({'INFO'}, f"Selected {count} mesh(es) in {name}")
+        return {'FINISHED'}
+
+
 class ACTOR_OT_toggle_segment(Operator):
     """Toggle segment visibility (visible/hidden) for export"""
     bl_idname = "actor.toggle_segment"
@@ -1831,6 +1961,8 @@ _classes = (
     ACTOR_OT_refresh_segments,
     ACTOR_OT_add_segment,
     ACTOR_OT_remove_segment,
+    ACTOR_OT_rename_segment,
+    ACTOR_OT_select_segment,
     ACTOR_OT_toggle_segment,
 )
 

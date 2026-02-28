@@ -5,12 +5,18 @@ pattern as igb_builder.py (map export). The meta-object registry matches
 exactly what vanilla 0601.igb uses — 57 meta-objects with indices
 specific to skin files (dumped from the actual game file).
 
+Uses Pattern B (Cable 11501 / 3ds Max) scene graph structure where each
+body/segment unit has its own igBlendMatrixSelect. This is confirmed
+working with custom skins and segment toggling in-game.
+
 Skin file structure:
     igInfoList → [igAnimationDatabase]
     igAnimationDatabase → igSkeletonList → igSkeleton
-    igSkin._skinnedGraph → igGroup "Scene Root" → igBlendMatrixSelect
-        → igAttrSet (main mesh branch)
-        → igAttrSet (outline mesh branch, optional)
+    igSkin._skinnedGraph → igGroup "igActor01"
+        → igGroup "{name}" → BMS → AttrSet → Geometry (body)
+        → igGroup "{name}_outline" → BMS → AttrSet → Geometry (body outline)
+        → igSegment "seg" → igGroup → BMS → AttrSet → Geometry (segments)
+        → igSegment "seg_outline" → igGroup → BMS → AttrSet → Geometry
 
 Usage:
     builder = SkinBuilder()
@@ -380,15 +386,14 @@ class SkinBuilder:
     def build_skin(self, submeshes, skeleton_data, bms_palette, export_name=''):
         """Build a complete skin IGB structure.
 
-        Scene graph matches vanilla skin files exactly:
-            igSkin._skinnedGraph -> igBlendMatrixSelect (DIRECTLY, no intermediate igGroup)
-              +-- igAttrSet "PromotedAttr" (main mesh branch)
-              |     +-- igGeometry (main body)
-              +-- igAttrSet "PromotedAttr" (outline mesh branch)
-                    +-- igOverrideAttrSet (alpha attrs)
-                          +-- igSegment (outline wrapper)
-                                +-- igGroup (outline wrapper)
-                                      +-- igGeometry (outline body)
+        Scene graph uses Pattern B (per-unit BMS, Cable 11501 / 3ds Max style):
+            igSkin._skinnedGraph -> igGroup "igActor01"
+              +-- igGroup "{name}" -> BMS -> AttrSet -> igGeometry (body)
+              +-- igGroup "{name}_outline" -> BMS -> AttrSet -> igGeometry (body outline)
+              +-- igSegment "seg" -> igGroup -> BMS -> AttrSet -> igGeometry (segment)
+              +-- igSegment "seg_outline" -> igGroup -> BMS -> AttrSet -> igGeometry
+
+        Each unit has its own igBlendMatrixSelect, all sharing the same palette.
 
         Args:
             submeshes: list of dicts, each with keys:
@@ -560,7 +565,7 @@ class SkinBuilder:
             else:
                 main_geom_entries.append((geometry_idx, sub))
 
-        # ---- 5. Assemble scene graph (matching vanilla structure exactly) ----
+        # Compute union bounding box across all submeshes
         union_min = (
             min(b[0] for b in all_bbox_mins),
             min(b[1] for b in all_bbox_mins),
@@ -572,13 +577,15 @@ class SkinBuilder:
             max(b[2] for b in all_bbox_maxs),
         )
 
-        bms_child_refs = []  # children of igBlendMatrixSelect
+        # ---- 5. Assemble scene graph (Pattern B: per-unit BMS) ----
+        # Each body/segment unit gets its own BMS → AttrSet → Geometry chain.
+        # All units are children of a root igGroup "igActor01".
+        # This matches the Cable 11501 / 3ds Max pattern which is confirmed
+        # working with custom skins and segments in-game.
+        root_child_refs = []  # children of root igGroup
 
-        # ---- 5a. Main mesh branch ----
-        # Vanilla: igAttrSet "PromotedAttr" [ColorAttr, MaterialAttr, TextureBindAttr, TextureStateAttr]
-        #            -> igGeometry (body, direct child)
-        #            -> igSegment "gun_left" (flags) -> igGroup -> igGeometry (segment parts)
-        # Render state attrs (CullFace, Lighting, Alpha) belong ONLY on the outline branch.
+        # ---- 5a. Build shared render state attrs for main units ----
+        main_attrs = None
         if main_geom_entries:
             main_tex_state_idx = self._add_obj(MO_TEXTURE_STATE_ATTR, [
                 (2, 0, 'Short', 2),
@@ -586,103 +593,23 @@ class SkinBuilder:
                 (5, 0, 'Int', 4),
             ])
             main_material_idx = self._build_material(shared_material)
-
-            # Color from IGB material properties (or default white)
             color_val = shared_material.get('color_attr', (1.0, 1.0, 1.0, 1.0))
             main_color_idx = self._add_obj(MO_COLOR_ATTR, [
                 (2, 0, 'Short', 2),
                 (4, color_val, 'Vec4f', 16),
             ])
-
-            # Build children list.
-            # Vanilla 1801.igb (Bishop) has scene refs in BOTH _attrList AND _childList,
-            # but vanilla 0102/0103/0104 only have attrs in _attrList. Adding scene refs
-            # to _attrList from our builder crashes the game (likely due to subtle
-            # structural differences in how entries are built). Keep attr list clean.
-            main_child_refs = []
-            for gi, sub in main_geom_entries:
-                seg_name = sub.get('segment_name', '')
-                seg_flags = sub.get('segment_flags', 0)
-                if seg_name:
-                    # Wrap in igSegment → igGroup (vanilla structure)
-                    grp_child_data = struct.pack("<i", gi)
-                    grp_child_mb = self._add_mem(MO_OBJECT, grp_child_data)
-                    grp_children = self._add_obj(MO_NODE_LIST, [
-                        (2, 1, 'Int', 4),
-                        (3, 1, 'Int', 4),
-                        (4, grp_child_mb, 'MemoryRef', 4),
-                    ])
-                    grp_idx = self._add_obj(MO_GROUP, [
-                        (2, seg_name, 'String', 4),
-                        (3, -1, 'ObjectRef', 4),
-                        (5, 0, 'Int', 4),
-                        (7, grp_children, 'ObjectRef', 4),
-                    ])
-                    seg_child_data = struct.pack("<i", grp_idx)
-                    seg_child_mb = self._add_mem(MO_OBJECT, seg_child_data)
-                    seg_children = self._add_obj(MO_NODE_LIST, [
-                        (2, 1, 'Int', 4),
-                        (3, 1, 'Int', 4),
-                        (4, seg_child_mb, 'MemoryRef', 4),
-                    ])
-                    seg_idx = self._add_obj(MO_SEGMENT, [
-                        (2, seg_name, 'String', 4),
-                        (3, -1, 'ObjectRef', 4),
-                        (5, seg_flags, 'Int', 4),
-                        (7, seg_children, 'ObjectRef', 4),
-                    ])
-                    main_child_refs.append(seg_idx)
-                else:
-                    # Body geometry — direct child of AttrSet
-                    main_child_refs.append(gi)
-
-            main_child_data = struct.pack(
-                "<" + "i" * len(main_child_refs), *main_child_refs)
-            main_child_mb = self._add_mem(MO_OBJECT, main_child_data)
-            main_children = self._add_obj(MO_NODE_LIST, [
-                (2, len(main_child_refs), 'Int', 4),
-                (3, len(main_child_refs), 'Int', 4),
-                (4, main_child_mb, 'MemoryRef', 4),
-            ])
-
-            # Attr list: ONLY render state attrs (no scene graph nodes)
-            # Vanilla 1801.igb includes scene refs here but our builder's output
-            # crashes when we do that — likely entry/index structure differences.
             main_attrs = [main_color_idx, main_material_idx,
                           shared_tex_bind_idx, main_tex_state_idx]
 
-            main_attr_data = struct.pack("<" + "i" * len(main_attrs), *main_attrs)
-            main_attr_mb = self._add_mem(MO_OBJECT, main_attr_data)
-            main_attr_list = self._add_obj(MO_ATTR_LIST, [
-                (2, len(main_attrs), 'Int', 4),
-                (3, len(main_attrs), 'Int', 4),
-                (4, main_attr_mb, 'MemoryRef', 4),
-            ])
-
-            main_attrset = self._add_obj(MO_ATTR_SET, [
-                (2, 'PromotedAttr', 'String', 4),
-                (3, -1, 'ObjectRef', 4),
-                (5, 0, 'Int', 4),
-                (7, main_children, 'ObjectRef', 4),
-                (8, main_attr_list, 'ObjectRef', 4),
-                (9, 0, 'Bool', 1),
-            ])
-            bms_child_refs.append(main_attrset)
-
-        # ---- 5b. Outline mesh branch ----
-        # Vanilla: igAttrSet "PromotedAttr" [ColorAttr, MaterialAttr, TextureStateAttr, CullFaceAttr, LightingStateAttr]
-        #            -> igOverrideAttrSet [AlphaFunctionAttr, AlphaStateAttr]
-        #                 -> igSegment (name, flags) -> igGroup -> igGeometry
+        # ---- 5b. Build shared render state attrs for outline units ----
+        outline_attrs = None
         if outline_geom_entries:
-            # Vanilla outline: texturing DISABLED (silhouette doesn't need texture)
             outline_tex_state_idx = self._add_obj(MO_TEXTURE_STATE_ATTR, [
                 (2, 0, 'Short', 2),
-                (4, 0, 'Bool', 1),     # disabled (vanilla: texture OFF for outlines)
+                (4, 0, 'Bool', 1),     # disabled (texture OFF for outlines)
                 (5, 0, 'Int', 4),
             ])
             outline_material_idx = self._build_material(outline_material)
-            # Outline uses BLACK color + lighting OFF to create silhouette effect
-            # (vanilla: ColorAttr=(0,0,0,1), LightingStateAttr=disabled)
             outline_color_idx = self._add_obj(MO_COLOR_ATTR, [
                 (2, 0, 'Short', 2),
                 (4, (0.0, 0.0, 0.0, 1.0), 'Vec4f', 16),
@@ -694,160 +621,67 @@ class SkinBuilder:
             ])
             lighting_idx = self._add_obj(MO_LIGHTING_STATE_ATTR, [
                 (2, 0, 'Short', 2),
-                (4, 0, 'Bool', 1),    # disabled (vanilla: lighting OFF for outlines)
+                (4, 0, 'Bool', 1),    # disabled (lighting OFF for outlines)
             ])
-
-            # Outline AttrSet attrs: [ColorAttr, MaterialAttr, TextureStateAttr, CullFaceAttr, LightingStateAttr]
-            outline_attrs = [outline_color_idx, outline_material_idx,
-                             outline_tex_state_idx, cull_idx, lighting_idx]
-            outline_attr_data = struct.pack("<" + "i" * len(outline_attrs), *outline_attrs)
-            outline_attr_mb = self._add_mem(MO_OBJECT, outline_attr_data)
-            outline_attr_list = self._add_obj(MO_ATTR_LIST, [
-                (2, len(outline_attrs), 'Int', 4),
-                (3, len(outline_attrs), 'Int', 4),
-                (4, outline_attr_mb, 'MemoryRef', 4),
-            ])
-
-            # igOverrideAttrSet with alpha attrs
-            # Vanilla: GL_GEQUAL (6) with ref=0.99 — only opaque pixels pass
             alpha_func_idx = self._add_obj(MO_ALPHA_FUNCTION_ATTR, [
                 (2, 0, 'Short', 2),
-                (4, 6, 'Enum', 4),     # GL_GEQUAL (vanilla value)
-                (5, 0.99, 'Float', 4), # ref=0.99 (vanilla value)
+                (4, 6, 'Enum', 4),     # GL_GEQUAL
+                (5, 0.99, 'Float', 4), # ref=0.99
             ])
             alpha_state_idx = self._add_obj(MO_ALPHA_STATE_ATTR, [
                 (2, 0, 'Short', 2),
                 (4, 1, 'Bool', 1),
             ])
-            # OverrideAttrSet children: body outline is direct, segment outlines
-            # get igSegment → igGroup wrapping (vanilla structure).
-            # NOTE: igOverrideAttrSet's _attrList should ONLY contain override
-            # attrs (AlphaFunction, AlphaState) — NOT scene graph nodes.
-            # Vanilla confirms this in 0102.igb, 0103.igb, 0104.igb.
-            override_child_refs = []
-            for gi, sub in outline_geom_entries:
-                seg_name = sub.get('segment_name', '')
-                seg_flags = sub.get('segment_flags', 0)
+            outline_attrs = [outline_color_idx, outline_material_idx,
+                             outline_tex_state_idx, cull_idx, lighting_idx,
+                             alpha_func_idx, alpha_state_idx]
 
-                if seg_name:
-                    # Segment outline: wrap in igSegment → igGroup
-                    # seg_name already includes "_outline" (e.g., "gun_left_outline")
-                    outline_seg_name = seg_name
+        # ---- 5c. Build per-unit chains for main geometry ----
+        # Each main unit: igGroup/igSegment → igGroup → BMS → AttrSet → Geometry
+        for gi, sub in main_geom_entries:
+            seg_name = sub.get('segment_name', '')
+            seg_flags = sub.get('segment_flags', 0)
 
-                    grp_child_data = struct.pack("<i", gi)
-                    grp_child_mb = self._add_mem(MO_OBJECT, grp_child_data)
-                    grp_children = self._add_obj(MO_NODE_LIST, [
-                        (2, 1, 'Int', 4),
-                        (3, 1, 'Int', 4),
-                        (4, grp_child_mb, 'MemoryRef', 4),
-                    ])
-                    grp_idx = self._add_obj(MO_GROUP, [
-                        (2, outline_seg_name, 'String', 4),
-                        (3, -1, 'ObjectRef', 4),
-                        (5, 0, 'Int', 4),
-                        (7, grp_children, 'ObjectRef', 4),
-                    ])
+            unit_name = seg_name if seg_name else skin_name
+            attrset_idx = self._build_unit_attrset(gi, main_attrs, unit_name)
+            bms_idx = self._build_unit_bms(attrset_idx, bms_int_list_idx)
 
-                    seg_child_data = struct.pack("<i", grp_idx)
-                    seg_child_mb = self._add_mem(MO_OBJECT, seg_child_data)
-                    seg_children = self._add_obj(MO_NODE_LIST, [
-                        (2, 1, 'Int', 4),
-                        (3, 1, 'Int', 4),
-                        (4, seg_child_mb, 'MemoryRef', 4),
-                    ])
-                    seg_idx = self._add_obj(MO_SEGMENT, [
-                        (2, outline_seg_name, 'String', 4),
-                        (3, -1, 'ObjectRef', 4),
-                        (5, seg_flags, 'Int', 4),
-                        (7, seg_children, 'ObjectRef', 4),
-                    ])
-                    override_child_refs.append(seg_idx)
-                else:
-                    # Body outline: direct child of OverrideAttrSet (no segment wrapper)
-                    override_child_refs.append(gi)
+            if seg_name:
+                # Segment: igSegment → igGroup → BMS → AttrSet → Geometry
+                inner_grp = self._build_group_node(seg_name, [bms_idx])
+                seg_node = self._build_segment_node(seg_name, seg_flags, inner_grp)
+                root_child_refs.append(seg_node)
+            else:
+                # Body: igGroup → BMS → AttrSet → Geometry
+                body_grp = self._build_group_node(skin_name, [bms_idx])
+                root_child_refs.append(body_grp)
 
-            override_child_data = struct.pack(
-                "<" + "i" * len(override_child_refs), *override_child_refs)
-            override_child_mb = self._add_mem(MO_OBJECT, override_child_data)
-            override_children = self._add_obj(MO_NODE_LIST, [
-                (2, len(override_child_refs), 'Int', 4),
-                (3, len(override_child_refs), 'Int', 4),
-                (4, override_child_mb, 'MemoryRef', 4),
-            ])
+        # ---- 5d. Build per-unit chains for outline geometry ----
+        # Each outline unit: igGroup/igSegment → igGroup → BMS → AttrSet → Geometry
+        for gi, sub in outline_geom_entries:
+            seg_name = sub.get('segment_name', '')
+            seg_flags = sub.get('segment_flags', 0)
 
-            # Attr list: ONLY override attrs (vanilla: AlphaFunction + AlphaState)
-            override_attrs = [alpha_func_idx, alpha_state_idx]
+            if seg_name:
+                unit_name = seg_name  # already includes _outline
+            else:
+                unit_name = (skin_name + '_outline') if skin_name else ''
 
-            override_attr_data = struct.pack("<" + "i" * len(override_attrs), *override_attrs)
-            override_attr_mb = self._add_mem(MO_OBJECT, override_attr_data)
-            override_attr_list = self._add_obj(MO_ATTR_LIST, [
-                (2, len(override_attrs), 'Int', 4),
-                (3, len(override_attrs), 'Int', 4),
-                (4, override_attr_mb, 'MemoryRef', 4),
-            ])
+            attrset_idx = self._build_unit_attrset(gi, outline_attrs, unit_name)
+            bms_idx = self._build_unit_bms(attrset_idx, bms_int_list_idx)
 
-            override_idx = self._add_obj(MO_OVERRIDE_ATTR_SET, [
-                (2, '', 'String', 4),
-                (3, -1, 'ObjectRef', 4),
-                (5, 0, 'Int', 4),
-                (7, override_children, 'ObjectRef', 4),
-                (8, override_attr_list, 'ObjectRef', 4),
-                (9, 0, 'Bool', 1),
-            ])
+            if seg_name:
+                # Segment outline: igSegment → igGroup → BMS → AttrSet → Geometry
+                inner_grp = self._build_group_node(seg_name, [bms_idx])
+                seg_node = self._build_segment_node(seg_name, seg_flags, inner_grp)
+                root_child_refs.append(seg_node)
+            else:
+                # Body outline: igGroup → BMS → AttrSet → Geometry
+                outline_grp = self._build_group_node(unit_name, [bms_idx])
+                root_child_refs.append(outline_grp)
 
-            # Outline AttrSet children = [igOverrideAttrSet]
-            ol_child_data = struct.pack("<i", override_idx)
-            ol_child_mb = self._add_mem(MO_OBJECT, ol_child_data)
-            ol_children = self._add_obj(MO_NODE_LIST, [
-                (2, 1, 'Int', 4),
-                (3, 1, 'Int', 4),
-                (4, ol_child_mb, 'MemoryRef', 4),
-            ])
-
-            outline_attrset = self._add_obj(MO_ATTR_SET, [
-                (2, 'PromotedAttr', 'String', 4),
-                (3, -1, 'ObjectRef', 4),
-                (5, 0, 'Int', 4),
-                (7, ol_children, 'ObjectRef', 4),
-                (8, outline_attr_list, 'ObjectRef', 4),
-                (9, 0, 'Bool', 1),
-            ])
-            bms_child_refs.append(outline_attrset)
-
-        # ---- 6. Build igBlendMatrixSelect (ROOT scene graph node) ----
-        # CRITICAL: Vanilla igSkin._skinnedGraph points DIRECTLY to BMS,
-        # NOT through an intermediate igGroup.
-        bms_child_data = struct.pack("<" + "i" * len(bms_child_refs), *bms_child_refs)
-        bms_child_mb = self._add_mem(MO_OBJECT, bms_child_data)
-        bms_children_list = self._add_obj(MO_NODE_LIST, [
-            (2, len(bms_child_refs), 'Int', 4),
-            (3, len(bms_child_refs), 'Int', 4),
-            (4, bms_child_mb, 'MemoryRef', 4),
-        ])
-
-        bms_vb_state_idx = self._add_obj(MO_VERTEX_BLEND_STATE_ATTR, [
-            (2, 0, 'Short', 2),
-            (4, 1, 'Bool', 1),
-        ])
-        bms_attr_data = struct.pack("<i", bms_vb_state_idx)
-        bms_attr_mb = self._add_mem(MO_OBJECT, bms_attr_data)
-        bms_attr_list_idx = self._add_obj(MO_ATTR_LIST, [
-            (2, 1, 'Int', 4),
-            (3, 1, 'Int', 4),
-            (4, bms_attr_mb, 'MemoryRef', 4),
-        ])
-
-        bms_idx = self._add_obj(MO_BLEND_MATRIX_SELECT, [
-            (2, '', 'String', 4),
-            (3, -1, 'ObjectRef', 4),       # _parentTransform = null
-            (5, 0, 'Int', 4),
-            (7, bms_children_list, 'ObjectRef', 4),
-            (8, bms_attr_list_idx, 'ObjectRef', 4),
-            (9, 0, 'Bool', 1),
-            (10, bms_int_list_idx, 'ObjectRef', 4),
-            (11, _IDENTITY_MATRIX, 'Matrix44f', 64),
-            (12, _IDENTITY_MATRIX, 'Matrix44f', 64),
-        ])
+        # ---- 6. Build root igGroup "igActor01" ----
+        root_group_idx = self._build_group_node("igActor01", root_child_refs)
 
         # ---- 7. Build igSkin ----
         root_aabox = self._add_obj(MO_AABOX, [
@@ -857,8 +691,8 @@ class SkinBuilder:
 
         skin_idx = self._add_obj(MO_SKIN, [
             (2, skin_name, 'String', 4),
-            (3, bms_idx, 'ObjectRef', 4),      # _skinnedGraph -> BMS DIRECTLY
-            (4, root_aabox, 'ObjectRef', 4),   # _aabb
+            (3, root_group_idx, 'ObjectRef', 4),  # _skinnedGraph -> igGroup root
+            (4, root_aabox, 'ObjectRef', 4),      # _aabb
         ])
 
         # ---- 8. Build igAnimationDatabase (after igSkin so SkinList can reference it) ----
@@ -1271,6 +1105,121 @@ class SkinBuilder:
             (7, specular, 'Vec4f', 16),
             (8, emission, 'Vec4f', 16),
             (9, flags, 'UnsignedInt', 4),
+        ])
+
+    # =========================================================================
+    # Scene graph node builders (Pattern B: per-unit BMS)
+    # =========================================================================
+
+    def _build_unit_bms(self, child_idx, bms_int_list_idx):
+        """Build an igBlendMatrixSelect node with a single child and shared palette.
+
+        Each unit (body, body_outline, segment, segment_outline) gets its own BMS
+        in the Pattern B (Cable 11501 / 3ds Max) scene graph structure.
+        """
+        child_data = struct.pack("<i", child_idx)
+        child_mb = self._add_mem(MO_OBJECT, child_data)
+        children_list = self._add_obj(MO_NODE_LIST, [
+            (2, 1, 'Int', 4),
+            (3, 1, 'Int', 4),
+            (4, child_mb, 'MemoryRef', 4),
+        ])
+
+        vb_state_idx = self._add_obj(MO_VERTEX_BLEND_STATE_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, 1, 'Bool', 1),
+        ])
+        attr_data = struct.pack("<i", vb_state_idx)
+        attr_mb = self._add_mem(MO_OBJECT, attr_data)
+        attr_list_idx = self._add_obj(MO_ATTR_LIST, [
+            (2, 1, 'Int', 4),
+            (3, 1, 'Int', 4),
+            (4, attr_mb, 'MemoryRef', 4),
+        ])
+
+        return self._add_obj(MO_BLEND_MATRIX_SELECT, [
+            (2, '', 'String', 4),
+            (3, -1, 'ObjectRef', 4),
+            (5, 0, 'Int', 4),
+            (7, children_list, 'ObjectRef', 4),
+            (8, attr_list_idx, 'ObjectRef', 4),
+            (9, 0, 'Bool', 1),
+            (10, bms_int_list_idx, 'ObjectRef', 4),
+            (11, _IDENTITY_MATRIX, 'Matrix44f', 64),
+            (12, _IDENTITY_MATRIX, 'Matrix44f', 64),
+        ])
+
+    def _build_unit_attrset(self, geom_idx, attr_indices, name=''):
+        """Build an igAttrSet with geometry child and rendering attributes.
+
+        Each unit gets its own AttrSet containing the appropriate rendering
+        state attrs (main or outline) and the geometry node as its child.
+        """
+        child_data = struct.pack("<i", geom_idx)
+        child_mb = self._add_mem(MO_OBJECT, child_data)
+        children_list = self._add_obj(MO_NODE_LIST, [
+            (2, 1, 'Int', 4),
+            (3, 1, 'Int', 4),
+            (4, child_mb, 'MemoryRef', 4),
+        ])
+
+        attr_data = struct.pack("<" + "i" * len(attr_indices), *attr_indices)
+        attr_mb = self._add_mem(MO_OBJECT, attr_data)
+        attr_list = self._add_obj(MO_ATTR_LIST, [
+            (2, len(attr_indices), 'Int', 4),
+            (3, len(attr_indices), 'Int', 4),
+            (4, attr_mb, 'MemoryRef', 4),
+        ])
+
+        return self._add_obj(MO_ATTR_SET, [
+            (2, name, 'String', 4),
+            (3, -1, 'ObjectRef', 4),
+            (5, 0, 'Int', 4),
+            (7, children_list, 'ObjectRef', 4),
+            (8, attr_list, 'ObjectRef', 4),
+            (9, 0, 'Bool', 1),
+        ])
+
+    def _build_group_node(self, name, child_indices):
+        """Build an igGroup node with named children.
+
+        Used for root igGroup "igActor01", body wrapper groups,
+        and inner groups within segments.
+        """
+        n = len(child_indices)
+        child_data = struct.pack("<" + "i" * n, *child_indices)
+        child_mb = self._add_mem(MO_OBJECT, child_data)
+        children_list = self._add_obj(MO_NODE_LIST, [
+            (2, n, 'Int', 4),
+            (3, n, 'Int', 4),
+            (4, child_mb, 'MemoryRef', 4),
+        ])
+
+        return self._add_obj(MO_GROUP, [
+            (2, name, 'String', 4),
+            (3, -1, 'ObjectRef', 4),
+            (5, 0, 'Int', 4),
+            (7, children_list, 'ObjectRef', 4),
+        ])
+
+    def _build_segment_node(self, name, flags, child_idx):
+        """Build an igSegment node wrapping a single child (inner igGroup).
+
+        Used for segment and segment outline entries in the scene graph.
+        """
+        child_data = struct.pack("<i", child_idx)
+        child_mb = self._add_mem(MO_OBJECT, child_data)
+        children_list = self._add_obj(MO_NODE_LIST, [
+            (2, 1, 'Int', 4),
+            (3, 1, 'Int', 4),
+            (4, child_mb, 'MemoryRef', 4),
+        ])
+
+        return self._add_obj(MO_SEGMENT, [
+            (2, name, 'String', 4),
+            (3, -1, 'ObjectRef', 4),
+            (5, flags, 'Int', 4),
+            (7, children_list, 'ObjectRef', 4),
         ])
 
     # =========================================================================
