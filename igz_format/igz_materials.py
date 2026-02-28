@@ -1,8 +1,15 @@
 """IGZ material and texture extraction for MUA2 PC.
 
 MUA2 uses external texture files (separate .igz files in materials/ folders).
-The scene file contains igTextureBindAttr2 -> igTextureAttr2 references, and
-igSceneTexturesInfo -> igStringRefList with paths to external texture IGZ files.
+
+Texture path resolution uses a hybrid approach:
+  1. Primary: Noesis-style parallel index
+     igTextureBindAttr2[i] (RVTB order) -> igStringRefList[i] -> TSTR path
+  2. Fallback: ROFS indirection chain (for texbinds not covered by parallel index)
+     igTextureBindAttr2 --ROFS +0x18--> igTextureAttr2 --position in
+     igTextureAttr2List--> igStringRefList[position] -> TSTR path
+
+The fallback handles entity models where texbind count > StringRefList count.
 
 External texture IGZ files contain:
   - igImage2 object: width, height, mip count, name
@@ -10,17 +17,16 @@ External texture IGZ files contain:
 
 Material/texture hierarchy in the scene graph:
   igAttrSet -> igAttrList -> [igMuaMaterialAttr, igTextureBindAttr2, igColorAttr, ...]
-  igTextureBindAttr2 -> igTextureAttr2 (via ROFS at +0x18)
-  igSceneTexturesInfo -> igStringRefList (parallel array with igTextureAttr2List)
+  igTextureBindAttr2: +0x10=textureType (u16), used for role classification
 
 Multi-texturing: scene graph nodes accumulate multiple igTextureBindAttr2 attrs.
-Texture roles are determined by filename suffix:
-  _d = diffuse/albedo, _n = normal map, _s = specular, _e = emissive, _m = metallic
+Texture roles determined by filename suffix (_d, _n, _s, _e, _m) with textureType
+field as fallback (0/3/4=diffuse, 1=normal, 2=specular).
 
 Format hashes (from EXNM in texture IGZ files):
   0x883C45B2 = DXT1 (BC1)
-  0x05ECD805 = DXT5 (BC3)
-  0xB718471E = DXT5 (BC3) alternate
+  0x05ECD805 = BC5 / ATI2 / DXN (two-channel normal map compression)
+  0xB718471E = DXT5 (BC3)
 """
 
 import struct
@@ -29,14 +35,14 @@ import re
 
 from ..scene_graph.sg_materials import (
     ParsedMaterial, ParsedTexture, ParsedImage,
-    PFMT_RGB_DXT1, PFMT_RGBA_DXT5, PFMT_RGBA_8888_32,
+    PFMT_RGB_DXT1, PFMT_RGBA_DXT5, PFMT_RGBA_8888_32, PFMT_DXN,
     WRAP_REPEAT,
 )
 
 # Format hash -> pixel format
 _FORMAT_HASHES = {
     0x883C45B2: PFMT_RGB_DXT1,
-    0x05ECD805: PFMT_RGBA_DXT5,
+    0x05ECD805: PFMT_DXN,          # BC5/ATI2 — two-channel normal maps
     0xB718471E: PFMT_RGBA_DXT5,
 }
 
@@ -78,7 +84,7 @@ def classify_texture_role(tex_path):
         tex_path: texture file path (relative or absolute)
 
     Returns:
-        One of TEX_ROLE_* constants
+        One of TEX_ROLE_* constants (TEX_ROLE_UNKNOWN if no suffix match)
     """
     if tex_path is None:
         return TEX_ROLE_UNKNOWN
@@ -92,8 +98,19 @@ def classify_texture_role(tex_path):
     if m:
         return _SUFFIX_TO_ROLE.get(m.group(1).lower(), TEX_ROLE_UNKNOWN)
 
-    # No recognized suffix — assume diffuse (most common)
-    return TEX_ROLE_DIFFUSE
+    # No recognized suffix — caller should use textureType fallback
+    return TEX_ROLE_UNKNOWN
+
+
+# textureType -> role mapping (from Noesis reference, ModelObject.build())
+# igTextureBindAttr2 field +0x10 (u16) textureType values:
+_TEXTYPE_TO_ROLE = {
+    0: TEX_ROLE_DIFFUSE,
+    3: TEX_ROLE_DIFFUSE,   # MUA diffuse variant
+    4: TEX_ROLE_DIFFUSE,   # MUA diffuse variant
+    1: TEX_ROLE_NORMAL,
+    2: TEX_ROLE_SPECULAR,
+}
 
 
 def extract_igz_material(reader, mat_obj):
@@ -152,16 +169,87 @@ def extract_igz_color(reader, color_obj):
         return None
 
 
+def _find_texture_string_ref_list(reader):
+    """Find the correct igStringRefList that contains texture file paths.
+
+    Entity models with animations have MULTIPLE igStringRefList objects:
+      [0]: Scene graph / animation names (NOT textures)
+      [1]: Texture file paths (referenced by igSceneTexturesInfo +0x28)
+      [2]: Metadata names
+
+    Map files typically have only 1 igStringRefList, so [0] works.
+
+    The correct approach: follow igSceneTexturesInfo's pointer at +0x28 to
+    find the igStringRefList that actually contains texture paths.
+
+    Returns:
+        igStringRefList IGZObject or None
+    """
+    # Find igSceneTexturesInfo
+    scene_tex_infos = reader.get_objects_by_type('igSceneTexturesInfo')
+    if not scene_tex_infos:
+        return None
+
+    # Follow igSceneTexturesInfo +0x28 → igStringRefList (the TEXTURE list)
+    sti = scene_tex_infos[0]
+    tex_srl = sti.get_ref(0x28)
+    if tex_srl is not None:
+        return tex_srl
+
+    # Fallback: use the first igStringRefList (works for simple map files)
+    string_ref_lists = reader.get_objects_by_type('igStringRefList')
+    if string_ref_lists:
+        return string_ref_lists[0]
+
+    return None
+
+
+def _read_string_ref_list_paths(reader, srl):
+    """Read texture paths from an igStringRefList object.
+
+    Each entry is an 8-byte value containing a TSTR index (uint32 low + padding).
+
+    Args:
+        reader: IGZReader
+        srl: igStringRefList IGZObject
+
+    Returns:
+        list of path strings (or None for invalid entries)
+    """
+    srl_count = srl.read_u32(0x10)
+
+    srl_data_ref = srl.get_raw_ref(0x20)
+    if not isinstance(srl_data_ref, int):
+        srl_data_ref = srl.get_raw_ref(0x18)
+        if not isinstance(srl_data_ref, int):
+            return []
+
+    paths = []
+    for i in range(srl_count):
+        offset = srl_data_ref + i * 8  # 8 bytes per entry
+        if offset + 4 > len(reader.data):
+            break
+        str_idx = struct.unpack_from('<I', reader.data, offset)[0]
+        if str_idx < len(reader.fixups.tstr):
+            paths.append(reader.fixups.tstr[str_idx])
+        else:
+            paths.append(None)
+    return paths
+
+
 def build_texture_path_map(reader, game_data_dir=None):
     """Build a mapping from igTextureAttr2 global offset -> external texture file path.
 
     The geometry IGZ file contains:
-    1. igSceneTexturesInfo with ROFS at +0x28 -> igStringRefList
+    1. igSceneTexturesInfo with ROFS at +0x28 -> igStringRefList (texture paths)
     2. igTextureAttr2List with parallel ROFS pointers to igTextureAttr2 objects
     3. igStringRefList contains RSTT string indices -> texture file paths in TSTR
 
     The igTextureAttr2List and igStringRefList have matching indices:
         igTextureAttr2List[i] corresponds to igStringRefList[i]
+
+    CRITICAL: Entity models with animations have multiple igStringRefList objects.
+    We must use the one referenced by igSceneTexturesInfo +0x28, NOT just [0].
 
     Args:
         reader: IGZReader for the geometry file
@@ -172,46 +260,18 @@ def build_texture_path_map(reader, game_data_dir=None):
     """
     tex_attr_to_path = {}
 
-    # Find igSceneTexturesInfo
-    scene_tex_infos = reader.get_objects_by_type('igSceneTexturesInfo')
-    if not scene_tex_infos:
+    # Find the correct igStringRefList (via igSceneTexturesInfo)
+    srl = _find_texture_string_ref_list(reader)
+    if srl is None:
         return tex_attr_to_path
 
-    # Find igStringRefList (contains texture file paths)
-    string_ref_lists = reader.get_objects_by_type('igStringRefList')
-    if not string_ref_lists:
+    # Read texture paths from the correct StringRefList
+    tex_paths = _read_string_ref_list_paths(reader, srl)
+    if not tex_paths:
         return tex_attr_to_path
 
     # Find igTextureAttr2List (parallel to string ref list)
     tex_attr_lists = reader.get_objects_by_type('igTextureAttr2List')
-
-    # Extract paths from igStringRefList
-    # igDataList: +0x08=count(u32), +0x10=size(u24)|capacity, +0x14=data_ptr(ROFS->memref)
-    srl = string_ref_lists[0]
-    srl_count = srl.read_u32(0x10)
-
-    # Get the data pointer (resolved ROFS at +0x20 for igDataList)
-    srl_data_ref = srl.get_raw_ref(0x20)
-    if not isinstance(srl_data_ref, int):
-        # Try other known offsets
-        srl_data_ref = srl.get_raw_ref(0x18)
-        if not isinstance(srl_data_ref, int):
-            return tex_attr_to_path
-
-    # Read RSTT string indices from the data
-    tex_paths = []
-    string_refs = reader._string_refs_by_obj.get(srl.global_offset, {})
-    # The data area contains RSTT-marked uint32 string indices
-    # Read them from the resolved data pointer
-    for i in range(srl_count):
-        offset = srl_data_ref + i * 8  # 8 bytes per entry (4-byte index + 4-byte padding)
-        if offset + 4 > len(reader.data):
-            break
-        str_idx = struct.unpack_from('<I', reader.data, offset)[0]
-        if str_idx < len(reader.fixups.tstr):
-            tex_paths.append(reader.fixups.tstr[str_idx])
-        else:
-            tex_paths.append(None)
 
     # Extract igTextureAttr2 objects from igTextureAttr2List (parallel array)
     tex_attrs = []
@@ -243,6 +303,68 @@ def build_texture_path_map(reader, game_data_dir=None):
             tex_attr_to_path[tex_attrs[i].global_offset] = path
 
     return tex_attr_to_path
+
+
+def build_texbind_path_map(reader):
+    """Build a direct mapping from igTextureBindAttr2 global offset -> texture path.
+
+    Uses a hybrid approach for maximum coverage:
+
+    1. Primary: Noesis-style parallel index (matches reference implementation)
+       igTextureBindAttr2[i] in RVTB order -> igStringRefList[i] -> TSTR path
+       This is the approach used by the Noesis IGZ plugin and works for most files.
+
+    2. Fallback: ROFS indirection chain (for unmapped texbinds)
+       igTextureBindAttr2 --ROFS at +0x18--> igTextureAttr2
+       -> find position in igTextureAttr2List -> igStringRefList[position] -> path
+       This handles entity models where texbind count > StringRefList count.
+
+    Args:
+        reader: IGZReader for the geometry file
+
+    Returns:
+        dict mapping igTextureBindAttr2 global_offset -> texture file path
+    """
+    texbind_to_path = {}
+
+    all_texbinds = reader.get_objects_by_type('igTextureBindAttr2')
+    if not all_texbinds:
+        all_texbinds = reader.get_objects_by_type('igTextureBindAttr')
+    if not all_texbinds:
+        return texbind_to_path
+
+    # --- Step 1: Primary — Noesis-style parallel index ---
+    # igTextureBindAttr2[i] in RVTB order → igStringRefList[i] → TSTR path
+    # CRITICAL: Use the correct igStringRefList — the one referenced by
+    # igSceneTexturesInfo +0x28, NOT just the first one. Entity models with
+    # animations have multiple igStringRefList objects for different purposes.
+    srl = _find_texture_string_ref_list(reader)
+    if srl is not None:
+        tex_paths = _read_string_ref_list_paths(reader, srl)
+        if tex_paths:
+            # Map texbinds[i] → paths[i] (parallel)
+            for i, tb in enumerate(all_texbinds):
+                if i < len(tex_paths) and tex_paths[i] is not None:
+                    path = tex_paths[i]
+                    if path.lower().endswith('.igz'):
+                        texbind_to_path[tb.global_offset] = path
+
+    # --- Step 2: Fallback — ROFS chain for any unmapped texbinds ---
+    # This catches texbinds not covered by the parallel index (e.g., when
+    # texbind count > StringRefList count, common in entity models)
+    unmapped = [tb for tb in all_texbinds if tb.global_offset not in texbind_to_path]
+    if unmapped:
+        tex_attr_to_path = build_texture_path_map(reader)
+        if tex_attr_to_path:
+            for tb in unmapped:
+                tex_attr = tb.get_ref(0x18)
+                if tex_attr is None:
+                    continue
+                path = tex_attr_to_path.get(tex_attr.global_offset)
+                if path is not None:
+                    texbind_to_path[tb.global_offset] = path
+
+    return texbind_to_path
 
 
 def resolve_texture_bind(reader, texbind_obj, tex_attr_to_path):
@@ -430,12 +552,12 @@ def _get_pixel_data_section(reader):
 
 
 def _detect_pixel_format(reader, width, height, mip_count, data_size):
-    """Detect DXT format from EXNM hashes or data size comparison.
+    """Detect pixel format from EXNM hashes or data size comparison.
 
     EXNM contains format hash pairs. Known hashes:
-        0x883C45B2 = DXT1
-        0x05ECD805 = DXT5
-        0xB718471E = DXT5
+        0x883C45B2 = DXT1 (BC1)
+        0x05ECD805 = DXN / BC5 / ATI2 (two-channel normal maps)
+        0xB718471E = DXT5 (BC3)
 
     Fallback: compare data_size against expected DXT1/DXT5 sizes with mipmaps.
     """
@@ -570,12 +692,12 @@ def extract_igz_alpha_state(alpha_state_obj):
         return {'enabled': False}
 
 
-def resolve_all_texture_binds(reader, texbind_list, tex_attr_to_path):
+def resolve_all_texture_binds(reader, texbind_list, texbind_to_path):
     """Resolve ALL texture binds for a geometry node into a role-classified dict.
 
-    Iterates through the accumulated texbind_list from the scene graph walker,
-    resolves each to a texture file path, classifies by filename suffix, and
-    returns a dict mapping role -> (path, texbind_obj).
+    Uses the parallel-index texbind→path mapping for correct texture assignment.
+    Role classification uses filename suffix (primary) with textureType field as
+    fallback (from igTextureBindAttr2+0x10).
 
     If multiple textures map to the same role, the last one wins (scene graph
     child overrides parent, matching the inheritance order).
@@ -583,7 +705,8 @@ def resolve_all_texture_binds(reader, texbind_list, tex_attr_to_path):
     Args:
         reader: IGZReader instance
         texbind_list: list of igTextureBindAttr2 IGZObject instances
-        tex_attr_to_path: dict from build_texture_path_map()
+        texbind_to_path: dict from build_texbind_path_map() mapping
+                         texbind global_offset -> texture file path
 
     Returns:
         dict mapping TEX_ROLE_* -> (texture_file_path, texbind_obj)
@@ -593,11 +716,22 @@ def resolve_all_texture_binds(reader, texbind_list, tex_attr_to_path):
         return role_map
 
     for texbind_obj in texbind_list:
-        path, sampler_slot = resolve_texture_bind(reader, texbind_obj,
-                                                   tex_attr_to_path)
+        # Look up path via parallel-index map (correct approach)
+        path = texbind_to_path.get(texbind_obj.global_offset)
         if path is None:
             continue
+
+        # Primary: classify by filename suffix (most reliable)
         role = classify_texture_role(path)
+
+        # Fallback: use textureType field from igTextureBindAttr2+0x10
+        if role == TEX_ROLE_UNKNOWN:
+            try:
+                tex_type = texbind_obj.read_u16(0x10)
+                role = _TEXTYPE_TO_ROLE.get(tex_type, TEX_ROLE_DIFFUSE)
+            except (struct.error, IndexError):
+                role = TEX_ROLE_DIFFUSE
+
         role_map[role] = (path, texbind_obj)
 
     return role_map

@@ -96,9 +96,15 @@ class ImportIGB(bpy.types.Operator, ImportHelper):
 
     igz_texture_dir: StringProperty(
         name="Texture Directory",
-        description="(IGZ only) Path to the folder containing materials/ subfolders for external textures",
+        description="(IGZ only) Path to the folder containing materials/ and models/ subfolders",
         subtype='DIR_PATH',
         default="",
+    )
+
+    import_entity_models: BoolProperty(
+        name="Import Entity Models",
+        description="(IGZ only) Import placed props/objects from companion .mua entity files",
+        default=True,
     )
 
     def execute(self, context):
@@ -117,12 +123,14 @@ class ImportIGB(bpy.types.Operator, ImportHelper):
         layout.prop(self, "import_collision")
         layout.prop(self, "import_lights")
 
-        # Show IGZ texture directory when importing .igz with materials
-        if self.filepath.lower().endswith('.igz') and self.import_materials:
-            layout.separator()
-            box = layout.box()
-            box.label(text="IGZ Texture Settings", icon='TEXTURE')
-            box.prop(self, "igz_texture_dir")
+        # Show IGZ options when importing .igz
+        if self.filepath.lower().endswith('.igz'):
+            layout.prop(self, "import_entity_models")
+            if self.import_materials:
+                layout.separator()
+                box = layout.box()
+                box.label(text="IGZ Data Directory", icon='TEXTURE')
+                box.prop(self, "igz_texture_dir")
 
 
 class ImportIGZ(bpy.types.Operator, ImportHelper):
@@ -182,9 +190,15 @@ class ImportIGZ(bpy.types.Operator, ImportHelper):
 
     igz_texture_dir: StringProperty(
         name="Texture Directory",
-        description="Path to the folder containing materials/ subfolders for external textures",
+        description="Path to the folder containing materials/ and models/ subfolders",
         subtype='DIR_PATH',
         default="",
+    )
+
+    import_entity_models: BoolProperty(
+        name="Import Entity Models",
+        description="Import placed props/objects from companion .mua entity files (models/ directory)",
+        default=True,
     )
 
     def execute(self, context):
@@ -202,9 +216,10 @@ class ImportIGZ(bpy.types.Operator, ImportHelper):
         layout.separator()
         layout.prop(self, "import_collision")
         layout.prop(self, "import_lights")
+        layout.prop(self, "import_entity_models")
         layout.separator()
         box = layout.box()
-        box.label(text="IGZ Texture Settings", icon='TEXTURE')
+        box.label(text="IGZ Data Directory", icon='TEXTURE')
         box.prop(self, "igz_texture_dir")
 
 

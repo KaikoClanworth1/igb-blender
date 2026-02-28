@@ -24,9 +24,9 @@ Vertex element layout:
 
 v6 object field offsets:
     igGeometryAttr (72B): +0x18=VB ref, +0x20=IB ref
-    igVertexBuffer (64B): +0x10=vertexCount, +0x30=format ref, +0x38=primType
+    igVertexBuffer (64B): +0x10=vertexCount, +0x30=format ref, +0x38=packData
     igVertexFormat (120B): +0x10=vertexSize, +0x18=elementsMemRef, +0x20=elementsDataPtr
-    igIndexBuffer (72B): +0x10=indexCount, +0x38=primType
+    igIndexBuffer (72B): +0x10=indexCount, +0x30=primType
 """
 
 import struct
@@ -45,9 +45,18 @@ USAGE_BLENDINDICES = 8
 # Sentinel type value for element list terminator
 ELEMENT_TERMINATOR_TYPE = 44  # 0x2C
 
-# Primitive type
+# Primitive type (IGB format uses 3/4, IGZ format uses different values)
 IG_GFX_DRAW_TRIANGLE_LIST = 3
 IG_GFX_DRAW_TRIANGLE_STRIP = 4
+
+# IGZ primitive type enum (stored in igIndexBuffer+0x30)
+# NOTE: Noesis reference maps 1→strip, 2→list but marks 1 as "unconfirmed".
+# Analysis of ALL 45,759 IBs across 89 MUA2 PC maps shows value=1 exclusively,
+# and all index data follows quad-decomposed triangle-list pattern [a,b,c,c,d,a,...].
+# Correct mapping for MUA2 PC (IGZ v6, 64-bit): 1=triangle_list.
+IGZ_PRIM_POINTS = 0
+IGZ_PRIM_TRIANGLE_LIST = 1
+IGZ_PRIM_TRIANGLE_STRIP = 2
 
 
 class VertexElement:
@@ -363,7 +372,16 @@ def extract_igz_geometry(reader, geom_attr_obj, allocator):
     vert_count = vb.read_u32(0x10)
     idx_count = ib.read_u32(0x10)
     stride = vf.read_u32(0x10)
-    prim_type = vb.read_u32(0x38)
+
+    # Read prim_type from INDEX buffer at +0x30
+    # MUA2 PC: value 1 = triangle list (all 45,759 IBs across 89 maps)
+    igz_prim = ib.read_u32(0x30)
+    if igz_prim == IGZ_PRIM_TRIANGLE_LIST:
+        prim_type = IG_GFX_DRAW_TRIANGLE_LIST
+    elif igz_prim == IGZ_PRIM_TRIANGLE_STRIP:
+        prim_type = IG_GFX_DRAW_TRIANGLE_STRIP
+    else:
+        prim_type = IG_GFX_DRAW_TRIANGLE_LIST  # default fallback
 
     if vert_count == 0 or idx_count == 0 or stride == 0:
         return None

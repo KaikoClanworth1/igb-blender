@@ -119,6 +119,32 @@ class GeometryCollector:
         self.light_sets.append((obj, transform))
 
 
+def _auto_detect_igz_data_dir(filepath):
+    """Auto-detect the MUA2 data directory from a map IGZ file path.
+
+    MUA2 maps are typically at: data/maps/{theme}/{mapname}/{mapname}.igz
+    The data directory is the ancestor that contains 'materials/' and/or 'models/'.
+
+    Args:
+        filepath: path to the .igz file being imported
+
+    Returns:
+        str: path to the data directory, or "" if not found
+    """
+    test_dir = os.path.dirname(os.path.abspath(filepath))
+    for _ in range(6):  # Check up to 6 levels up
+        # Check for materials/ or models/ subdirectory
+        has_materials = os.path.isdir(os.path.join(test_dir, 'materials'))
+        has_models = os.path.isdir(os.path.join(test_dir, 'models'))
+        if has_materials or has_models:
+            return test_dir
+        parent = os.path.dirname(test_dir)
+        if parent == test_dir:
+            break
+        test_dir = parent
+    return ""
+
+
 def _finalize_imported_objects(collection):
     """Make single user on object data and apply all transforms.
 
@@ -478,16 +504,23 @@ def _import_igz(context, filepath, operator=None):
     tex_image_cache = {}  # texture_path -> ParsedImage
     mat_cache = {}  # (mat_obj_offset, texbind_obj_offset) -> bpy.types.Material
 
-    # Get IGZ texture directory from operator (user-specified)
+    # Get IGZ data directory (contains materials/ and models/ subfolders)
+    # Priority: user-specified > auto-detected from file path
     igz_texture_dir = ""
     if operator is not None:
         igz_texture_dir = getattr(operator, 'igz_texture_dir', "") or ""
 
+    if not igz_texture_dir:
+        igz_texture_dir = _auto_detect_igz_data_dir(filepath)
+        if igz_texture_dir:
+            _report(operator, 'INFO',
+                    f"Auto-detected data directory: {igz_texture_dir}")
+
     if options.get('import_materials', True):
         try:
             from ..igz_format.igz_materials import (
-                build_texture_path_map, extract_igz_material,
-                resolve_texture_bind, load_external_texture,
+                build_texbind_path_map, extract_igz_material,
+                load_external_texture,
                 resolve_all_texture_binds, classify_texture_role,
                 extract_igz_blend_state, extract_igz_blend_function,
                 extract_igz_alpha_state,
@@ -499,7 +532,7 @@ def _import_igz(context, filepath, operator=None):
             )
 
             clear_caches()
-            tex_attr_to_path = build_texture_path_map(reader)
+            tex_attr_to_path = build_texbind_path_map(reader)
             _report(operator, 'INFO',
                     f"Found {len(tex_attr_to_path)} texture path mappings")
         except Exception as e:
@@ -594,22 +627,33 @@ def _import_igz(context, filepath, operator=None):
         _report(operator, 'WARNING',
                 "No geometry could be imported. Check Blender console for details.")
 
+    # --- Import entity models (props, breakables, etc.) ---
+    import_entities = True
+    if operator is not None:
+        import_entities = getattr(operator, 'import_entity_models', True)
+    if import_entities:
+        entity_count = _import_igz_entity_models(
+            context, filepath, collection, options, igz_texture_dir, operator)
+        if entity_count > 0:
+            _report(operator, 'INFO',
+                    f"Imported {entity_count} entity model instances")
+
     return {'FINISHED'}
 
 
-def _build_igz_material(reader, mat_state, tex_attr_to_path,
+def _build_igz_material(reader, mat_state, texbind_to_path,
                         tex_image_cache, mat_cache, filepath, mesh_name,
                         igz_texture_dir=""):
     """Build a Blender material from IGZ material state with multi-texture support.
 
-    Resolves ALL texture binds accumulated by the scene graph walker,
-    classifies each by filename suffix (diffuse, normal, specular, etc.),
-    and builds a Principled BSDF material with proper node wiring.
+    Resolves ALL texture binds accumulated by the scene graph walker using the
+    parallel-index texbind→path mapping, classifies each by filename suffix
+    (with textureType fallback), and builds a Principled BSDF material.
 
     Args:
         reader: IGZReader for the geometry file
         mat_state: dict from walk_igz_scene_graph with material/texture objects
-        tex_attr_to_path: mapping from igTextureAttr2 offset -> texture file path
+        texbind_to_path: mapping from igTextureBindAttr2 offset -> texture file path
         tex_image_cache: dict caching texture_path -> ParsedImage
         mat_cache: dict caching cache_key -> bpy.types.Material
         filepath: path to the geometry IGZ file (for relative texture resolution)
@@ -648,7 +692,7 @@ def _build_igz_material(reader, mat_state, tex_attr_to_path,
         parsed_mat = ParsedMaterial()
 
     # --- Resolve all texture binds to role-classified paths ---
-    role_map = resolve_all_texture_binds(reader, texbind_list, tex_attr_to_path)
+    role_map = resolve_all_texture_binds(reader, texbind_list, texbind_to_path)
 
     # --- Load external textures for each role ---
     texture_role_images = {}  # TEX_ROLE_* -> ParsedImage
@@ -732,6 +776,279 @@ def _make_material_name(basename, parsed_mat, parsed_tex, index):
         return f"{basename}_mat{parsed_mat.source_obj.index}"
 
     return f"{basename}_mat{index:03d}"
+
+
+# ===========================================================================
+# Entity model import (MUA2 companion .mua files)
+# ===========================================================================
+
+def _import_igz_entity_models(context, map_filepath, parent_collection,
+                               options, igz_texture_dir, operator):
+    """Import entity models from companion .mua files.
+
+    MUA2 maps have companion XML files defining placed entities (props,
+    breakables, water, etc.) with model references and world positions.
+
+    Each unique model IGZ is imported once, then instanced at each placement.
+    Models go into a sub-collection "Entities" under the map collection.
+
+    Args:
+        context: Blender context
+        map_filepath: path to the map .igz file
+        parent_collection: the map's Blender collection
+        options: import options dict
+        igz_texture_dir: path to data dir for textures
+        operator: import operator for reporting
+
+    Returns:
+        int: total number of entity instances placed
+    """
+    import mathutils
+    import math
+
+    try:
+        from ..igz_format.igz_entities import collect_entity_models
+    except ImportError:
+        return 0
+
+    # Determine data directory (parent of models/ and materials/)
+    data_dir = igz_texture_dir or ""
+    if not data_dir:
+        # Auto-detect: walk up from map file to find models/ directory
+        test_dir = os.path.dirname(map_filepath)
+        for _ in range(6):  # Check up to 6 levels
+            if os.path.isdir(os.path.join(test_dir, 'models')):
+                data_dir = test_dir
+                break
+            parent = os.path.dirname(test_dir)
+            if parent == test_dir:
+                break
+            test_dir = parent
+
+    if not data_dir:
+        return 0
+
+    # Collect entity placements
+    model_placements = collect_entity_models(map_filepath, data_dir)
+    if not model_placements:
+        return 0
+
+    # Create sub-collections: visual entities and collision entities
+    entities_collection = bpy.data.collections.new(
+        f"{parent_collection.name}_Entities")
+    parent_collection.children.link(entities_collection)
+
+    colliders_collection = bpy.data.collections.new(
+        f"{parent_collection.name}_Colliders")
+    parent_collection.children.link(colliders_collection)
+    # Hide colliders by default in viewport
+    colliders_collection.hide_viewport = True
+
+    total_instances = 0
+    collider_instances = 0
+    model_cache = {}  # model_igz_path -> list of (bpy.types.Object)
+
+    for model_path, placements in model_placements.items():
+        model_name = os.path.splitext(os.path.basename(model_path))[0]
+        model_lower = model_name.lower()
+
+        # Determine if this is a collision/invisible model
+        is_collider = _is_collision_model(model_lower)
+
+        # Import the model IGZ file (once per unique model)
+        if model_path not in model_cache:
+            model_objects = _import_single_igz_model(
+                model_path, model_name, options, igz_texture_dir or data_dir,
+                operator)
+            model_cache[model_path] = model_objects
+
+        template_objects = model_cache[model_path]
+        if not template_objects:
+            continue
+
+        # Choose the parent collection based on model type
+        target_collection = colliders_collection if is_collider else entities_collection
+
+        # Create a sub-collection for this model type
+        model_collection = bpy.data.collections.new(model_name)
+        target_collection.children.link(model_collection)
+
+        # Place instances
+        for pos, orient, refname in placements:
+            for tmpl_obj in template_objects:
+                # Create a copy (linked mesh, unique transform)
+                inst_obj = tmpl_obj.copy()
+                inst_obj.data = tmpl_obj.data  # Share mesh data
+
+                # Build transform: position + Euler rotation
+                loc = mathutils.Vector(pos)
+                rot = mathutils.Euler((orient[0], orient[1], orient[2]), 'XYZ')
+                mat = mathutils.Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+                inst_obj.matrix_world = mat
+
+                # Name from entity instance refname
+                inst_obj.name = f"{model_name}_{total_instances:03d}"
+
+                # Set display type for colliders
+                if is_collider:
+                    inst_obj.display_type = 'WIRE'
+
+                model_collection.objects.link(inst_obj)
+
+            total_instances += 1
+            if is_collider:
+                collider_instances += 1
+
+    # Remove empty colliders collection if nothing went there
+    if len(colliders_collection.all_objects) == 0:
+        parent_collection.children.unlink(colliders_collection)
+        bpy.data.collections.remove(colliders_collection)
+
+    return total_instances
+
+
+# Keywords in model names that indicate collision/invisible/helper geometry
+_COLLISION_KEYWORDS = frozenset([
+    'collision', 'cameraclip', 'herocollision', 'invisible',
+    'helperentity', 'playerclip', 'shieldcollision', 'puzzlecollision',
+    'puzzlemarker', 'clip',
+])
+
+
+def _is_collision_model(model_name_lower):
+    """Check if a model name indicates a collision/invisible/helper entity.
+
+    These should go into a Colliders collection rather than visual entities.
+
+    Args:
+        model_name_lower: lowercase model name (without extension)
+
+    Returns:
+        True if this is a collision/helper model
+    """
+    for kw in _COLLISION_KEYWORDS:
+        if kw in model_name_lower:
+            return True
+    return False
+
+
+def _import_single_igz_model(model_path, model_name, options, data_dir,
+                              operator):
+    """Import a single IGZ model file and return the created Blender objects.
+
+    Similar to _import_igz but doesn't create collections or finalize —
+    just builds mesh objects and returns them for instancing.
+
+    Args:
+        model_path: absolute path to the model .igz file
+        model_name: base name for the model
+        options: import options dict
+        data_dir: path to MUA2 data directory for texture resolution
+        operator: import operator for reporting
+
+    Returns:
+        list of bpy.types.Object (mesh objects with materials)
+    """
+    try:
+        from ..igz_format.igz_reader import IGZReader
+        from ..igz_format.igz_geometry import (
+            IGZDataAllocator, extract_igz_geometry, walk_igz_scene_graph,
+        )
+    except ImportError:
+        return []
+
+    try:
+        reader = IGZReader(model_path)
+        reader.read()
+    except Exception as e:
+        print(f"[IGZ Entity] Failed to parse model {model_name}: {e}")
+        return []
+
+    try:
+        allocator = IGZDataAllocator(reader)
+    except Exception as e:
+        print(f"[IGZ Entity] Failed to build allocator for {model_name}: {e}")
+        return []
+
+    # Walk scene graph
+    try:
+        results = walk_igz_scene_graph(reader, allocator)
+    except Exception as e:
+        print(f"[IGZ Entity] Scene graph walk failed for {model_name}: {e}")
+        return []
+
+    if not results:
+        # Fallback: extract all geometry attrs directly
+        geom_attrs = reader.get_objects_by_type('igGeometryAttr')
+        identity = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+        for ga in geom_attrs:
+            geom = extract_igz_geometry(reader, ga, allocator)
+            if geom is not None:
+                results.append({
+                    'geom': geom,
+                    'transform': identity,
+                    'material_state': {},
+                })
+
+    if not results:
+        return []
+
+    # Build texture mapping for this model
+    tex_attr_to_path = {}
+    tex_image_cache = {}
+    mat_cache = {}
+
+    if options.get('import_materials', True):
+        try:
+            from ..igz_format.igz_materials import build_texbind_path_map
+            from .material_builder import clear_caches
+            tex_attr_to_path = build_texbind_path_map(reader)
+        except Exception as e:
+            print(f"[IGZ Entity] Material setup failed for {model_name}: {e}")
+
+    # Build mesh objects
+    created_objects = []
+    for i, result in enumerate(results):
+        geom = result['geom']
+        transform = result['transform']
+        mat_state = result.get('material_state', {})
+
+        if geom.num_verts == 0:
+            continue
+
+        mesh_name = f"{model_name}_{i:03d}" if len(results) > 1 else model_name
+        try:
+            obj = build_mesh(geom, mesh_name, transform, options, profile=None)
+        except Exception as e:
+            print(f"[IGZ Entity] build_mesh failed for {mesh_name}: {e}")
+            continue
+
+        if obj is None:
+            continue
+
+        # Assign material
+        if options.get('import_materials', True) and tex_attr_to_path:
+            bl_mat = _build_igz_material(
+                reader, mat_state, tex_attr_to_path,
+                tex_image_cache, mat_cache, model_path, mesh_name,
+                data_dir,
+            )
+            if bl_mat is not None:
+                obj.data.materials.append(bl_mat)
+
+        created_objects.append(obj)
+
+    # Apply transforms on the template objects
+    import mathutils
+    identity = mathutils.Matrix.Identity(4)
+    for obj in created_objects:
+        mat = obj.matrix_world
+        if mat != identity:
+            obj.data.transform(mat)
+            obj.data.update()
+            obj.matrix_world = identity.copy()
+
+    return created_objects
 
 
 # ===========================================================================
