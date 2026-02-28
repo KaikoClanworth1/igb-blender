@@ -1,7 +1,7 @@
 bl_info = {
     "name": "IGB Format (Alchemy Engine)",
     "author": "Kaiko",
-    "version": (0, 3, 0),
+    "version": (0, 2, 0),
     "blender": (4, 4, 0),
     "location": "File > Import/Export, 3D Viewport > Sidebar > IGB",
     "description": "Import/Export Alchemy Engine IGB/IGZ files for X-Men Legends, XML2, MUA. By Kaiko.",

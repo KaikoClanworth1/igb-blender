@@ -1,6 +1,6 @@
 # IGB Blender Addon
 
-**Version 0.1**
+**Version 0.2**
 
 A Blender 4.4 addon for importing and exporting Alchemy Engine IGB/IGZ files used by **X-Men Legends II** and **Marvel Ultimate Alliance** (PC).
 
