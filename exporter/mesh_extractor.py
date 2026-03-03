@@ -170,6 +170,64 @@ def extract_mesh_data(bl_mesh, name="Mesh", uv_v_flip=True):
     return _extract_from_mesh(bl_mesh, name, uv_v_flip)
 
 
+def _build_skin_bone_mapping(skeleton, armature_obj, bms_indices):
+    """Build bone name → blend matrix index mappings for skin export.
+
+    Shared setup for extract_skin_mesh and extract_skin_mesh_per_material.
+
+    Args:
+        skeleton: ParsedSkeleton-like object with .bones list.
+        armature_obj: Blender armature object (for renamed bone fallback).
+        bms_indices: BMS palette list (local_idx -> global_bm_idx), or None.
+
+    Returns:
+        (bone_name_to_bm, global_to_local) tuple where:
+        - bone_name_to_bm: dict mapping bone name -> global bm_idx
+        - global_to_local: dict mapping global_bm_idx -> local blend idx, or None
+    """
+    # Build bone_name -> global_bm_idx mapping from skeleton.
+    # CRITICAL: Only use bones with EXPLICIT bm_idx values (bm_idx >= 0).
+    # Bones with bm_idx=-1 (like unnamed root, Bip01) are NOT deforming
+    # bones — their effective_bm_idx fallback (= bone_index) can collide
+    # with real bm_idx values from other bones.
+    bone_name_to_bm = {}
+    for bone in skeleton.bones:
+        if bone.bm_idx >= 0:
+            bone_name_to_bm[bone.name] = bone.bm_idx
+        else:
+            eff_bm = skeleton.get_effective_bm_idx(bone.index)
+            has_conflict = any(
+                b.bm_idx == eff_bm for b in skeleton.bones if b.bm_idx >= 0
+            )
+            bms_out_of_range = (bms_indices is not None and
+                                eff_bm not in range(len(bms_indices)))
+            if not has_conflict and not bms_out_of_range:
+                bone_name_to_bm[bone.name] = eff_bm
+
+    # Also map CURRENT armature bone names to bm_idx.  This handles the
+    # case where bones were renamed in Blender (e.g. by the rig converter
+    # or manual edits).  Blender auto-renames vertex groups when bone names
+    # change, so vertex groups follow the armature names — but the stored
+    # skeleton data (igb_skin_bone_info_list) still has the original names.
+    if armature_obj is not None and armature_obj.type == 'ARMATURE':
+        for pb in armature_obj.pose.bones:
+            if pb.name in bone_name_to_bm:
+                continue
+            bm_idx = pb.get("igb_skin_bm_idx")
+            if bm_idx is not None and bm_idx >= 0:
+                bone_name_to_bm[pb.name] = bm_idx
+
+    # Build reverse BMS palette: global_bm_idx -> local_blend_idx
+    if bms_indices is not None:
+        global_to_local = {}
+        for local_idx, global_bm_idx in enumerate(bms_indices):
+            global_to_local[global_bm_idx] = local_idx
+    else:
+        global_to_local = None
+
+    return bone_name_to_bm, global_to_local
+
+
 def extract_skin_mesh(bl_object, armature_obj, skeleton, bms_indices=None,
                        uv_v_flip=True):
     """Extract mesh data with blend weights/indices for skin export.
@@ -196,54 +254,9 @@ def extract_skin_mesh(bl_object, armature_obj, skeleton, bms_indices=None,
     if bl_object.type != 'MESH':
         raise ValueError(f"Object '{bl_object.name}' is not a mesh")
 
-    # Build bone_name -> global_bm_idx mapping from skeleton.
-    # CRITICAL: Only use bones with EXPLICIT bm_idx values (bm_idx >= 0).
-    # Bones with bm_idx=-1 (like unnamed root, Bip01) are NOT deforming
-    # bones — their effective_bm_idx fallback (= bone_index) can collide
-    # with real bm_idx values from other bones.
-    bone_name_to_bm = {}
-    for bone in skeleton.bones:
-        if bone.bm_idx >= 0:
-            # Explicit bm_idx — this is a deforming bone
-            bone_name_to_bm[bone.name] = bone.bm_idx
-        else:
-            # Fallback: only use if the effective bm_idx doesn't conflict
-            # AND is within the BMS palette range (if BMS exists)
-            eff_bm = skeleton.get_effective_bm_idx(bone.index)
-            # Check if any explicit bm_idx already claims this value
-            has_conflict = any(
-                b.bm_idx == eff_bm for b in skeleton.bones if b.bm_idx >= 0
-            )
-            # Also check if this bm_idx is within the BMS range
-            bms_out_of_range = (bms_indices is not None and
-                                eff_bm not in range(len(bms_indices)))
-            if not has_conflict and not bms_out_of_range:
-                bone_name_to_bm[bone.name] = eff_bm
-
-    # Also map CURRENT armature bone names to bm_idx.  This handles the
-    # case where bones were renamed in Blender (e.g. by the rig converter
-    # or manual edits).  Blender auto-renames vertex groups when bone names
-    # change, so vertex groups follow the armature names — but the stored
-    # skeleton data (igb_skin_bone_info_list) still has the original names.
-    # Without this fallback, ALL influences on renamed-bone meshes would be
-    # silently skipped, producing all-zero blend weights.
-    if armature_obj is not None and armature_obj.type == 'ARMATURE':
-        for pb in armature_obj.pose.bones:
-            if pb.name in bone_name_to_bm:
-                continue  # Already mapped (name unchanged)
-            bm_idx = pb.get("igb_skin_bm_idx")
-            if bm_idx is not None and bm_idx >= 0:
-                bone_name_to_bm[pb.name] = bm_idx
-
-    # Build reverse BMS palette: global_bm_idx -> local_blend_idx
-    # If BMS exists, vertex blend indices are local (0..N) remapped to
-    # global bm_idx via bms_indices[local] = global. For export we reverse this.
-    if bms_indices is not None:
-        global_to_local = {}
-        for local_idx, global_bm_idx in enumerate(bms_indices):
-            global_to_local[global_bm_idx] = local_idx
-    else:
-        global_to_local = None
+    bone_name_to_bm, global_to_local = _build_skin_bone_mapping(
+        skeleton, armature_obj, bms_indices
+    )
 
     # Force armature to REST pose before evaluating mesh.
     # This ensures we get bind-pose positions, not animation-deformed positions.
@@ -288,16 +301,125 @@ def extract_skin_mesh(bl_object, armature_obj, skeleton, bms_indices=None,
             bpy.context.view_layer.update()
 
 
+def extract_skin_mesh_per_material(bl_object, armature_obj, skeleton,
+                                    bms_indices=None, uv_v_flip=True):
+    """Extract per-material skinned submeshes from a Blender mesh object.
+
+    Like extract_skin_mesh but splits the mesh by material slot. Each
+    returned MeshExport contains only the triangles assigned to that
+    material, with blend weights/indices correctly mapped.
+
+    Args:
+        Same as extract_skin_mesh.
+
+    Returns:
+        list of MeshExport, one per material slot that has geometry.
+        Each has .material_index set to the slot index.
+        If the mesh has 0 or 1 material slots, returns a single-element list.
+    """
+    import bpy
+
+    if bl_object.type != 'MESH':
+        raise ValueError(f"Object '{bl_object.name}' is not a mesh")
+
+    bone_name_to_bm, global_to_local = _build_skin_bone_mapping(
+        skeleton, armature_obj, bms_indices
+    )
+
+    # Force armature to REST pose
+    old_pose_position = None
+    if armature_obj is not None and armature_obj.type == 'ARMATURE':
+        old_pose_position = armature_obj.data.pose_position
+        armature_obj.data.pose_position = 'REST'
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        depsgraph.update()
+
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        eval_obj = bl_object.evaluated_get(depsgraph)
+        bl_mesh = eval_obj.to_mesh()
+
+        if bl_mesh is None:
+            raise ValueError(f"Could not get mesh data from '{bl_object.name}'")
+
+        try:
+            bl_mesh.calc_loop_triangles()
+            all_tris = bl_mesh.loop_triangles
+
+            if len(all_tris) == 0:
+                raise ValueError(f"Mesh '{bl_object.name}' has no triangles")
+
+            num_slots = len(bl_object.material_slots)
+            if num_slots <= 1:
+                # Single material — extract as one piece
+                result = _extract_from_mesh(bl_mesh, bl_object.name, uv_v_flip)
+                result.material_index = 0 if num_slots == 1 else -1
+                _extract_blend_data(
+                    bl_mesh, bl_object, result,
+                    bone_name_to_bm, global_to_local, uv_v_flip,
+                    loop_tris=all_tris
+                )
+                return [result]
+
+            # Group triangles by material_index
+            tris_by_mat = {}
+            for tri in all_tris:
+                mat_idx = tri.material_index
+                if mat_idx not in tris_by_mat:
+                    tris_by_mat[mat_idx] = []
+                tris_by_mat[mat_idx].append(tri)
+
+            # Extract each material group as a skinned submesh
+            results = []
+            for mat_idx in sorted(tris_by_mat.keys()):
+                tris = tris_by_mat[mat_idx]
+                mat_name = ""
+                if (mat_idx < num_slots and
+                        bl_object.material_slots[mat_idx].material):
+                    mat_name = bl_object.material_slots[mat_idx].material.name
+
+                name = (f"{bl_object.name}_{mat_name}" if mat_name
+                        else f"{bl_object.name}_mat{mat_idx}")
+
+                submesh = _extract_from_triangles(
+                    bl_mesh, tris, name, uv_v_flip
+                )
+                submesh.material_index = mat_idx
+
+                _extract_blend_data(
+                    bl_mesh, bl_object, submesh,
+                    bone_name_to_bm, global_to_local, uv_v_flip,
+                    loop_tris=tris
+                )
+
+                results.append(submesh)
+
+            return results
+        finally:
+            eval_obj.to_mesh_clear()
+    finally:
+        if old_pose_position is not None:
+            armature_obj.data.pose_position = old_pose_position
+            bpy.context.view_layer.update()
+
+
 def _extract_blend_data(bl_mesh, bl_object, mesh_export,
-                         bone_name_to_bm, global_to_local, uv_v_flip):
+                         bone_name_to_bm, global_to_local, uv_v_flip,
+                         loop_tris=None):
     """Extract blend weights and indices for each unique vertex in mesh_export.
 
     Rebuilds the vertex dedup map to identify which Blender vertex index
     corresponds to each unique exported vertex, then reads vertex group
     weights and maps them to IGB blend indices.
+
+    Args:
+        loop_tris: Optional subset of loop triangles to process.
+                   Must match the triangles used for the mesh_export extraction.
+                   If None, uses all triangles from bl_mesh.
     """
-    bl_mesh.calc_loop_triangles()
-    loop_tris = bl_mesh.loop_triangles
+    if loop_tris is None:
+        bl_mesh.calc_loop_triangles()
+        loop_tris = bl_mesh.loop_triangles
     vertices = bl_mesh.vertices
     loops = bl_mesh.loops
 

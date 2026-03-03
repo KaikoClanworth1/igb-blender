@@ -142,15 +142,34 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         # Extract mesh data via the skinned path (forces REST pose, correct
         # coordinate space).  Only fall back to unskinned if we truly have
         # no vertex groups at all.
+        #
+        # Multi-material meshes: If a mesh has >1 material slots and is not
+        # an outline, split it into per-material submeshes so each gets its
+        # own texture chain in the IGB file.
         has_vertex_groups = bool(mesh_obj.vertex_groups)
-        if has_vertex_groups:
-            mesh_export = extract_skin_mesh(
+        num_mat_slots = len(mesh_obj.data.materials) if mesh_obj.data.materials else 0
+
+        if num_mat_slots > 1 and not is_outline and has_vertex_groups:
+            # Multi-material skinned mesh → split by material slot
+            from .mesh_extractor import extract_skin_mesh_per_material
+            mesh_parts = extract_skin_mesh_per_material(
                 mesh_obj, armature_obj, skel_adapter,
                 bms_indices=bms_palette, uv_v_flip=True
             )
+            _report(operator, 'INFO',
+                    f"Mesh '{mesh_obj.name}': split into {len(mesh_parts)} "
+                    f"material groups")
         else:
-            # Fallback for meshes without vertex groups
-            mesh_export = extract_mesh(mesh_obj, uv_v_flip=True)
+            # Single material (or outline, or unskinned)
+            if has_vertex_groups:
+                mesh_export = extract_skin_mesh(
+                    mesh_obj, armature_obj, skel_adapter,
+                    bms_indices=bms_palette, uv_v_flip=True
+                )
+            else:
+                mesh_export = extract_mesh(mesh_obj, uv_v_flip=True)
+            mesh_export.material_index = 0
+            mesh_parts = [mesh_export]
 
         # Clean up temporary vertex group
         if temp_vg_name is not None:
@@ -158,69 +177,71 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             if vg_to_remove is not None:
                 mesh_obj.vertex_groups.remove(vg_to_remove)
 
-        # IGB skin files store vertices in armature/bind-pose space.
-        # igTransform nodes (e.g., on Bishop's drawn guns) are scene graph
-        # metadata — they do NOT offset vertex positions.  We skip baking
-        # matrix_local here; vertices from extract_skin_mesh are already
-        # in the correct space.
+        # Process each mesh part (1 for single-material, N for multi-material)
+        for mesh_part in mesh_parts:
+            mat_slot = max(0, getattr(mesh_part, 'material_index', 0))
 
-        # Apply armature world rotation + export scale to vertex data
-        _transform_mesh_for_export(mesh_export, armature_obj)
+            # IGB skin files store vertices in armature/bind-pose space.
+            # igTransform nodes (e.g., on Bishop's drawn guns) are scene graph
+            # metadata — they do NOT offset vertex positions.
 
-        num_verts = len(mesh_export.positions)
-        num_tris = len(mesh_export.indices) // 3
-        has_blend = bool(mesh_export.blend_weights)
-        # Check if blend data is actually meaningful (not all zeros)
-        weighted_verts = 0
-        if has_blend:
-            weighted_verts = sum(
-                1 for w in mesh_export.blend_weights if any(x > 0 for x in w))
+            # Apply armature world rotation + export scale to vertex data
+            _transform_mesh_for_export(mesh_part, armature_obj)
 
-        # Safety net: if extraction still produced no blend data (shouldn't
-        # happen with temp VG, but just in case), auto-assign to bone 0.
-        if num_verts > 0 and not has_blend:
-            mesh_export.blend_weights = [(1.0, 0.0, 0.0, 0.0)] * num_verts
-            mesh_export.blend_indices = [(0, 0, 0, 0)] * num_verts
-            has_blend = True
-            weighted_verts = num_verts
+            num_verts = len(mesh_part.positions)
+            num_tris = len(mesh_part.indices) // 3
+            has_blend = bool(mesh_part.blend_weights)
+            # Check if blend data is actually meaningful (not all zeros)
+            weighted_verts = 0
+            if has_blend:
+                weighted_verts = sum(
+                    1 for w in mesh_part.blend_weights
+                    if any(x > 0 for x in w))
 
-        _report(operator, 'INFO',
-                f"{'Outline' if is_outline else 'Main'} mesh '{mesh_obj.name}': "
-                f"{num_verts} verts, {num_tris} tris, "
-                f"weighted={weighted_verts}/{num_verts}")
+            # Safety net: if extraction produced no blend data, auto-assign
+            # to bone 0.
+            if num_verts > 0 and not has_blend:
+                mesh_part.blend_weights = [(1.0, 0.0, 0.0, 0.0)] * num_verts
+                mesh_part.blend_indices = [(0, 0, 0, 0)] * num_verts
+                has_blend = True
+                weighted_verts = num_verts
 
-        if has_blend and weighted_verts == 0 and num_verts > 0:
-            _report(operator, 'WARNING',
-                    f"Mesh '{mesh_obj.name}' has vertex groups but ALL blend "
-                    f"weights are zero! The mesh will not deform. Check that "
-                    f"vertex group names match skeleton bone names.")
+            _report(operator, 'INFO',
+                    f"{'Outline' if is_outline else 'Main'} "
+                    f"'{mesh_part.name}': "
+                    f"{num_verts} verts, {num_tris} tris, "
+                    f"weighted={weighted_verts}/{num_verts}")
 
-        # Extract material (with IGB custom properties for render state)
-        material = _extract_material_props(mesh_obj)
+            if has_blend and weighted_verts == 0 and num_verts > 0:
+                _report(operator, 'WARNING',
+                        f"Mesh '{mesh_part.name}' has vertex groups but ALL "
+                        f"blend weights are zero! The mesh will not deform.")
 
-        # Extract texture
-        tex_name = _get_texture_name(mesh_obj)
-        sub_dict = {
-            'mesh': mesh_export,
-            'material': material,
-            'texture_name': tex_name,
-            'is_outline': is_outline,
-            'segment_name': mesh_obj.get('igb_segment_name', ''),
-            'segment_flags': mesh_obj.get('igb_segment_flags', 0),
-        }
+            # Extract material/texture using the correct material slot
+            material = _extract_material_props(mesh_obj, mat_slot=mat_slot)
+            tex_name = _get_texture_name(mesh_obj, mat_slot=mat_slot)
+            sub_dict = {
+                'mesh': mesh_part,
+                'material': material,
+                'texture_name': tex_name,
+                'is_outline': is_outline,
+                'segment_name': mesh_obj.get('igb_segment_name', ''),
+                'segment_flags': mesh_obj.get('igb_segment_flags', 0),
+            }
 
-        if texture_mode == 'clut':
-            clut_result = _get_texture_clut(mesh_obj)
-            sub_dict['clut_data'] = clut_result
-            sub_dict['texture_levels'] = None
-        else:
-            sub_dict['texture_levels'] = _get_texture(mesh_obj, swap_rb=swap_rb)
-            sub_dict['clut_data'] = None
+            if texture_mode == 'clut':
+                clut_result = _get_texture_clut(mesh_obj, mat_slot=mat_slot)
+                sub_dict['clut_data'] = clut_result
+                sub_dict['texture_levels'] = None
+            else:
+                sub_dict['texture_levels'] = _get_texture(
+                    mesh_obj, swap_rb=swap_rb, mat_slot=mat_slot)
+                sub_dict['clut_data'] = None
 
-        submeshes.append(sub_dict)
+            submeshes.append(sub_dict)
 
-        total_verts += num_verts
-        total_tris += num_tris
+            total_verts += num_verts
+            total_tris += num_tris
 
     if not submeshes:
         _report(operator, 'ERROR', "No valid mesh objects to export")
@@ -602,12 +623,16 @@ class _SkeletonAdapter:
 # Material / texture extraction
 # ============================================================================
 
-def _extract_material_props(mesh_obj):
+def _extract_material_props(mesh_obj, mat_slot=0):
     """Extract material properties from a Blender mesh object.
 
     Reads both core material properties (diffuse, specular, etc.) and
     IGB render state custom properties (blend, alpha, color, lighting,
     cull face) set by the IGB Materials panel.
+
+    Args:
+        mesh_obj: Blender mesh object.
+        mat_slot: Material slot index to read from (default 0).
 
     Returns:
         dict with material properties for the skin builder.
@@ -623,10 +648,10 @@ def _extract_material_props(mesh_obj):
         'flags': 31,
     }
 
-    if not mesh_obj.data.materials:
+    if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
         return dict(defaults)
 
-    mat = mesh_obj.data.materials[0]
+    mat = mesh_obj.data.materials[mat_slot]
     if mat is None:
         return dict(defaults)
 
@@ -700,7 +725,7 @@ def _read_igb_render_state(mat, result):
         result['cull_face_mode'] = mat.get("igb_cull_face_mode", 0)
 
 
-def _get_texture(mesh_obj, swap_rb=False):
+def _get_texture(mesh_obj, swap_rb=False, mat_slot=0):
     """Extract texture data from a Blender mesh object's material.
 
     Uses the same approach as the map file exporter:
@@ -709,15 +734,20 @@ def _get_texture(mesh_obj, swap_rb=False):
     3. Ensure power-of-2 dimensions
     4. DXT5 compress with mipmaps
 
+    Args:
+        mesh_obj: Blender mesh object.
+        swap_rb: If True, swap R/B channels for MUA PC BGR565 encoding.
+        mat_slot: Material slot index to read from (default 0).
+
     Returns list of (compressed_dxt5_bytes, width, height) tuples, or None.
     """
     import bpy
     from ..utils.dxt_compress import compress_with_mipmaps
 
-    if not mesh_obj.data.materials:
+    if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
         return None
 
-    mat = mesh_obj.data.materials[0]
+    mat = mesh_obj.data.materials[mat_slot]
     if mat is None or not mat.use_nodes or not mat.node_tree:
         return None
 
@@ -779,19 +809,25 @@ def _get_texture(mesh_obj, swap_rb=False):
     return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
 
 
-def _get_texture_clut(mesh_obj):
+def _get_texture_clut(mesh_obj, mat_slot=0):
     """Extract texture as CLUT palette + indices for universal PS2-style format.
 
     Same image extraction as _get_texture, but quantizes to 256 colors
-    instead of DXT-compressing. Returns (palette_data, index_data, w, h) or None.
+    instead of DXT-compressing.
+
+    Args:
+        mesh_obj: Blender mesh object.
+        mat_slot: Material slot index to read from (default 0).
+
+    Returns (palette_data, index_data, w, h) or None.
     """
     import bpy
     from ..utils.clut_compress import quantize_rgba_to_clut
 
-    if not mesh_obj.data.materials:
+    if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
         return None
 
-    mat = mesh_obj.data.materials[0]
+    mat = mesh_obj.data.materials[mat_slot]
     if mat is None or not mat.use_nodes or not mat.node_tree:
         return None
 
@@ -864,14 +900,19 @@ def _next_power_of_2(n):
     return p
 
 
-def _get_texture_name(mesh_obj):
-    """Get the texture image name from a mesh object's material."""
+def _get_texture_name(mesh_obj, mat_slot=0):
+    """Get the texture image name from a mesh object's material.
+
+    Args:
+        mesh_obj: Blender mesh object.
+        mat_slot: Material slot index to read from (default 0).
+    """
     import bpy
 
-    if not mesh_obj.data.materials:
+    if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
         return ''
 
-    mat = mesh_obj.data.materials[0]
+    mat = mesh_obj.data.materials[mat_slot]
     if mat is None or not mat.use_nodes or not mat.node_tree:
         return ''
 
