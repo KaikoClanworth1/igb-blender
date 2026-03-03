@@ -149,8 +149,13 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         has_vertex_groups = bool(mesh_obj.vertex_groups)
         num_mat_slots = len(mesh_obj.data.materials) if mesh_obj.data.materials else 0
 
-        if num_mat_slots > 1 and not is_outline and has_vertex_groups:
+        is_segment = bool(mesh_obj.get('igb_segment_name', ''))
+        if (num_mat_slots > 1 and not is_outline and not is_segment
+                and has_vertex_groups):
             # Multi-material skinned mesh → split by material slot
+            # NOTE: Segments are NOT split — they must stay as a single unit
+            # under one igSegment node.  Splitting would create duplicate
+            # igSegment nodes with the same name, breaking segment toggling.
             from .mesh_extractor import extract_skin_mesh_per_material
             mesh_parts = extract_skin_mesh_per_material(
                 mesh_obj, armature_obj, skel_adapter,

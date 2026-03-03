@@ -440,6 +440,11 @@ class SkinBuilder:
         # Each unique texture gets its own igTextureBindAttr and igMaterialAttr.
         # This allows different body parts / segments to use different textures
         # (e.g. Cyclops body + winter accessories, Professor X + wheelchair).
+        #
+        # Submeshes with NO texture data (empty name + no levels/clut) are
+        # skipped here — they'll fall back to the first available texture in
+        # step 5c.  This preserves the old behavior where segments without
+        # their own texture shared the body's texture chain.
         tex_chain_map = {}  # tex_key -> {'tex_bind_idx': int, 'material_idx': int}
         outline_material = _default_outline_material()
 
@@ -452,6 +457,11 @@ class SkinBuilder:
             tex_key = sub.get('texture_name', '') or ''
             if tex_key in tex_chain_map:
                 continue  # Already built chain for this texture
+
+            # Skip submeshes with NO texture data — they'll use fallback
+            has_tex_data = bool(sub.get('clut_data') or sub.get('texture_levels'))
+            if not tex_key and not has_tex_data:
+                continue
 
             # Build texture chain for this unique texture
             if sub.get('clut_data'):
@@ -469,6 +479,16 @@ class SkinBuilder:
             material_idx = self._build_material(mat_props)
 
             tex_chain_map[tex_key] = {
+                'tex_bind_idx': tex_bind_idx,
+                'material_idx': material_idx,
+            }
+
+        # If NO submesh had valid texture data, build a default empty chain
+        # so the file still has valid structure.
+        if not tex_chain_map:
+            _, tex_bind_idx = self._build_texture_chain(None, '')
+            material_idx = self._build_material(_default_material())
+            tex_chain_map[''] = {
                 'tex_bind_idx': tex_bind_idx,
                 'material_idx': material_idx,
             }
@@ -659,8 +679,13 @@ class SkinBuilder:
 
             unit_name = seg_name if seg_name else skin_name
 
-            # Look up per-texture attrs for this submesh
+            # Look up per-texture attrs for this submesh.
+            # If this submesh has no texture, fall back to the first available
+            # texture chain (body texture).  This matches vanilla behavior where
+            # segments without their own texture share the body's texture.
             tex_key = sub.get('texture_name', '') or ''
+            if tex_key not in tex_chain_map:
+                tex_key = next(iter(tex_chain_map))  # fallback to first
             chain = tex_chain_map.get(tex_key, {})
             tex_bind_idx = chain.get('tex_bind_idx', -1)
             material_idx = chain.get('material_idx', -1)
