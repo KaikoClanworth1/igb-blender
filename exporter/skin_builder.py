@@ -99,6 +99,7 @@ _Bool = 2
 _String = 4
 _Enum = 6
 _MemRef = 7
+_UChar = 8
 _UInt = 9
 _Struct = 11
 _Float = 16
@@ -290,6 +291,14 @@ SKIN_META_OBJECTS = [
         (_MemRef, 5, 4), # _pData: palette data memory ref
         (_Int, 6, 4),    # _clutSize: total palette data size (1024)
     ]),
+    # [58] igBlendStateAttr (inherits igVisualAttribute[12])
+    ("igBlendStateAttr", 1, 0, 12, 5,
+     [(_Short, 2, 2), (_Bool, 4, 1)]),
+    # [59] igBlendFunctionAttr (inherits igVisualAttribute[12])
+    ("igBlendFunctionAttr", 1, 0, 12, 15,
+     [(_Short, 2, 2), (_Enum, 4, 4), (_Enum, 5, 4), (_Enum, 6, 4),
+      (_ObjRef, 7, 4), (_UChar, 8, 1), (_Short, 9, 2),
+      (_Enum, 11, 4), (_Enum, 12, 4), (_Enum, 13, 4), (_Enum, 14, 4)]),
 ]
 
 # Skin-specific meta-object indices — matches vanilla 0601.igb except igClut added
@@ -342,6 +351,8 @@ MO_INFO_LIST = 54
 MO_INT_LIST = 55
 MO_BLEND_MATRIX_SELECT = 56
 MO_CLUT = 57
+MO_BLEND_STATE_ATTR = 58
+MO_BLEND_FUNCTION_ATTR = 59
 
 # XML2 PC alignment buffer (same as map files)
 ALIGNMENT_BUFFER = bytes.fromhex(
@@ -691,8 +702,14 @@ class SkinBuilder:
             material_idx = chain.get('material_idx', -1)
 
             # Compose per-unit attr list: color + material + texbind + texstate
+            # + render state attrs (blend, alpha, lighting, cull face)
             unit_attrs = [main_color_idx, material_idx,
                           tex_bind_idx, main_tex_state_idx]
+
+            # Build render state attrs from material properties
+            mat_props = sub.get('material', {})
+            unit_attrs += self._build_render_state_attrs(mat_props)
+
             attrset_idx = self._build_unit_attrset(gi, unit_attrs, unit_name)
             bms_idx = self._build_unit_bms(attrset_idx, bms_int_list_idx)
 
@@ -1198,6 +1215,87 @@ class SkinBuilder:
             (11, _IDENTITY_MATRIX, 'Matrix44f', 64),
             (12, _IDENTITY_MATRIX, 'Matrix44f', 64),
         ])
+
+    def _build_render_state_attrs(self, mat_props):
+        """Build render state attr objects from material properties dict.
+
+        Conditionally emits blend, alpha, lighting, and cull face attrs
+        based on what properties are present in the material dict.
+        Mirrors the pattern used by the map exporter (igb_builder.py).
+
+        Args:
+            mat_props: Dict with keys like 'blend_enabled', 'alpha_test_enabled',
+                       'lighting_enabled', 'cull_face_enabled', etc.
+
+        Returns:
+            List of meta-object indices to append to the unit's attr list.
+        """
+        attrs = []
+
+        blend_on = bool(mat_props.get('blend_enabled', False))
+        alpha_on = bool(mat_props.get('alpha_test_enabled', False))
+
+        # Blend state — emit when blending is on, or when alpha is on
+        # with an explicit blend_enabled=False (cutout pattern)
+        if blend_on or (alpha_on and 'blend_enabled' in mat_props):
+            blend_state_idx = self._add_obj(MO_BLEND_STATE_ATTR, [
+                (2, 0, 'Short', 2),
+                (4, int(blend_on), 'Bool', 1),
+            ])
+            attrs.append(blend_state_idx)
+
+        # Blend function — only when blending is actually on
+        if blend_on and mat_props.get('blend_src') is not None:
+            blend_func_idx = self._add_obj(MO_BLEND_FUNCTION_ATTR, [
+                (2, 0, 'Short', 2),
+                (4, mat_props.get('blend_src', 4), 'Enum', 4),   # SRC_ALPHA
+                (5, mat_props.get('blend_dst', 5), 'Enum', 4),   # ONE_MINUS_SRC_ALPHA
+                (6, 0, 'Enum', 4),
+                (7, -1, 'ObjectRef', 4),
+                (8, 0, 'UnsignedChar', 1),
+                (9, 0, 'Short', 2),
+                (11, 0, 'Enum', 4),
+                (12, 0, 'Enum', 4),
+                (13, 0, 'Enum', 4),
+                (14, 0, 'Enum', 4),
+            ])
+            attrs.append(blend_func_idx)
+
+        # Alpha state — only when alpha test is enabled
+        if alpha_on:
+            alpha_state_idx = self._add_obj(MO_ALPHA_STATE_ATTR, [
+                (2, 0, 'Short', 2),
+                (4, 1, 'Bool', 1),
+            ])
+            attrs.append(alpha_state_idx)
+
+        # Alpha function — only when alpha test is on
+        if alpha_on and mat_props.get('alpha_func') is not None:
+            alpha_func_idx = self._add_obj(MO_ALPHA_FUNCTION_ATTR, [
+                (2, 0, 'Short', 2),
+                (4, mat_props.get('alpha_func', 6), 'Enum', 4),
+                (5, mat_props.get('alpha_ref', 0.5), 'Float', 4),
+            ])
+            attrs.append(alpha_func_idx)
+
+        # Lighting state
+        if 'lighting_enabled' in mat_props:
+            lighting_idx = self._add_obj(MO_LIGHTING_STATE_ATTR, [
+                (2, 0, 'Short', 2),
+                (4, int(mat_props['lighting_enabled']), 'Bool', 1),
+            ])
+            attrs.append(lighting_idx)
+
+        # Cull face
+        if 'cull_face_enabled' in mat_props:
+            cull_idx = self._add_obj(MO_CULL_FACE_ATTR, [
+                (2, 0, 'Short', 2),
+                (4, int(mat_props['cull_face_enabled']), 'Bool', 1),
+                (5, mat_props.get('cull_face_mode', 0), 'Enum', 4),
+            ])
+            attrs.append(cull_idx)
+
+        return attrs
 
     def _build_unit_attrset(self, geom_idx, attr_indices, name=''):
         """Build an igAttrSet with geometry child and rendering attributes.

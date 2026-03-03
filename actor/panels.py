@@ -384,7 +384,7 @@ class ACTOR_PT_Materials(Panel):
         mesh_obj = None
         if props.skins_index < len(props.skins):
             skin = props.skins[props.skins_index]
-            mesh_obj = bpy.data.objects.get(skin.name)
+            mesh_obj = bpy.data.objects.get(skin.object_name)
             if mesh_obj and mesh_obj.data.materials:
                 mat = mesh_obj.data.materials[0]
 
