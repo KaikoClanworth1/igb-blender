@@ -23,11 +23,11 @@ Created by **Kaiko** with the aid of **Claude**.
    ```
 3. Open Blender and go to **Edit > Preferences > Add-ons**.
 4. Search for **"IGB Format"** and enable it.
-5. The addon adds three sidebar tabs (press `N` in the 3D viewport): **IGB**, **IGB Actors**, and **Map Maker**.
+5. The addon adds four sidebar tabs (press `N` in the 3D viewport): **IGB**, **IGB Actors**, **Map Maker**, and **Menu Editor**.
 
 ### PySide6 (Optional)
 
-The standalone Conversation Editor and Menu Editor windows require PySide6. You can install it from the **IGB > IGB Extras** panel inside Blender, then restart.
+The standalone Conversation Editor window requires PySide6. You can install it from the **IGB > IGB Extras** panel inside Blender, then restart.
 
 ---
 
@@ -213,32 +213,42 @@ Shows the IGB material properties for the selected skin's material. Lets you edi
 
 A full level editor for creating custom game maps. Handles all the game files you need: `.igb` (geometry), `.engb` (entities), `.chrb` (characters), `.navb` (navigation), `.boyb` (bounding), `.pkgb` (packages/conversations).
 
-#### MM Map Settings
-Global settings for your map.
+The Map Maker uses a **tabbed layout** with four workflow views: **Scene**, **Place**, **Logic**, and **Build**. Switch between them using the tab bar at the top of the panel.
 
+#### Scene Tab
+
+Configure your map's identity, environment, and build paths.
+
+**Map Identity:**
 - **Map Name / Map Path** - The internal name and path the game uses to load your map.
 - **Act / Level** - Which act and level number this map belongs to.
 - **Zone Script** - Lua script file for the zone.
+
+**Environment:**
 - **Sound File** - Background music/ambient sound.
 - **Party Light** - Light color and radius for the player party.
 - **Combat Locked / No Save** - Gameplay flags.
 - **Big Conv Map** - Enable if this map has NPC conversations.
-- **Automap** - Path for the minimap data.
-- **Build Paths** - Output directory and game data directory.
 
-#### MM Entities
-Define and place game entities (NPCs, doors, triggers, items, etc.).
+**Paths & Options:**
+- **Output Directory** - Where compiled game files are written.
+- **Game Data Directory** - Path to the game install for asset lookups.
+- **Automap Path** - Override for minimap data path (auto-generated if blank).
+- **Show Previews** - Toggle 3D previews for placed entities.
 
-- **Entity Definitions List** - Searchable list of entity types you've defined for this map.
-- **Entity Details** - Edit the selected definition: name, classname, character reference, model path, collision toggle, and custom key-value properties.
-- **Placement** - Place instances of the selected entity at the 3D cursor. Select/remove placed instances. Refresh 3D previews of placed characters and models.
-- **Quick Presets** - One-click buttons for common entity types.
-- **Precache** - Resources the game should preload. Auto-scan fills this from your placed entities.
-- **Characters (CHRB)** - Character list for the map's `.chrb` file. Auto-scan detects characters from placed NPC entities.
+#### Place Tab
 
-#### MM Character Database
-Browse the game's existing NPC and hero roster.
+Place gameplay assets into your map: entities, NPCs, and models.
 
+**Quick Add:**
+One-click buttons for common gameplay entities (NPC spawn, zone link, trigger, pickup, etc.). Each button creates an entity definition with the correct classname and default properties, then places an instance at the 3D cursor.
+
+**Entity Definitions:**
+- **Entity Definitions List** - Searchable list of entity types defined for this map.
+- **Entity Details** - Edit the selected definition: name, classname, character reference, model path, collision toggle, and custom key-value properties. Known classnames (e.g. `monsterspawnerent`, `zonelinkent`) get **typed property schemas** with proper widgets (checkboxes, dropdowns, number fields) instead of raw key-value strings.
+- **Placement** - Place instances of the selected entity at the 3D cursor. Select/remove placed instances. Refresh 3D previews.
+
+**Character Database:**
 - **Load Character DB** - Reads `npcstat.engb` and `herostat.engb` from your game data directory.
 - **Search** - Filter by name, ID, or team.
 - **Character Details** - Name, ID, team, skin, anim set.
@@ -246,18 +256,37 @@ Browse the game's existing NPC and hero roster.
 - **Pick for Active Entity Def** - Sets the character on your selected entity definition.
 - **NPC/Hero Stat Editor** - Opens an external editor window for npcstat or herostat files.
 
-#### MM Model Browser
-Browse game model assets from the `models/` directory.
-
+**Model Browser:**
 - **Scan Models** - Indexes all `.igb` files in the models directory.
 - **Search / Category Filter** - Find models by name or category (props, environment, etc.).
 - **Quick Place at Cursor** - Creates an entity with the model and places it.
 - **Import as Asset** - Import the model geometry into Blender.
 - **Asset Library** - Batch import an entire category for use as Blender assets.
 
-#### MM Conversations
+**Selected Entity Inspector:**
+Appears on any tab when an entity Empty is selected. Shows the entity name, classname, and all custom properties inline so you can tweak placed entities without switching tabs.
 
-> **Beta:** The external Conversation Editor GUI and Menu Editor are in beta.
+#### Logic Tab
+
+Define objectives, build conversations, and manage precache lists.
+
+**Objectives:**
+Visual objective builder for creating in-game mission goals. Each objective has a name, display text, activation mode, and one or more steps.
+
+- **Objective List** - Create, reorder, and remove objectives.
+- **Objective Details** - Name, display text, auto-activate toggle, optional flag, trigger entity, and next objective chain.
+- **Steps** - Each objective has typed steps:
+  - *Go to Location* - Player must reach a position. Can reference a scene object or manual coordinates. Place visual markers at the 3D cursor.
+  - *Destroy Target* - Destroy a specific entity.
+  - *Collect Item* - Pick up N items of a type.
+  - *Interact* - Use/interact with an entity.
+  - *Defeat All Enemies* - Clear all spawned enemies in an area.
+  - *Custom Script* - Run arbitrary Lua script code.
+- Each step can have a completion script that fires when the step is done.
+
+**Conversations:**
+
+> **Beta:** The external Conversation Editor GUI is in beta.
 
 Build NPC dialogue trees that become PKGB conversation files.
 
@@ -271,28 +300,65 @@ Build NPC dialogue trees that become PKGB conversation files.
 - **Import / Export** - Save or load conversation XML files.
 - **Link to NPC** - Connect a conversation to a placed NPC entity.
 
-#### MM Navigation
-Generate navigation mesh data for AI pathfinding.
+**Precache & Characters:**
+- **Precache List** - Resources the game should preload. Auto-scan fills this from your placed entities.
+- **Characters (CHRB)** - Character list for the map's `.chrb` file. Auto-scan detects characters from placed NPC entities.
 
+#### Build Tab
+
+Compile, validate, and deploy your map.
+
+**Navigation Mesh:**
 - **Cell Size** - Grid resolution for the nav mesh.
 - **Advanced** - Max slope angle, multi-layer support, layer separation distance.
 - **Generate Nav Mesh** - Computes walkable cells from scene geometry.
 - **Visualize Nav Mesh** - Shows the generated nav grid as a wireframe overlay.
 
-#### MM Automap
-Create and manage the in-game minimap.
-
-- **Import / Export ZAM** - Load or save `.zam` minimap files.
-- **Generate Automap Mesh** - Create an automap from selected floor geometry.
-
-#### MM Build
-Compile all your map data into game-ready files.
-
+**Compile & Deploy:**
 - **Generate XML** - Creates the XML source files for all map components.
 - **Compile XMLB** - Converts XML to the game's binary XMLB format.
 - **Build All** - Runs the full pipeline (XML generation + XMLB compilation + IGB export) in one click.
-- **Collision Preview** - Visualize what the exported collision looks like.
-- **Menu Editor** *(Beta)* - Opens an external window for editing the game's menu files.
+
+**Validation:**
+Pre-build checks that catch common mistakes before compiling. Click **Run Validation** to check for:
+- Missing required settings (map name, paths, output directory).
+- Entity definitions with missing classnames or character references.
+- Placed instances referencing deleted entity definitions.
+- Objectives with empty steps or missing targets.
+- Results are shown inline with error/warning icons.
+
+**Collision Preview:**
+- **Preview Colliders** - Visualize the Colliders collection.
+- **Preview Visual Mesh Collision** - Show auto-generated collision from visible geometry.
+
+**Automap:**
+- **Import / Export ZAM** - Load or save `.zam` minimap files.
+- **Generate Automap Mesh** - Create an automap from selected floor geometry.
+
+---
+
+### Menu Editor Tab
+
+A full N-panel GUI for editing game menu ENGB files (main menu, character select, load screens, etc.). Appears as its own sidebar tab.
+
+**File Operations:**
+- **Game Directory** - Path to the game install for finding menu files.
+- **Load Menu ENGB** - Open a menu file from `ui/menus/`.
+- **Save / Save As** - Write changes back to the ENGB file.
+- **Deploy** - Copy the compiled menu to the game directory for testing.
+- **Patch IGB Transforms** - Sync item positions from Blender back into the menu's IGB file.
+
+**Items:**
+- **Item List** - Searchable list of all menu items with icons (text, model, selectable).
+- **Add / Remove / Duplicate / Reorder** - Full list management.
+- **Focus** - Zoom the 3D viewport to the selected item.
+- **Debug Filter** - Toggle visibility of debug-only items.
+
+**Item Properties:**
+Edit the selected menu item's attributes: name, type, text, font, position, rotation, scale, colors (focus/unfocus), navigation links, commands, sounds, and visibility flags.
+
+**Precache:**
+Manage precache entries for textures and models used by the menu.
 
 ---
 
