@@ -116,7 +116,7 @@ def _ensure_conversation_script(game_dir, conv_path):
     content = f'''# Auto-generated conversation script for {conv_name}
 # Created by Map Maker Tools
 
-def OnActComplete():
+def OnActivate():
     """Start the conversation when the NPC is interacted with."""
     game.startConversation('{conv_path}')
 '''
@@ -1790,10 +1790,14 @@ class MM_OT_build_all(Operator):
         zone_script = settings.zone_script
 
         # Gather conversation data on main thread
+        # Apply conv_path fallback here (same logic as PKGB generator)
         conv_data = []
         for conv in scene.mm_conversations:
+            cpath = conv.conv_path
+            if not cpath:
+                cpath = f"{map_path}/{map_name}"
             conv_data.append({
-                'conv_path': conv.conv_path,
+                'conv_path': cpath,
                 'conv_name': conv.conv_name,
             })
         edef_scripts = []
@@ -1801,6 +1805,20 @@ class MM_OT_build_all(Operator):
             for prop in edef.properties:
                 if prop.key == 'monster_actscript' and prop.value:
                     edef_scripts.append(prop.value)
+
+        # Gather act number for mission naming
+        act_number = settings.act
+
+        # Generate objective zone script on main thread (needs bpy access)
+        objective_script = ""
+        mission_name = ""
+        try:
+            from .objective_gen import generate_zone_script_with_objectives
+            objective_script = generate_zone_script_with_objectives(scene)
+            if objective_script:
+                mission_name = f"act{act_number}_{map_name}"
+        except Exception as e:
+            print(f"[MapMaker] Warning: objective generation failed: {e}")
 
         # Step 2+3: Compile XMLB + copy files in background thread
         MM_OT_build_all._building = True
@@ -1811,6 +1829,7 @@ class MM_OT_build_all(Operator):
                 msg = _build_all_background(
                     output_dir, game_dir, map_name, map_path,
                     zone_script, conv_data, edef_scripts,
+                    objective_script, mission_name,
                 )
                 MM_OT_build_all._result = (True, msg)
             except Exception as e:
@@ -1863,7 +1882,8 @@ class MM_OT_build_all(Operator):
 
 
 def _build_all_background(output_dir, game_dir, map_name, map_path,
-                          zone_script, conv_data, edef_scripts):
+                          zone_script, conv_data, edef_scripts,
+                          objective_script="", mission_name=""):
     """Run XMLB compilation + file deployment in a background thread.
 
     This function must NOT access bpy.data or bpy.context — only use
@@ -1902,8 +1922,28 @@ def _build_all_background(output_dir, game_dir, map_name, map_path,
             shutil.copy2(src, dst)
             count += 1
 
-        # Zone script stub (file I/O only, no bpy)
-        _ensure_zone_script_bg(game_dir, map_path, map_name, zone_script)
+        # Mission ENGB (objective definitions) → data/missions/{mission_name}.engb
+        # MUST be at top-level data/missions/ (NOT nested) and registered
+        # in missions.xmlb for the engine to load it.
+        mission_src = os.path.join(output_dir, map_name + '_mission.engb')
+        if os.path.exists(mission_src) and mission_name:
+            mission_dir = os.path.join(game_dir, "data", "missions")
+            os.makedirs(mission_dir, exist_ok=True)
+            dst = os.path.join(mission_dir, mission_name + '.engb')
+            shutil.copy2(mission_src, dst)
+            count += 1
+
+            # Register in missions.xmlb if not already present
+            _register_mission_in_xmlb(mission_dir, mission_name)
+
+            # Update new_game.py to use beginMission() so engine loads
+            # mission data (objectives) before zone scripts run
+            _write_new_game_script_bg(game_dir, mission_name, map_path,
+                                      map_name)
+
+        # Zone script — write objective-aware script or minimal stub
+        _write_zone_script_bg(game_dir, map_path, map_name, zone_script,
+                              objective_script)
 
         # Compile and deploy conversations
         conv_count = 0
@@ -1915,13 +1955,10 @@ def _build_all_background(output_dir, game_dir, map_name, map_path,
                     compile_xml_to_xmlb(conv_xml, conv_bin)
                 except Exception:
                     continue
-                # Deploy to game conversations dir
-                conv_rel = cd['conv_path']
-                if conv_rel:
-                    conv_target = os.path.join(game_dir, "conversations",
-                                               conv_rel)
-                else:
-                    conv_target = os.path.join(game_dir, "conversations")
+                # Deploy to game conversations dir (conv_path already has
+                # fallback applied — see main thread data gathering)
+                conv_target = os.path.join(game_dir, "conversations",
+                                           cd['conv_path'])
                 os.makedirs(conv_target, exist_ok=True)
                 dst = os.path.join(conv_target, f"{cd['conv_name']}.engb")
                 shutil.copy2(conv_bin, dst)
@@ -1934,10 +1971,10 @@ def _build_all_background(output_dir, game_dir, map_name, map_path,
             if '(' in val:
                 continue
             for cd in conv_data:
-                full_conv_path = (f"{cd['conv_path']}/{cd['conv_name']}"
-                                  if cd['conv_path'] else cd['conv_name'])
-                if val == full_conv_path:
-                    _ensure_conversation_script_bg(game_dir, full_conv_path)
+                full_conv_path = f"{cd['conv_path']}/{cd['conv_name']}"
+                # Match entity script value against full path OR bare conv_name
+                if val == full_conv_path or val == cd['conv_name']:
+                    _write_conversation_script_bg(game_dir, val, full_conv_path)
                     break
 
         return f"Build complete. Compiled {compiled} files, copied {count} to game directory."
@@ -1945,13 +1982,24 @@ def _build_all_background(output_dir, game_dir, map_name, map_path,
         return f"Build complete. Compiled {compiled} files. Set Game Data Directory to auto-deploy."
 
 
-def _ensure_zone_script_bg(game_dir, map_path, map_name, zone_script=""):
-    """Background-safe version of _ensure_zone_script (no bpy access)."""
+def _write_zone_script_bg(game_dir, map_path, map_name, zone_script="",
+                          objective_script=""):
+    """Write zone script to game directory (background-safe, no bpy access).
+
+    If objective_script is provided, writes the full objective-aware script.
+    Otherwise writes a minimal stub. Always overwrites existing script to
+    keep objectives in sync with the build.
+    """
     if not zone_script:
         zone_script = f"{map_path}/{map_name}"
     script_path = os.path.join(game_dir, "scripts", zone_script + ".py")
-    if not os.path.exists(script_path):
-        os.makedirs(os.path.dirname(script_path), exist_ok=True)
+    os.makedirs(os.path.dirname(script_path), exist_ok=True)
+
+    if objective_script:
+        with open(script_path, 'w') as f:
+            f.write(objective_script)
+    elif not os.path.exists(script_path):
+        # Only write stub if no script exists yet
         with open(script_path, 'w') as f:
             f.write(f"# Zone script for {map_name}\n")
             f.write("# Auto-generated by Map Maker\n")
@@ -1959,17 +2007,131 @@ def _ensure_zone_script_bg(game_dir, map_path, map_name, zone_script=""):
             f.write("    pass\n")
 
 
-def _ensure_conversation_script_bg(game_dir, full_conv_path):
-    """Background-safe version of _ensure_conversation_script (no bpy access)."""
-    script_path = os.path.join(game_dir, "scripts", full_conv_path + ".py")
-    if not os.path.exists(script_path):
-        conv_name = os.path.basename(full_conv_path)
-        os.makedirs(os.path.dirname(script_path), exist_ok=True)
-        with open(script_path, 'w') as f:
-            f.write(f"# Conversation script for {conv_name}\n")
-            f.write("# Auto-generated by Map Maker\n")
-            f.write(f"\ndef OnActivate():\n")
-            f.write(f"    game.startConversation('{conv_name}')\n")
+def _write_new_game_script_bg(game_dir, mission_name, map_path, map_name):
+    """Write new_game.py to start the mission (background-safe, no bpy).
+
+    Uses beginMission() which loads the mission data AND transitions to
+    the starting zone. The engine determines the starting zone from
+    the objectives' zone attributes in the mission ENGB.
+    """
+    ng_path = os.path.join(game_dir, "scripts", "menus", "new_game.py")
+    if os.path.exists(ng_path):
+        # Back up existing if not already backed up
+        bak = ng_path + ".bak"
+        if not os.path.exists(bak):
+            import shutil
+            shutil.copy2(ng_path, bak)
+    os.makedirs(os.path.dirname(ng_path), exist_ok=True)
+    with open(ng_path, 'w') as f:
+        f.write("# Auto-generated by Map Maker — starts mission with objectives\n")
+        f.write(f"# Original backed up to new_game.py.bak\n")
+        f.write(f"# Mission: {mission_name}  Zone: {map_path}/{map_name}\n")
+        f.write(f'beginMission("{mission_name}" )\n')
+
+
+def _write_conversation_script_bg(game_dir, script_name, full_conv_path):
+    """Write a conversation helper script (background-safe, no bpy access).
+
+    Args:
+        game_dir: Game data root directory
+        script_name: Value of monster_actscript (where game looks for script)
+        full_conv_path: Full conversation path for game.startConversation()
+    """
+    script_path = os.path.join(game_dir, "scripts", script_name + ".py")
+    os.makedirs(os.path.dirname(script_path), exist_ok=True)
+    # Always overwrite — ensures correct callback and conversation path
+    with open(script_path, 'w') as f:
+        f.write(f"# Conversation script for {full_conv_path}\n")
+        f.write("# Auto-generated by Map Maker\n")
+        f.write(f"\ndef OnActivate():\n")
+        f.write(f"    game.startConversation('{full_conv_path}')\n")
+
+
+def _register_mission_in_xmlb(mission_dir, mission_name):
+    """Add a mission to missions.xmlb if not already present.
+
+    Background-safe (no bpy access). Reads the existing missions.xmlb,
+    adds the new mission entry, and rewrites it.
+    """
+    from .xmlb_compile import compile_xml_to_xmlb
+    import xml.etree.ElementTree as ET
+
+    xmlb_path = os.path.join(mission_dir, "missions.xmlb")
+    if not os.path.exists(xmlb_path):
+        # No master file — write a minimal one
+        text = (
+            f"XMLB MISSIONS {{\n"
+            f"   maxmissions = 50 ;\n"
+            f"   maxquestsperact = 100 ;\n"
+            f"   maxtotalquests = 500 ;\n"
+            f"\n"
+            f"   MISSION {{\n"
+            f"   name = {mission_name} ;\n"
+            f"   }}\n"
+            f"\n"
+            f"}}\n"
+        )
+        text_path = xmlb_path + ".xml"
+        with open(text_path, 'w') as f:
+            f.write(text)
+        try:
+            compile_xml_to_xmlb(text_path, xmlb_path)
+        except Exception as e:
+            print(f"[MapMaker] Warning: failed to compile missions.xmlb: {e}")
+        return
+
+    # Read existing missions.xmlb
+    try:
+        from .xmlb import read_xmlb
+        from pathlib import Path
+        root = read_xmlb(Path(xmlb_path))
+    except Exception as e:
+        print(f"[MapMaker] Warning: failed to read missions.xmlb: {e}")
+        return
+
+    # Check if our mission is already registered
+    existing = set()
+    for child in root:
+        if child.tag == 'MISSION':
+            name = child.get('name', '')
+            existing.add(name.lower())
+
+    if mission_name.lower() in existing:
+        return  # Already registered
+
+    # Rebuild missions.xmlb with our mission added
+    lines = ["XMLB MISSIONS {"]
+    # Preserve original attributes
+    for k in ('maxmissions', 'maxquestsperact', 'maxtotalquests'):
+        val = root.get(k, '')
+        if val:
+            lines.append(f"   {k} = {val} ;")
+    lines.append("")
+
+    # Re-emit existing missions
+    for child in root:
+        if child.tag == 'MISSION':
+            name = child.get('name', '')
+            lines.append(f"   MISSION {{")
+            lines.append(f"   name = {name} ;")
+            lines.append(f"   }}")
+            lines.append("")
+
+    # Add our new mission
+    lines.append(f"   MISSION {{")
+    lines.append(f"   name = {mission_name} ;")
+    lines.append(f"   }}")
+    lines.append("")
+    lines.append("}")
+    lines.append("")
+
+    text_path = xmlb_path + ".xml"
+    with open(text_path, 'w') as f:
+        f.write("\n".join(lines))
+    try:
+        compile_xml_to_xmlb(text_path, xmlb_path)
+    except Exception as e:
+        print(f"[MapMaker] Warning: failed to recompile missions.xmlb: {e}")
 
 
 def _parse_eng_file(filepath):
@@ -3137,6 +3299,329 @@ class MM_OT_link_conversation_to_npc(Operator):
 
 
 # ===========================================================================
+# Dialog Maker — quick conversation creation wizard
+# ===========================================================================
+
+class MM_OT_quick_dialog(Operator):
+    """Create a complete NPC conversation from a simple dialog script.
+
+    Enter dialog as lines of 'Speaker: Text' (one per line).
+    Blank lines separate exchanges. Lines starting with '>' are player responses.
+    """
+    bl_idname = "mm.quick_dialog"
+    bl_label = "Create Dialog"
+    bl_description = ("Create a conversation from simple text. Use 'NPC: text' for "
+                      "NPC lines, '> text' for player choices. Blank lines separate exchanges")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    conv_name: StringProperty(
+        name="Name",
+        description="Conversation filename",
+        default="npc_talk",
+    )
+    conv_path: StringProperty(
+        name="Path",
+        description="Conversation path prefix (e.g. 'act1/sanctuary')",
+        default="",
+    )
+    dialog_text: StringProperty(
+        name="Dialog",
+        description=(
+            "Dialog script. Format:\n"
+            "  %NPC%: Hello, hero.\n"
+            "  > What's going on?\n"
+            "  %NPC%: The world is in danger.\n"
+            "  > I'll help!\n"
+            "  > Maybe later."
+        ),
+        default="",
+    )
+    npc_name: StringProperty(
+        name="NPC Name",
+        description="NPC speaker tag (e.g. 'Beast', 'ProfX'). Used as %NPC% placeholder",
+        default="NPC",
+    )
+
+    def invoke(self, context, event):
+        # Auto-fill path from map settings
+        settings = context.scene.mm_settings
+        if not self.conv_path and settings.map_path:
+            self.conv_path = settings.map_path
+
+        # Auto-generate a unique name
+        existing = {c.conv_name for c in context.scene.mm_conversations}
+        base = "npc_talk"
+        name = base
+        idx = 1
+        while name in existing:
+            name = f"{base}_{idx:02d}"
+            idx += 1
+        self.conv_name = name
+
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "conv_name")
+        layout.prop(self, "conv_path")
+        layout.prop(self, "npc_name")
+        layout.separator()
+        layout.label(text="Dialog Script (NPC: text / > player choice):")
+        layout.prop(self, "dialog_text", text="")
+        layout.separator()
+        box = layout.box()
+        box.label(text="Format Guide:", icon='INFO')
+        col = box.column(align=True)
+        col.scale_y = 0.7
+        col.label(text="%NPC%: Hello there.")
+        col.label(text="> What's happening?")
+        col.label(text="%NPC%: We need your help!")
+        col.label(text="> I'll help!  |  > Maybe later.")
+        col.label(text="(Use | to separate multiple choices)")
+
+    def execute(self, context):
+        from .conversation import allocate_node_id, get_next_sort_order
+
+        scene = context.scene
+        npc_tag = f"%{self.npc_name}%"
+
+        # Parse dialog text
+        lines = self.dialog_text.strip().split("\\n") if "\\n" in self.dialog_text else [self.dialog_text]
+        if not lines or not lines[0].strip():
+            # If dialog_text is empty, create a minimal template
+            lines = [
+                f"{npc_tag}: Hello.",
+                "> (continue)",
+            ]
+
+        # Create conversation
+        conv = scene.mm_conversations.add()
+        conv.conv_name = self.conv_name
+        conv.conv_path = self.conv_path
+        scene.mm_conversations_index = len(scene.mm_conversations) - 1
+
+        # Create start condition
+        start = conv.nodes.add()
+        start.node_id = allocate_node_id(conv)
+        start.parent_id = -1
+        start.node_type = 'START_CONDITION'
+        start.sort_order = 0
+        start_id = start.node_id
+
+        # Create default participant
+        part = conv.nodes.add()
+        part.node_id = allocate_node_id(conv)
+        part.parent_id = start_id
+        part.node_type = 'PARTICIPANT'
+        part.participant_name = "default"
+        part.sort_order = 0
+        part_id = part.node_id
+
+        # Parse dialog lines
+        current_parent = part_id
+        line_count = 0
+        response_count = 0
+
+        for raw_line in lines:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+
+            # Handle |-separated choices on one line
+            if raw_line.startswith(">") and "|" in raw_line:
+                choices = [c.strip().lstrip(">").strip() for c in raw_line.split("|")]
+                for choice_text in choices:
+                    if choice_text:
+                        resp = conv.nodes.add()
+                        resp.node_id = allocate_node_id(conv)
+                        resp.parent_id = current_parent
+                        resp.node_type = 'RESPONSE'
+                        resp.sort_order = get_next_sort_order(conv, current_parent)
+                        resp.response_text = choice_text
+                        response_count += 1
+                        # After choices, next NPC line should be under the last choice
+                        current_parent = resp.node_id
+                continue
+
+            if raw_line.startswith(">"):
+                # Player response
+                resp_text = raw_line[1:].strip()
+                resp = conv.nodes.add()
+                resp.node_id = allocate_node_id(conv)
+                resp.parent_id = current_parent
+                resp.node_type = 'RESPONSE'
+                resp.sort_order = get_next_sort_order(conv, current_parent)
+                resp.response_text = resp_text if resp_text else ""
+                response_count += 1
+                # Next NPC line goes under this response
+                current_parent = resp.node_id
+            else:
+                # NPC line (may have "Speaker: text" format)
+                line_node = conv.nodes.add()
+                line_node.node_id = allocate_node_id(conv)
+                line_node.parent_id = current_parent
+                line_node.node_type = 'LINE'
+                line_node.sort_order = get_next_sort_order(conv, current_parent)
+                line_node.text = raw_line
+                line_count += 1
+                # Next response/line goes under this line
+                current_parent = line_node.node_id
+
+        # If we only have NPC lines with no responses, add auto-advance
+        if response_count == 0 and line_count > 0:
+            resp = conv.nodes.add()
+            resp.node_id = allocate_node_id(conv)
+            resp.parent_id = current_parent
+            resp.node_type = 'RESPONSE'
+            resp.sort_order = 0
+            resp.response_text = ""  # blank = auto-advance
+
+        self.report({'INFO'},
+                    f"Created dialog '{self.conv_name}' "
+                    f"({line_count} lines, {response_count} responses)")
+        return {'FINISHED'}
+
+
+class MM_OT_quick_dialog_from_text(Operator):
+    """Create a conversation from multiline text in the text editor"""
+    bl_idname = "mm.quick_dialog_from_text"
+    bl_label = "Dialog from Text Block"
+    bl_description = ("Create a conversation from a Blender text block. "
+                      "Format: 'Speaker: text' for NPC, '> text' for choices")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    text_name: StringProperty(
+        name="Text Block",
+        description="Name of the Blender text block containing the dialog script",
+    )
+    conv_name: StringProperty(
+        name="Conversation Name",
+        default="npc_talk",
+    )
+    conv_path: StringProperty(
+        name="Path",
+        default="",
+    )
+
+    def invoke(self, context, event):
+        settings = context.scene.mm_settings
+        if not self.conv_path and settings.map_path:
+            self.conv_path = settings.map_path
+
+        # Auto-generate unique name
+        existing = {c.conv_name for c in context.scene.mm_conversations}
+        base = "npc_talk"
+        name = base
+        idx = 1
+        while name in existing:
+            name = f"{base}_{idx:02d}"
+            idx += 1
+        self.conv_name = name
+
+        return context.window_manager.invoke_props_dialog(self, width=350)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop_search(self, "text_name", bpy.data, "texts")
+        layout.prop(self, "conv_name")
+        layout.prop(self, "conv_path")
+
+    def execute(self, context):
+        text_block = bpy.data.texts.get(self.text_name)
+        if not text_block:
+            self.report({'ERROR'}, f"Text block '{self.text_name}' not found")
+            return {'CANCELLED'}
+
+        # Read text and delegate to quick_dialog logic
+        from .conversation import allocate_node_id, get_next_sort_order
+
+        scene = context.scene
+        raw_text = text_block.as_string()
+        lines = raw_text.split("\n")
+
+        # Create conversation
+        conv = scene.mm_conversations.add()
+        conv.conv_name = self.conv_name
+        conv.conv_path = self.conv_path
+        scene.mm_conversations_index = len(scene.mm_conversations) - 1
+
+        # Create start condition
+        start = conv.nodes.add()
+        start.node_id = allocate_node_id(conv)
+        start.parent_id = -1
+        start.node_type = 'START_CONDITION'
+        start.sort_order = 0
+        start_id = start.node_id
+
+        # Create default participant
+        part = conv.nodes.add()
+        part.node_id = allocate_node_id(conv)
+        part.parent_id = start_id
+        part.node_type = 'PARTICIPANT'
+        part.participant_name = "default"
+        part.sort_order = 0
+        part_id = part.node_id
+
+        # Parse lines
+        current_parent = part_id
+        line_count = 0
+        response_count = 0
+
+        for raw_line in lines:
+            raw_line = raw_line.strip()
+            if not raw_line or raw_line.startswith("#"):
+                continue
+
+            # Handle |-separated choices
+            if raw_line.startswith(">") and "|" in raw_line:
+                choices = [c.strip().lstrip(">").strip() for c in raw_line.split("|")]
+                for choice_text in choices:
+                    if choice_text:
+                        resp = conv.nodes.add()
+                        resp.node_id = allocate_node_id(conv)
+                        resp.parent_id = current_parent
+                        resp.node_type = 'RESPONSE'
+                        resp.sort_order = get_next_sort_order(conv, current_parent)
+                        resp.response_text = choice_text
+                        response_count += 1
+                        current_parent = resp.node_id
+                continue
+
+            if raw_line.startswith(">"):
+                resp_text = raw_line[1:].strip()
+                resp = conv.nodes.add()
+                resp.node_id = allocate_node_id(conv)
+                resp.parent_id = current_parent
+                resp.node_type = 'RESPONSE'
+                resp.sort_order = get_next_sort_order(conv, current_parent)
+                resp.response_text = resp_text if resp_text else ""
+                response_count += 1
+                current_parent = resp.node_id
+            else:
+                line_node = conv.nodes.add()
+                line_node.node_id = allocate_node_id(conv)
+                line_node.parent_id = current_parent
+                line_node.node_type = 'LINE'
+                line_node.sort_order = get_next_sort_order(conv, current_parent)
+                line_node.text = raw_line
+                line_count += 1
+                current_parent = line_node.node_id
+
+        if response_count == 0 and line_count > 0:
+            resp = conv.nodes.add()
+            resp.node_id = allocate_node_id(conv)
+            resp.parent_id = current_parent
+            resp.node_type = 'RESPONSE'
+            resp.sort_order = 0
+            resp.response_text = ""
+
+        self.report({'INFO'},
+                    f"Created dialog '{self.conv_name}' from text block "
+                    f"({line_count} lines, {response_count} responses)")
+        return {'FINISHED'}
+
+
+# ===========================================================================
 # Conversation Editor (PySide6 external window)
 # ===========================================================================
 
@@ -3777,6 +4262,120 @@ class MM_OT_make_automap(Operator):
 # Registration
 # ===========================================================================
 
+# ===========================================================================
+# Schema-Aware Property Editing
+# ===========================================================================
+
+class MM_OT_set_entity_property(Operator):
+    """Set or create a key-value property on an entity definition"""
+    bl_idname = "mm.set_entity_property"
+    bl_label = "Set Property"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    entity_name: StringProperty()
+    property_key: StringProperty()
+    property_value: StringProperty()
+
+    def execute(self, context):
+        scene = context.scene
+        edef = _find_entity_def_by_name(scene, self.entity_name)
+        if not edef:
+            # Fall back to active entity def
+            if 0 <= scene.mm_entity_defs_index < len(scene.mm_entity_defs):
+                edef = scene.mm_entity_defs[scene.mm_entity_defs_index]
+            else:
+                self.report({'WARNING'}, "No entity def found")
+                return {'CANCELLED'}
+
+        # Find existing property or create new one
+        for prop in edef.properties:
+            if prop.key == self.property_key:
+                prop.value = self.property_value
+                return {'FINISHED'}
+
+        # Create new property
+        prop = edef.properties.add()
+        prop.key = self.property_key
+        prop.value = self.property_value
+        return {'FINISHED'}
+
+
+class MM_OT_remove_entity_property_by_index(Operator):
+    """Remove a custom property by index"""
+    bl_idname = "mm.remove_entity_property_by_index"
+    bl_label = "Remove Property"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    index: IntProperty()
+
+    def execute(self, context):
+        scene = context.scene
+        if not (0 <= scene.mm_entity_defs_index < len(scene.mm_entity_defs)):
+            return {'CANCELLED'}
+        edef = scene.mm_entity_defs[scene.mm_entity_defs_index]
+        if 0 <= self.index < len(edef.properties):
+            edef.properties.remove(self.index)
+        return {'FINISHED'}
+
+
+class MM_OT_remove_entity_property_by_key(Operator):
+    """Remove a named property from an entity definition"""
+    bl_idname = "mm.remove_entity_property_by_key"
+    bl_label = "Remove Property by Key"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    entity_name: StringProperty()
+    property_key: StringProperty()
+
+    def execute(self, context):
+        scene = context.scene
+        edef = _find_entity_def_by_name(scene, self.entity_name)
+        if not edef:
+            if 0 <= scene.mm_entity_defs_index < len(scene.mm_entity_defs):
+                edef = scene.mm_entity_defs[scene.mm_entity_defs_index]
+            else:
+                return {'CANCELLED'}
+
+        for i, prop in enumerate(edef.properties):
+            if prop.key == self.property_key:
+                edef.properties.remove(i)
+                return {'FINISHED'}
+        return {'FINISHED'}  # Key not found = already removed
+
+
+# ===========================================================================
+# Validation
+# ===========================================================================
+
+class MM_OT_run_validation(Operator):
+    """Run pre-build validation checks"""
+    bl_idname = "mm.run_validation"
+    bl_label = "Run Validation"
+
+    def execute(self, context):
+        import json
+        from .entity_validate import validate_all
+
+        scene = context.scene
+        results = validate_all(scene)
+
+        # Cache results on the scene for the panel to display
+        scene["mm_validation_results"] = json.dumps(results)
+
+        errors = sum(1 for level, _ in results if level == 'ERROR')
+        warnings = sum(1 for level, _ in results if level == 'WARNING')
+        infos = sum(1 for level, _ in results if level == 'INFO')
+
+        if errors:
+            self.report({'ERROR'}, f"Validation: {errors} errors, {warnings} warnings")
+        elif warnings:
+            self.report({'WARNING'}, f"Validation: {warnings} warnings, {infos} info")
+        else:
+            self.report({'INFO'}, f"Validation passed ({infos} info)")
+
+        return {'FINISHED'}
+
+
 _classes = (
     # Entity def CRUD
     MM_OT_add_entity_def,
@@ -3832,6 +4431,9 @@ _classes = (
     MM_OT_export_conversation,
     MM_OT_import_conversation,
     MM_OT_link_conversation_to_npc,
+    # Dialog Maker
+    MM_OT_quick_dialog,
+    MM_OT_quick_dialog_from_text,
     # Conversation Editor
     MM_OT_open_convo_editor,
     MM_OT_extract_hud_heads,
@@ -3846,6 +4448,12 @@ _classes = (
     MM_OT_import_zam,
     MM_OT_export_zam,
     MM_OT_make_automap,
+    # Schema-aware property editing
+    MM_OT_set_entity_property,
+    MM_OT_remove_entity_property_by_index,
+    MM_OT_remove_entity_property_by_key,
+    # Validation
+    MM_OT_run_validation,
 )
 
 

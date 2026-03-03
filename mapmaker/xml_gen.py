@@ -302,6 +302,9 @@ def generate_pkgb_text(scene):
     w.close_block()
     w.blank()
 
+    # NOTE: Mission objectives are loaded by the engine from data/missions/
+    # via missions.xmlb — NOT via PKGB xml references.
+
     # --- Map model ---
     w.open_block("model")
     w.attr("filename", map_path)
@@ -662,6 +665,17 @@ def generate_all(scene, output_dir):
             conv_xml_path = os.path.join(output_dir, conv.conv_name + ".engb.xml")
             _write_raven_text(conv_text, conv_xml_path)
             written.append(conv_xml_path)
+
+    # Mission ENGB (objective definitions for data/missions/)
+    try:
+        from .objective_gen import generate_mission_engb_text
+        mission_text = generate_mission_engb_text(scene)
+        if mission_text:
+            mission_path = os.path.join(output_dir, base_name + "_mission.engb.xml")
+            _write_raven_text(mission_text, mission_path)
+            written.append(mission_path)
+    except Exception as e:
+        print(f"[MapMaker] Warning: mission ENGB generation failed: {e}")
 
     # PKGB (generated last so it can reference all conversation/script paths)
     pkgb_text = generate_pkgb_text(scene)

@@ -153,6 +153,17 @@ class MM_ModelDBEntry(PropertyGroup):
 class MM_MapSettings(PropertyGroup):
     """Top-level map settings. The 'world' entity in ENGB + build config."""
 
+    ui_tab: EnumProperty(
+        name="Tab",
+        items=[
+            ('SCENE', "Scene", "Map settings and environment", 'WORLD', 0),
+            ('PLACE', "Place", "Place entities and assets", 'CURSOR', 1),
+            ('LOGIC', "Logic", "Objectives, conversations, scripts", 'SCRIPT', 2),
+            ('BUILD', "Build", "Compile and deploy", 'EXPORT', 3),
+        ],
+        default='PLACE',
+    )
+
     map_name: StringProperty(
         name="Map Name",
         description="Map zone name (e.g. 'sanctuary1')",

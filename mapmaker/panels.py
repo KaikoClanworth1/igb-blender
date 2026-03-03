@@ -1,13 +1,10 @@
-"""Map Maker Tool panels — self-contained top-level panels in the Map Maker N-panel tab.
+"""Map Maker Tool panels — tabbed layout with 4 workflow views.
 
-Panel structure:
-  MM Map Settings    — world entity, build paths
-  MM Entities        — entity defs, placement, presets, previews, precache, characters
-  MM Character DB    — npcstat/herostat browser, quick place
-  MM Model Browser   — models/ directory browser, quick place, asset library
-  MM Conversations   — dialogue tree editor, import/export
-  MM Navigation      — navmesh generation and visualization
-  MM Build           — XML generation, XMLB compilation, ENGB import
+Panel structure (tab-based):
+  [Scene]  Map identity, environment, build paths
+  [Place]  Quick-add, entity defs, character/model browsers
+  [Logic]  Objectives, conversations, precache
+  [Build]  Navigation, compilation, deployment, collision, automap
 """
 
 import bpy
@@ -15,7 +12,7 @@ from bpy.types import Panel, UIList
 
 
 # ===========================================================================
-# UIList renderers
+# UIList renderers (unchanged, all existing UILists preserved)
 # ===========================================================================
 
 class MM_UL_entity_defs(UIList):
@@ -36,7 +33,6 @@ class MM_UL_entity_defs(UIList):
         flt_flags = [0] * len(items)
         flt_neworder = list(range(len(items)))
 
-        # Search filter — match against entity_name and classname
         if self.filter_name:
             query = self.filter_name.lower()
             for i, item in enumerate(items):
@@ -93,7 +89,6 @@ class MM_UL_char_db(UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
-            # Team icon
             if item.team == 'hero':
                 team_icon = 'COMMUNITY'
             elif item.team in ('enemy', 'boss'):
@@ -110,7 +105,6 @@ class MM_UL_char_db(UIList):
         items = getattr(data, propname)
         search = context.scene.mm_char_search.lower()
 
-        # Filter
         flt_flags = [self.bitflag_filter_item] * len(items)
         if search:
             for i, item in enumerate(items):
@@ -119,7 +113,6 @@ class MM_UL_char_db(UIList):
                         search not in item.team.lower()):
                     flt_flags[i] = 0
 
-        # No re-ordering needed (already sorted)
         flt_neworder = list(range(len(items)))
         return flt_flags, flt_neworder
 
@@ -141,7 +134,6 @@ class MM_UL_model_db(UIList):
         search = context.scene.mm_model_search.lower()
         category = context.scene.mm_model_filter_category
 
-        # Filter
         flt_flags = [self.bitflag_filter_item] * len(items)
         for i, item in enumerate(items):
             if search and search not in item.display_name.lower():
@@ -218,17 +210,12 @@ class MM_UL_conv_nodes(UIList):
                         display_text = (cleaned[:50] + "..."
                                         if len(cleaned) > 50 else cleaned)
 
-            # Build the row
             row = layout.row(align=True)
-
-            # Icon-based indentation (consistent width)
             for _ in range(depth):
                 row.label(text="", icon='BLANK1')
 
-            # Main content
             row.label(text=display_text, icon=node_icon)
 
-            # Trailing indicator icons
             if indicators:
                 if indicators['has_sound']:
                     row.label(text="", icon='SOUND')
@@ -258,13 +245,10 @@ class MM_UL_conv_nodes(UIList):
         flt_flags = [0] * len(items)
         flt_neworder = list(range(len(items)))
 
-        # Build the mapping: display_index -> collection_index
-        # First, build a node_id -> collection_index map
         id_to_idx = {}
         for i, node in enumerate(items):
             id_to_idx[node.node_id] = i
 
-        # Mark visible items and build sort order
         new_order = [0] * len(items)
         for display_idx, (node, depth) in enumerate(display):
             coll_idx = id_to_idx.get(node.node_id, -1)
@@ -275,17 +259,219 @@ class MM_UL_conv_nodes(UIList):
         return flt_flags, new_order
 
 
+class MM_UL_objectives(UIList):
+    """UIList for objectives."""
+    bl_idname = "MM_UL_objectives"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            # Order number
+            row.label(text=f"{index + 1}.")
+            # Status icon
+            if item.is_optional:
+                row.label(text="", icon='LAYER_USED')
+            else:
+                row.label(text="", icon='LAYER_ACTIVE')
+            row.prop(item, "display_text", text="", emboss=False)
+            if item.auto_activate:
+                row.label(text="", icon='PLAY')
+        elif self.layout_type == 'GRID':
+            layout.label(text=item.display_text)
+
+
+class MM_UL_objective_steps(UIList):
+    """UIList for objective steps."""
+    bl_idname = "MM_UL_objective_steps"
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            row = layout.row(align=True)
+            # Step type icon
+            type_icons = {
+                'GO_TO': 'TRACKER',
+                'DESTROY': 'TRASH',
+                'COLLECT': 'PACKAGE',
+                'INTERACT': 'HAND',
+                'DEFEAT_ALL': 'ARMATURE_DATA',
+                'CUSTOM': 'SCRIPT',
+            }
+            row.label(text="", icon=type_icons.get(item.step_type, 'DOT'))
+            # Description or auto-generated text
+            if item.description:
+                row.label(text=item.description)
+            else:
+                label = item.step_type.replace('_', ' ').title()
+                if item.target_entity:
+                    label += f" → {item.target_entity}"
+                elif item.scene_object_name:
+                    label += f" → {item.scene_object_name}"
+                row.label(text=label)
+        elif self.layout_type == 'GRID':
+            layout.label(text=item.step_type)
+
+
 # ===========================================================================
-# Panel 1: MM Map Settings
+# Helper: Property schema renderer
 # ===========================================================================
 
-class MM_PT_MapSettings(Panel):
-    """Map Settings — world entity properties, build paths, and global options"""
-    bl_label = "MM Map Settings"
-    bl_idname = "MM_PT_MapSettings"
+def _find_property(edef, key):
+    """Find a custom property by key on an entity def."""
+    for prop in edef.properties:
+        if prop.key == key:
+            return prop
+    return None
+
+
+def _draw_schema_properties(layout, edef):
+    """Draw typed property widgets from entity schema, with raw fallback.
+
+    Bool properties use game-correct toggle behavior:
+    - default 'false': property present with 'true' = ON, property absent = OFF
+    - default 'true': property absent = ON (uses game default), property 'false' = OFF
+    """
+    from .entity_schemas import get_schema, get_schema_keys
+
+    schema = get_schema(edef.classname)
+    schema_keys = get_schema_keys(edef.classname)
+
+    if schema:
+        for section in schema['sections']:
+            box = layout.box()
+            box.label(text=section['label'], icon=section.get('icon', 'PREFERENCES'))
+
+            for prop_def in section['properties']:
+                key = prop_def['key']
+                prop = _find_property(edef, key)
+                schema_default = prop_def.get('default', '')
+                current_value = prop.value if prop else schema_default
+                label = prop_def.get('label', key)
+
+                if prop_def['type'] == 'bool':
+                    is_true = current_value.lower() in ('true', '1', 'yes')
+                    row = box.row(align=True)
+
+                    if is_true:
+                        # Currently ON → toggle OFF
+                        if schema_default.lower() in ('true', '1', 'yes'):
+                            # Default is true: set explicit 'false'
+                            op = row.operator("mm.set_entity_property",
+                                             text=label,
+                                             icon='CHECKBOX_HLT',
+                                             depress=True)
+                            op.entity_name = edef.entity_name
+                            op.property_key = key
+                            op.property_value = 'false'
+                        else:
+                            # Default is false: REMOVE property (absent = off)
+                            op = row.operator("mm.remove_entity_property_by_key",
+                                             text=label,
+                                             icon='CHECKBOX_HLT',
+                                             depress=True)
+                            op.entity_name = edef.entity_name
+                            op.property_key = key
+                    else:
+                        # Currently OFF → toggle ON
+                        if schema_default.lower() in ('true', '1', 'yes'):
+                            # Default is true: REMOVE property (absent = on by default)
+                            op = row.operator("mm.remove_entity_property_by_key",
+                                             text=label,
+                                             icon='CHECKBOX_DEHLT',
+                                             depress=False)
+                            op.entity_name = edef.entity_name
+                            op.property_key = key
+                        else:
+                            # Default is false: set 'true'
+                            op = row.operator("mm.set_entity_property",
+                                             text=label,
+                                             icon='CHECKBOX_DEHLT',
+                                             depress=False)
+                            op.entity_name = edef.entity_name
+                            op.property_key = key
+                            op.property_value = 'true'
+
+                elif prop_def['type'] == 'enum':
+                    row = box.row(align=True)
+                    row.label(text=label)
+                    if prop:
+                        row.prop(prop, "value", text="")
+                    else:
+                        op = row.operator("mm.set_entity_property", text=current_value or "(none)")
+                        op.entity_name = edef.entity_name
+                        op.property_key = key
+                        op.property_value = prop_def.get('default', '')
+
+                else:
+                    # string / int / float — use direct prop editor if property exists
+                    row = box.row(align=True)
+                    row.label(text=label)
+                    if prop:
+                        row.prop(prop, "value", text="")
+                    else:
+                        op = row.operator("mm.set_entity_property", text=current_value or "(empty)")
+                        op.entity_name = edef.entity_name
+                        op.property_key = key
+                        op.property_value = prop_def.get('default', '')
+
+    # Raw key-value editor for properties NOT covered by schema
+    has_extra = False
+    for prop in edef.properties:
+        if prop.key not in schema_keys:
+            has_extra = True
+            break
+
+    if has_extra or not schema:
+        layout.separator()
+        box = layout.box()
+        box.label(text="Custom Properties", icon='PROPERTIES')
+        for i, prop in enumerate(edef.properties):
+            if schema and prop.key in schema_keys:
+                continue
+            row = box.row(align=True)
+            row.prop(prop, "key", text="")
+            row.prop(prop, "value", text="")
+            op = row.operator("mm.remove_entity_property_by_index", text="", icon='X')
+            op.index = i
+
+    row = layout.row(align=True)
+    row.operator("mm.add_entity_property", icon='ADD', text="Add Property")
+    row.operator("mm.apply_defaults", icon='FILE_REFRESH', text="Defaults")
+
+
+# ===========================================================================
+# Root Panel with Tab Bar
+# ===========================================================================
+
+class MM_PT_Root(Panel):
+    """Map Maker — root panel with tab navigation"""
+    bl_label = "Map Maker"
+    bl_idname = "MM_PT_Root"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.mm_settings
+        layout.prop(settings, "ui_tab", expand=True)
+
+
+# ===========================================================================
+# Tab: SCENE — Map Settings
+# ===========================================================================
+
+class MM_PT_Scene_Identity(Panel):
+    """Map identity and world entity settings"""
+    bl_label = "Map Identity"
+    bl_idname = "MM_PT_Scene_Identity"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'SCENE'
 
     def draw(self, context):
         layout = self.layout
@@ -299,8 +485,27 @@ class MM_PT_MapSettings(Panel):
         row.prop(settings, "act")
         row.prop(settings, "level")
         col.prop(settings, "zone_script")
+
+
+class MM_PT_Scene_Environment(Panel):
+    """Environment settings — light, sound, flags"""
+    bl_label = "Environment"
+    bl_idname = "MM_PT_Scene_Environment"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'SCENE'
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.mm_settings
+
+        col = layout.column(align=True)
         col.prop(settings, "soundfile")
-        col.separator()
         col.prop(settings, "partylight")
         col.prop(settings, "partylightradius")
         row = col.row(align=True)
@@ -308,44 +513,90 @@ class MM_PT_MapSettings(Panel):
         row.prop(settings, "nosave")
         col.prop(settings, "bigconvmap")
 
-        layout.separator()
-        box = layout.box()
-        box.label(text="Automap", icon='IMAGE_DATA')
-        col = box.column(align=True)
-        col.prop(settings, "automap_path")
-        col.label(text="Leave blank for auto: automaps/{map_path}/{map_name}", icon='INFO')
 
-        layout.separator()
-        box = layout.box()
-        box.label(text="Build Paths", icon='FILE_FOLDER')
-        col = box.column(align=True)
-        col.prop(settings, "output_dir")
-        col.prop(settings, "game_data_dir")
-
-        # Global options
-        layout.separator()
-        box = layout.box()
-        box.label(text="Options", icon='PREFERENCES')
-        box.prop(settings, "show_previews", toggle=True)
-
-
-# ===========================================================================
-# Panel 2: MM Entities
-# ===========================================================================
-
-class MM_PT_Entities(Panel):
-    """Entities — definitions, placement, presets, precache, and characters"""
-    bl_label = "MM Entities"
-    bl_idname = "MM_PT_Entities"
+class MM_PT_Scene_Paths(Panel):
+    """Build paths and options"""
+    bl_label = "Paths & Options"
+    bl_idname = "MM_PT_Scene_Paths"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'SCENE'
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.mm_settings
+
+        col = layout.column(align=True)
+        col.prop(settings, "output_dir")
+        col.prop(settings, "game_data_dir")
+        col.separator()
+        col.prop(settings, "automap_path")
+        col.label(text="Leave blank for auto: automaps/{map_path}/{map_name}", icon='INFO')
+        col.separator()
+        col.prop(settings, "show_previews", toggle=True)
+
+
+# ===========================================================================
+# Tab: PLACE — Entity Placement
+# ===========================================================================
+
+class MM_PT_Place_QuickAdd(Panel):
+    """One-click gameplay asset placement"""
+    bl_label = "Quick Add"
+    bl_idname = "MM_PT_Place_QuickAdd"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'PLACE'
+
+    def draw(self, context):
+        layout = self.layout
+
+        from .entity_defs import ENTITY_PRESETS
+
+        # Group presets by visual category
+        # Terminals & Points
+        box = layout.box()
+        box.label(text="Terminals & Points", icon='PROP_OFF')
+        col = box.column(align=True)
+        for i in range(0, len(ENTITY_PRESETS), 2):
+            row = col.row(align=True)
+            pid, label, desc, *_ = ENTITY_PRESETS[i]
+            op = row.operator("mm.place_preset", text=label)
+            op.preset_id = pid
+            if i + 1 < len(ENTITY_PRESETS):
+                pid2, label2, desc2, *_ = ENTITY_PRESETS[i + 1]
+                op2 = row.operator("mm.place_preset", text=label2)
+                op2.preset_id = pid2
+
+
+class MM_PT_Place_Entities(Panel):
+    """Entity definitions and placement"""
+    bl_label = "Entity Definitions"
+    bl_idname = "MM_PT_Place_Entities"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'PLACE'
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
 
-        # --- Entity Definitions ---
+        # Entity Definitions list
         row = layout.row()
         row.template_list(
             "MM_UL_entity_defs", "",
@@ -366,49 +617,21 @@ class MM_PT_Entities(Panel):
             col.prop(edef, "entity_name")
             col.prop(edef, "classname")
 
-            # Show character field for spawners
             if edef.classname == 'monsterspawnerent':
                 col.prop(edef, "character")
                 col.prop(edef, "monster_name")
 
-            # Show model field for any entity that can reference a model
             if edef.classname in ('physent', 'doorent', 'gameent', 'actionent') or edef.model:
                 col.prop(edef, "model")
 
             col.prop(edef, "nocollide")
 
-            # Apply defaults button
+            # Schema-based properties
             col.separator()
-            col.operator("mm.apply_defaults", icon='FILE_REFRESH')
+            _draw_schema_properties(box, edef)
 
-            # Custom properties sub-list
-            box2 = box.box()
-            box2.label(text="Custom Properties", icon='PROPERTIES')
-            row = box2.row()
-            row.template_list(
-                "MM_UL_entity_properties", "",
-                edef, "properties",
-                edef, "properties_index",
-                rows=3,
-            )
-            col2 = row.column(align=True)
-            col2.operator("mm.add_entity_property", icon='ADD', text="")
-            col2.operator("mm.remove_entity_property", icon='REMOVE', text="")
-
-
-class MM_PT_Entities_Placement(Panel):
-    """Placement controls and quick presets"""
-    bl_label = "Placement"
-    bl_idname = "MM_PT_Entities_Placement"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Map Maker"
-    bl_parent_id = "MM_PT_Entities"
-
-    def draw(self, context):
-        layout = self.layout
-        scene = context.scene
-
+        # Placement controls
+        layout.separator()
         col = layout.column(align=True)
         col.scale_y = 1.3
         col.operator("mm.place_entity", icon='EMPTY_SINGLE_ARROW')
@@ -420,137 +643,41 @@ class MM_PT_Entities_Placement(Panel):
         # Instance count
         count = 0
         if "[MapMaker] Entities" in bpy.data.collections:
-            count = len(bpy.data.collections["[MapMaker] Entities"].objects)
+            count = sum(1 for o in bpy.data.collections["[MapMaker] Entities"].objects
+                        if not o.get("mm_preview"))
         layout.label(text=f"Placed instances: {count}", icon='OBJECT_DATA')
 
         # Actor preview controls
-        layout.separator()
         row = layout.row(align=True)
         row.operator("mm.refresh_previews", icon='FILE_REFRESH', text="Refresh Previews")
         row.operator("mm.strip_previews", icon='TRASH', text="Strip All")
 
 
-class MM_PT_Entities_Presets(Panel):
-    """Quick entity presets"""
-    bl_label = "Quick Presets"
-    bl_idname = "MM_PT_Entities_Presets"
+class MM_PT_Place_CharacterDB(Panel):
+    """Character Database — browse NPCs and heroes"""
+    bl_label = "Character Database"
+    bl_idname = "MM_PT_Place_CharacterDB"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
-    bl_parent_id = "MM_PT_Entities"
+    bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
-    def draw(self, context):
-        layout = self.layout
-
-        from .entity_defs import ENTITY_PRESETS
-        col = layout.column(align=True)
-        for i in range(0, len(ENTITY_PRESETS), 2):
-            row = col.row(align=True)
-            pid, label, desc, *_ = ENTITY_PRESETS[i]
-            op = row.operator("mm.place_preset", text=label)
-            op.preset_id = pid
-            if i + 1 < len(ENTITY_PRESETS):
-                pid2, label2, desc2, *_ = ENTITY_PRESETS[i + 1]
-                op2 = row.operator("mm.place_preset", text=label2)
-                op2.preset_id = pid2
-
-
-class MM_PT_Entities_Precache(Panel):
-    """Precache entries — resources to preload"""
-    bl_label = "Precache"
-    bl_idname = "MM_PT_Entities_Precache"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Map Maker"
-    bl_parent_id = "MM_PT_Entities"
-    bl_options = {'DEFAULT_CLOSED'}
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'PLACE'
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
 
-        row = layout.row()
-        row.template_list(
-            "MM_UL_precache", "",
-            scene, "mm_precache",
-            scene, "mm_precache_index",
-            rows=4,
-        )
-        col = row.column(align=True)
-        col.operator("mm.add_precache", icon='ADD', text="")
-        col.operator("mm.remove_precache", icon='REMOVE', text="")
-
-        layout.operator("mm.scan_precache", icon='VIEWZOOM', text="Auto-Scan Precache")
-        layout.label(text=f"{len(scene.mm_precache)} entries", icon='INFO')
-
-
-class MM_PT_Entities_Characters(Panel):
-    """CHRB character list for this map"""
-    bl_label = "Characters (CHRB)"
-    bl_idname = "MM_PT_Entities_Characters"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Map Maker"
-    bl_parent_id = "MM_PT_Entities"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        layout = self.layout
-        scene = context.scene
-
-        row = layout.row()
-        row.template_list(
-            "MM_UL_characters", "",
-            scene, "mm_characters",
-            scene, "mm_characters_index",
-            rows=3,
-        )
-        col = row.column(align=True)
-        col.operator("mm.add_character", icon='ADD', text="")
-        col.operator("mm.remove_character", icon='REMOVE', text="")
-
-        layout.operator("mm.scan_characters", icon='VIEWZOOM', text="Auto-Scan Characters")
-
-        # Rename / Replace buttons (active when a character is selected)
-        if 0 <= scene.mm_characters_index < len(scene.mm_characters):
-            ch = scene.mm_characters[scene.mm_characters_index]
-            box = layout.box()
-            box.label(text=f"Selected: {ch.char_name}", icon='ARMATURE_DATA')
-            row = box.row(align=True)
-            row.operator("mm.rename_character", icon='SORTALPHA', text="Rename")
-            row.operator("mm.replace_character", icon='FILE_REFRESH', text="Replace from DB")
-
-        layout.label(text=f"{len(scene.mm_characters)} characters", icon='ARMATURE_DATA')
-
-
-# ===========================================================================
-# Panel 3: MM Character Database
-# ===========================================================================
-
-class MM_PT_CharacterDB(Panel):
-    """Character Database — browse NPCs and heroes from game data"""
-    bl_label = "MM Character Database"
-    bl_idname = "MM_PT_CharacterDB"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Map Maker"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        layout = self.layout
-        scene = context.scene
-
-        # Load button
         row = layout.row(align=True)
         row.operator("mm.load_char_db", icon='FILE_REFRESH', text="Load Character DB")
         row.label(text=f"({len(scene.mm_char_db)} chars)")
 
         if len(scene.mm_char_db) > 0:
-            # Search field
             layout.prop(scene, "mm_char_search", icon='VIEWZOOM')
 
-            # Character list
             row = layout.row()
             row.template_list(
                 "MM_UL_char_db", "",
@@ -559,7 +686,6 @@ class MM_PT_CharacterDB(Panel):
                 rows=6,
             )
 
-            # Selected character details
             if 0 <= scene.mm_char_db_index < len(scene.mm_char_db):
                 entry = scene.mm_char_db[scene.mm_char_db_index]
                 box = layout.box()
@@ -572,7 +698,6 @@ class MM_PT_CharacterDB(Panel):
                 if entry.characteranims:
                     col.label(text=f"Anims: {entry.characteranims}")
 
-                # Action buttons
                 col.separator()
                 col.scale_y = 1.3
                 col.operator("mm.quick_place_character", icon='EMPTY_SINGLE_ARROW',
@@ -594,35 +719,33 @@ class MM_PT_CharacterDB(Panel):
         op.stat_file = 'herostat'
 
 
-# ===========================================================================
-# Panel 4: MM Model Browser
-# ===========================================================================
-
-class MM_PT_ModelBrowser(Panel):
+class MM_PT_Place_ModelBrowser(Panel):
     """Model Browser — browse game model assets"""
-    bl_label = "MM Model Browser"
-    bl_idname = "MM_PT_ModelBrowser"
+    bl_label = "Model Browser"
+    bl_idname = "MM_PT_Place_ModelBrowser"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'PLACE'
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
 
-        # Scan button
         row = layout.row(align=True)
         row.operator("mm.scan_models", icon='FILE_REFRESH', text="Scan Models")
         row.label(text=f"({len(scene.mm_model_db)} models)")
 
         if len(scene.mm_model_db) > 0:
-            # Search and category filter
             col = layout.column(align=True)
             col.prop(scene, "mm_model_search", icon='VIEWZOOM')
             col.prop(scene, "mm_model_filter_category", icon='FILE_FOLDER', text="Category")
 
-            # Model list
             row = layout.row()
             row.template_list(
                 "MM_UL_model_db", "",
@@ -631,7 +754,6 @@ class MM_PT_ModelBrowser(Panel):
                 rows=6,
             )
 
-            # Selected model details
             if 0 <= scene.mm_model_db_index < len(scene.mm_model_db):
                 entry = scene.mm_model_db[scene.mm_model_db_index]
                 box = layout.box()
@@ -640,7 +762,6 @@ class MM_PT_ModelBrowser(Panel):
                 col.label(text=f"Path: {entry.rel_path}")
                 col.label(text=f"Category: {entry.category}")
 
-                # Action buttons
                 col.separator()
                 col.scale_y = 1.3
                 col.operator("mm.quick_place_model", icon='EMPTY_SINGLE_ARROW',
@@ -651,7 +772,6 @@ class MM_PT_ModelBrowser(Panel):
                 col.operator("mm.import_model_asset", icon='ASSET_MANAGER',
                              text="Import as Asset")
 
-            # Batch asset import
             layout.separator()
             box = layout.box()
             box.label(text="Asset Library", icon='ASSET_MANAGER')
@@ -663,17 +783,127 @@ class MM_PT_ModelBrowser(Panel):
 
 
 # ===========================================================================
-# Panel 5: MM Conversations
+# Tab: LOGIC — Objectives, Conversations, Precache
 # ===========================================================================
 
-class MM_PT_Conversations(Panel):
-    """Conversations — dialogue tree editor"""
-    bl_label = "MM Conversations"
-    bl_idname = "MM_PT_Conversations"
+class MM_PT_Logic_Objectives(Panel):
+    """Objectives — visual objective builder"""
+    bl_label = "Objectives"
+    bl_idname = "MM_PT_Logic_Objectives"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'LOGIC'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        # Objective list
+        row = layout.row()
+        row.template_list(
+            "MM_UL_objectives", "",
+            scene, "mm_objectives",
+            scene, "mm_objectives_index",
+            rows=4,
+        )
+        col = row.column(align=True)
+        col.operator("mm.add_objective", icon='ADD', text="")
+        col.operator("mm.remove_objective", icon='REMOVE', text="")
+        col.separator()
+        op = col.operator("mm.move_objective", icon='TRIA_UP', text="")
+        op.direction = 'UP'
+        op = col.operator("mm.move_objective", icon='TRIA_DOWN', text="")
+        op.direction = 'DOWN'
+
+        # Selected objective details
+        if not (0 <= scene.mm_objectives_index < len(scene.mm_objectives)):
+            return
+
+        objective = scene.mm_objectives[scene.mm_objectives_index]
+
+        box = layout.box()
+        col = box.column(align=True)
+        col.prop(objective, "obj_name")
+        col.prop(objective, "display_text")
+        row = col.row(align=True)
+        row.prop(objective, "auto_activate", toggle=True)
+        row.prop(objective, "is_optional", toggle=True)
+
+        if not objective.auto_activate:
+            col.prop(objective, "trigger_entity")
+
+        col.prop(objective, "next_objective")
+
+        # Steps
+        layout.separator()
+        box = layout.box()
+        box.label(text="Steps", icon='LINENUMBERS_ON')
+
+        row = box.row()
+        row.template_list(
+            "MM_UL_objective_steps", "",
+            objective, "steps",
+            objective, "steps_index",
+            rows=3,
+        )
+        col = row.column(align=True)
+        col.operator("mm.add_objective_step", icon='ADD', text="")
+        col.operator("mm.remove_objective_step", icon='REMOVE', text="")
+
+        # Selected step details
+        if 0 <= objective.steps_index < len(objective.steps):
+            step = objective.steps[objective.steps_index]
+
+            sbox = box.box()
+            col = sbox.column(align=True)
+            col.prop(step, "step_type")
+            col.prop(step, "description")
+
+            if step.step_type == 'GO_TO':
+                col.separator()
+                col.prop(step, "use_scene_object")
+                if step.use_scene_object:
+                    row = col.row(align=True)
+                    row.prop(step, "scene_object_name", text="Object")
+                    row.operator("mm.select_step_target", text="", icon='RESTRICT_SELECT_OFF')
+                else:
+                    col.prop(step, "target_location")
+                col.prop(step, "radius")
+                col.operator("mm.place_objective_marker", icon='SPHERE',
+                             text="Place Marker at Cursor")
+
+            elif step.step_type in ('DESTROY', 'INTERACT', 'DEFEAT_ALL'):
+                col.prop(step, "target_entity")
+
+            elif step.step_type == 'COLLECT':
+                col.prop(step, "target_entity")
+                col.prop(step, "count")
+
+            elif step.step_type == 'CUSTOM':
+                col.prop(step, "custom_check_script")
+
+            col.separator()
+            col.prop(step, "completion_script")
+
+
+class MM_PT_Logic_Conversations(Panel):
+    """Conversations — dialogue tree editor"""
+    bl_label = "Conversations"
+    bl_idname = "MM_PT_Logic_Conversations"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'LOGIC'
 
     def draw(self, context):
         layout = self.layout
@@ -691,6 +921,11 @@ class MM_PT_Conversations(Panel):
         col.operator("mm.add_conversation", icon='ADD', text="")
         col.operator("mm.remove_conversation", icon='REMOVE', text="")
 
+        # Dialog Maker — quick conversation creation
+        row = layout.row(align=True)
+        row.operator("mm.quick_dialog", icon='GREASEPENCIL', text="Quick Dialog")
+        row.operator("mm.quick_dialog_from_text", icon='TEXT', text="From Text Block")
+
         if not (0 <= scene.mm_conversations_index < len(scene.mm_conversations)):
             return
 
@@ -705,7 +940,7 @@ class MM_PT_Conversations(Panel):
         col.prop(conv, "hud_head", icon='USER')
         col.label(text="e.g. hud_head_1101 (skin number)", icon='INFO')
 
-        # Edit Conversation button (external PySide6 editor)
+        # Edit Conversation button
         row = layout.row(align=True)
         row.scale_y = 1.4
         row.operator("mm.open_convo_editor", text="Edit Conversation", icon='WINDOW')
@@ -716,7 +951,6 @@ class MM_PT_Conversations(Panel):
         box = layout.box()
         box.label(text="Dialogue Tree", icon='OUTLINER')
 
-        # Node list (using custom draw for tree indentation)
         row = box.row()
         row.template_list(
             "MM_UL_conv_nodes", "",
@@ -745,47 +979,20 @@ class MM_PT_Conversations(Panel):
                          text="Link to Active Entity Def")
 
 
-# ===========================================================================
-# Panel 5b: Dialogue Preview (sub-panel of Conversations)
-# ===========================================================================
-
-def _wrap_text(text, width=60):
-    """Word-wrap text for Blender labels (which don't support wrapping).
-
-    Returns list of strings, each <= width characters, broken at word boundaries.
-    """
-    if not text:
-        return [""]
-
-    words = text.split()
-    lines = []
-    current_line = ""
-
-    for word in words:
-        if current_line and len(current_line) + 1 + len(word) > width:
-            lines.append(current_line)
-            current_line = word
-        else:
-            current_line = f"{current_line} {word}" if current_line else word
-
-    if current_line:
-        lines.append(current_line)
-
-    return lines if lines else [""]
-
-
-class MM_PT_Conversations_Preview(Panel):
-    """Game-style dialogue preview — shows how the conversation looks in-game"""
+class MM_PT_Logic_Conversations_Preview(Panel):
+    """Game-style dialogue preview"""
     bl_label = "Dialogue Preview"
-    bl_idname = "MM_PT_Conversations_Preview"
+    bl_idname = "MM_PT_Logic_Conversations_Preview"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
-    bl_parent_id = "MM_PT_Conversations"
+    bl_parent_id = "MM_PT_Logic_Conversations"
 
     @classmethod
     def poll(cls, context):
         scene = context.scene
+        if scene.mm_settings.ui_tab != 'LOGIC':
+            return False
         if not (0 <= scene.mm_conversations_index < len(scene.mm_conversations)):
             return False
         conv = scene.mm_conversations[scene.mm_conversations_index]
@@ -808,7 +1015,6 @@ class MM_PT_Conversations_Preview(Panel):
         node, depth = display[conv.nodes_index]
         ctx = get_conversation_context(conv, node)
 
-        # --- START_CONDITION / PARTICIPANT: metadata, not game preview ---
         if ctx['mode'] in ('start_condition', 'participant'):
             box = layout.box()
             if ctx['mode'] == 'start_condition':
@@ -824,15 +1030,12 @@ class MM_PT_Conversations_Preview(Panel):
                           icon='USER')
             return
 
-        # === GAME-STYLE DIALOGUE BOX ===
         if ctx['mode'] == 'line':
             self._draw_npc_speech(layout, conv, ctx)
         elif ctx['mode'] == 'response':
             self._draw_response_view(layout, conv, ctx)
 
     def _draw_npc_speech(self, layout, conv, ctx):
-        """Draw the NPC dialogue box when a LINE node is selected."""
-        # NPC name header
         speech_box = layout.box()
         header = speech_box.row()
         header.scale_y = 1.4
@@ -843,7 +1046,6 @@ class MM_PT_Conversations_Preview(Panel):
         if ctx['has_sound']:
             header.label(text="", icon='SOUND')
 
-        # Dialogue text (word-wrapped)
         speech_box.separator()
         dialogue = ctx['dialogue']
         if dialogue:
@@ -852,7 +1054,6 @@ class MM_PT_Conversations_Preview(Panel):
         else:
             speech_box.label(text="  (no dialogue text)")
 
-        # Brotherhood variant
         if ctx['dialogue_b']:
             speech_box.separator()
             var_box = speech_box.box()
@@ -860,14 +1061,11 @@ class MM_PT_Conversations_Preview(Panel):
             for line in _wrap_text(ctx['dialogue_b'], 50):
                 var_box.label(text=f"  {line}")
 
-        # Player responses
         if ctx['responses']:
             layout.separator()
             self._draw_responses(layout, ctx['responses'])
 
     def _draw_response_view(self, layout, conv, ctx):
-        """Draw the view when a RESPONSE node is selected."""
-        # What the NPC said (parent LINE)
         if ctx['parent_speaker'] or ctx['parent_dialogue']:
             npc_box = layout.box()
             header = npc_box.row()
@@ -879,12 +1077,10 @@ class MM_PT_Conversations_Preview(Panel):
                 for line in _wrap_text(ctx['parent_dialogue'], 55):
                     npc_box.label(text=f"  {line}")
 
-        # Response choices with the selected one highlighted
         if ctx['responses']:
             layout.separator()
             self._draw_responses(layout, ctx['responses'])
 
-        # Follow-up NPC line
         if ctx['follow_up_speaker'] or ctx['follow_up_dialogue']:
             layout.separator()
             follow_box = layout.box()
@@ -900,7 +1096,6 @@ class MM_PT_Conversations_Preview(Panel):
                     follow_box.label(text=f"  {line}")
 
     def _draw_responses(self, layout, responses):
-        """Draw the player response list."""
         resp_box = layout.box()
         resp_box.label(text="Player Choices:", icon='TRIA_RIGHT')
         resp_box.separator()
@@ -919,7 +1114,6 @@ class MM_PT_Conversations_Preview(Panel):
             else:
                 row.label(text=f"  {i + 1}. {resp['text']}", icon=icon)
 
-            # Trailing indicators
             faction = resp.get('faction')
             if faction == 'xmen':
                 row.label(text="X", icon='COMMUNITY')
@@ -931,22 +1125,20 @@ class MM_PT_Conversations_Preview(Panel):
                 row.label(text="", icon='LINKED')
 
 
-# ===========================================================================
-# Panel 5c: Node Properties (sub-panel of Conversations)
-# ===========================================================================
-
-class MM_PT_Conversations_NodeProps(Panel):
+class MM_PT_Logic_Conversations_NodeProps(Panel):
     """Selected node properties editor"""
     bl_label = "Node Properties"
-    bl_idname = "MM_PT_Conversations_NodeProps"
+    bl_idname = "MM_PT_Logic_Conversations_NodeProps"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
-    bl_parent_id = "MM_PT_Conversations"
+    bl_parent_id = "MM_PT_Logic_Conversations"
 
     @classmethod
     def poll(cls, context):
         scene = context.scene
+        if scene.mm_settings.ui_tab != 'LOGIC':
+            return False
         if not (0 <= scene.mm_conversations_index < len(scene.mm_conversations)):
             return False
         conv = scene.mm_conversations[scene.mm_conversations_index]
@@ -1002,18 +1194,85 @@ class MM_PT_Conversations_NodeProps(Panel):
             row.prop(node, "only_if_brotherhood", toggle=True)
 
 
-# ===========================================================================
-# Panel 6: MM Navigation
-# ===========================================================================
-
-class MM_PT_Navigation(Panel):
-    """Navigation Mesh — generate NAVB grid data"""
-    bl_label = "MM Navigation"
-    bl_idname = "MM_PT_Navigation"
+class MM_PT_Logic_Precache(Panel):
+    """Precache entries and character list"""
+    bl_label = "Precache & Characters"
+    bl_idname = "MM_PT_Logic_Precache"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'LOGIC'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        # Precache
+        box = layout.box()
+        box.label(text="Precache", icon='FILE_CACHE')
+        row = box.row()
+        row.template_list(
+            "MM_UL_precache", "",
+            scene, "mm_precache",
+            scene, "mm_precache_index",
+            rows=4,
+        )
+        col = row.column(align=True)
+        col.operator("mm.add_precache", icon='ADD', text="")
+        col.operator("mm.remove_precache", icon='REMOVE', text="")
+
+        box.operator("mm.scan_precache", icon='VIEWZOOM', text="Auto-Scan Precache")
+        box.label(text=f"{len(scene.mm_precache)} entries", icon='INFO')
+
+        # Characters (CHRB)
+        layout.separator()
+        box = layout.box()
+        box.label(text="Characters (CHRB)", icon='ARMATURE_DATA')
+        row = box.row()
+        row.template_list(
+            "MM_UL_characters", "",
+            scene, "mm_characters",
+            scene, "mm_characters_index",
+            rows=3,
+        )
+        col = row.column(align=True)
+        col.operator("mm.add_character", icon='ADD', text="")
+        col.operator("mm.remove_character", icon='REMOVE', text="")
+
+        box.operator("mm.scan_characters", icon='VIEWZOOM', text="Auto-Scan Characters")
+
+        if 0 <= scene.mm_characters_index < len(scene.mm_characters):
+            ch = scene.mm_characters[scene.mm_characters_index]
+            sbox = box.box()
+            sbox.label(text=f"Selected: {ch.char_name}", icon='ARMATURE_DATA')
+            row = sbox.row(align=True)
+            row.operator("mm.rename_character", icon='SORTALPHA', text="Rename")
+            row.operator("mm.replace_character", icon='FILE_REFRESH', text="Replace from DB")
+
+        box.label(text=f"{len(scene.mm_characters)} characters", icon='ARMATURE_DATA')
+
+
+# ===========================================================================
+# Tab: BUILD — Navigation, Compile, Deploy
+# ===========================================================================
+
+class MM_PT_Build_Navigation(Panel):
+    """Navigation Mesh generation"""
+    bl_label = "Navigation Mesh"
+    bl_idname = "MM_PT_Build_Navigation"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'BUILD'
 
     def draw(self, context):
         layout = self.layout
@@ -1022,7 +1281,6 @@ class MM_PT_Navigation(Panel):
 
         layout.prop(settings, "nav_cellsize")
 
-        # Advanced settings
         box = layout.box()
         box.label(text="Advanced", icon='PREFERENCES')
         col = box.column(align=True)
@@ -1037,7 +1295,6 @@ class MM_PT_Navigation(Panel):
         col.operator("mm.generate_navmesh", icon='MESH_GRID')
         col.operator("mm.visualize_navmesh", icon='SHADING_WIRE')
 
-        # Show stored cell count
         if "mm_nav_cells" in scene:
             import ast
             try:
@@ -1049,18 +1306,130 @@ class MM_PT_Navigation(Panel):
             layout.label(text="No nav cells generated yet", icon='INFO')
 
 
-# ===========================================================================
-# Panel 7: MM Automap (ZAM)
-# ===========================================================================
-
-class MM_PT_Automap(Panel):
-    """Automap — import/export .zam minimap files"""
-    bl_label = "MM Automap"
-    bl_idname = "MM_PT_Automap"
+class MM_PT_Build_Compile(Panel):
+    """Compile and deploy game files"""
+    bl_label = "Compile & Deploy"
+    bl_idname = "MM_PT_Build_Compile"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'BUILD'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        from .operators import MM_OT_build_all
+
+        col = layout.column(align=True)
+        col.scale_y = 1.2
+        col.operator("mm.generate_xml", icon='FILE_TEXT', text="Generate XML")
+        col.operator("mm.compile_xmlb", icon='MODIFIER', text="Compile XMLB")
+        col.separator()
+        col.scale_y = 1.4
+        if MM_OT_build_all._building:
+            col.enabled = False
+            col.operator("mm.build_all", icon='SORTTIME',
+                         text="Building... (async)")
+        else:
+            col.operator("mm.build_all", icon='PLAY', text="Build All")
+
+        if not scene.mm_settings.output_dir:
+            layout.label(text="Set Output Directory in Scene tab", icon='ERROR')
+
+
+class MM_PT_Build_Validation(Panel):
+    """Pre-build validation results"""
+    bl_label = "Validation"
+    bl_idname = "MM_PT_Build_Validation"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'BUILD'
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        layout.operator("mm.run_validation", icon='CHECKMARK', text="Run Validation")
+
+        # Show cached validation results if available
+        results_str = scene.get("mm_validation_results", "")
+        if results_str:
+            import json
+            try:
+                results = json.loads(results_str)
+            except Exception:
+                results = []
+
+            if not results:
+                layout.label(text="All checks passed", icon='CHECKMARK')
+            else:
+                for level, message in results:
+                    if level == 'ERROR':
+                        icon = 'ERROR'
+                    elif level == 'WARNING':
+                        icon = 'INFO'
+                    else:
+                        icon = 'DOT'
+                    layout.label(text=message, icon=icon)
+
+
+class MM_PT_Build_Collision(Panel):
+    """Collision preview"""
+    bl_label = "Collision Preview"
+    bl_idname = "MM_PT_Build_Collision"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'BUILD'
+
+    def draw(self, context):
+        layout = self.layout
+
+        col = layout.column(align=True)
+        op = col.operator("mm.visualize_colliders", icon='SHADING_WIRE',
+                          text="Preview Colliders")
+        op.source = 'COLLIDERS'
+        op = col.operator("mm.visualize_colliders", icon='MESH_DATA',
+                          text="Preview Visual Mesh Collision")
+        op.source = 'VISUAL'
+
+        coll = bpy.data.collections.get("Colliders")
+        if coll:
+            mesh_count = sum(1 for o in coll.objects if o.type == 'MESH')
+            col.label(text=f"Colliders collection: {mesh_count} mesh(es)", icon='INFO')
+        else:
+            col.label(text="No 'Colliders' collection found", icon='INFO')
+
+
+class MM_PT_Build_Automap(Panel):
+    """Automap import/export"""
+    bl_label = "Automap"
+    bl_idname = "MM_PT_Build_Automap"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'BUILD'
 
     def draw(self, context):
         layout = self.layout
@@ -1080,67 +1449,94 @@ class MM_PT_Automap(Panel):
 
 
 # ===========================================================================
-# Panel 8: MM Build
+# Selection Inspector — appears on ANY tab when entity Empty is selected
 # ===========================================================================
 
-class MM_PT_Build(Panel):
-    """Build & Compile — generate game files, import existing maps"""
-    bl_label = "MM Build"
-    bl_idname = "MM_PT_Build"
+class MM_PT_SelectionInspector(Panel):
+    """Inline inspector for the selected entity instance"""
+    bl_label = "Selected Entity"
+    bl_idname = "MM_PT_SelectionInspector"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and "mm_entity_type" in obj and not obj.get("mm_preview")
 
     def draw(self, context):
         layout = self.layout
-        scene = context.scene
+        obj = context.active_object
+        etype = obj["mm_entity_type"]
+        classname = obj.get("mm_classname", "")
 
-        # Import the operator class to check build state
-        from .operators import MM_OT_build_all
+        # Header
+        row = layout.row()
+        row.label(text=f"{obj.name}", icon='EMPTY_SINGLE_ARROW')
+        row.label(text=classname)
 
-        col = layout.column(align=True)
-        col.scale_y = 1.2
-        col.operator("mm.generate_xml", icon='FILE_TEXT', text="Generate XML")
-        col.operator("mm.compile_xmlb", icon='MODIFIER', text="Compile XMLB")
-        col.separator()
-        col.scale_y = 1.4
-        if MM_OT_build_all._building:
-            col.enabled = False
-            col.operator("mm.build_all", icon='SORTTIME',
-                         text="Building... (async)")
-        else:
-            col.operator("mm.build_all", icon='PLAY', text="Build All")
+        # Find entity def
+        edef = None
+        for ed in context.scene.mm_entity_defs:
+            if ed.entity_name == etype:
+                edef = ed
+                break
 
-        if not scene.mm_settings.output_dir:
-            layout.label(text="Set Output Directory in MM Map Settings", icon='ERROR')
+        if not edef:
+            layout.label(text=f"Entity def '{etype}' not found", icon='ERROR')
+            return
 
-        # Collision preview
-        layout.separator()
+        # Show key fields
         box = layout.box()
-        box.label(text="Collision Preview", icon='PHYSICS')
         col = box.column(align=True)
-        op = col.operator("mm.visualize_colliders", icon='SHADING_WIRE',
-                          text="Preview Colliders")
-        op.source = 'COLLIDERS'
-        op = col.operator("mm.visualize_colliders", icon='MESH_DATA',
-                          text="Preview Visual Mesh Collision")
-        op.source = 'VISUAL'
+        col.prop(edef, "classname")
 
-        # Collider stats
-        coll = bpy.data.collections.get("Colliders")
-        if coll:
-            mesh_count = sum(1 for o in coll.objects if o.type == 'MESH')
-            col.label(text=f"Colliders collection: {mesh_count} mesh(es)", icon='INFO')
+        if edef.classname == 'monsterspawnerent':
+            col.prop(edef, "character")
+            col.prop(edef, "monster_name")
+
+        if edef.model:
+            col.prop(edef, "model")
+
+        col.prop(edef, "nocollide")
+
+        # Instance-specific: extents
+        if "mm_extents" in obj:
+            col.separator()
+            col.label(text=f"Extents: {obj['mm_extents']}", icon='MESH_CUBE')
+
+        # Schema properties (compact view)
+        col.separator()
+        _draw_schema_properties(box, edef)
+
+
+# ===========================================================================
+# Helper: text wrapping
+# ===========================================================================
+
+def _wrap_text(text, width=60):
+    """Word-wrap text for Blender labels."""
+    if not text:
+        return [""]
+
+    words = text.split()
+    lines = []
+    current_line = ""
+
+    for word in words:
+        if current_line and len(current_line) + 1 + len(word) > width:
+            lines.append(current_line)
+            current_line = word
         else:
-            col.label(text="No 'Colliders' collection found", icon='INFO')
+            current_line = f"{current_line} {word}" if current_line else word
 
-        # Menu Editor
-        layout.separator()
-        box = layout.box()
-        box.label(text="Menu Editor", icon='WINDOW')
-        row = box.row()
-        row.scale_y = 1.3
-        row.operator("mm.open_menu_editor", text="Open Menu Editor", icon='WINDOW')
+    if current_line:
+        lines.append(current_line)
+
+    return lines if lines else [""]
 
 
 # ===========================================================================
@@ -1157,21 +1553,33 @@ _classes = (
     MM_UL_model_db,
     MM_UL_conversations,
     MM_UL_conv_nodes,
-    # Top-level panels (order = display order in N-panel)
-    MM_PT_MapSettings,
-    MM_PT_Entities,
-    MM_PT_Entities_Placement,
-    MM_PT_Entities_Presets,
-    MM_PT_Entities_Precache,
-    MM_PT_Entities_Characters,
-    MM_PT_CharacterDB,
-    MM_PT_ModelBrowser,
-    MM_PT_Conversations,
-    MM_PT_Conversations_Preview,
-    MM_PT_Conversations_NodeProps,
-    MM_PT_Navigation,
-    MM_PT_Automap,
-    MM_PT_Build,
+    MM_UL_objectives,
+    MM_UL_objective_steps,
+    # Root panel
+    MM_PT_Root,
+    # Tab: Scene
+    MM_PT_Scene_Identity,
+    MM_PT_Scene_Environment,
+    MM_PT_Scene_Paths,
+    # Tab: Place
+    MM_PT_Place_QuickAdd,
+    MM_PT_Place_Entities,
+    MM_PT_Place_CharacterDB,
+    MM_PT_Place_ModelBrowser,
+    # Tab: Logic
+    MM_PT_Logic_Objectives,
+    MM_PT_Logic_Conversations,
+    MM_PT_Logic_Conversations_Preview,
+    MM_PT_Logic_Conversations_NodeProps,
+    MM_PT_Logic_Precache,
+    # Tab: Build
+    MM_PT_Build_Navigation,
+    MM_PT_Build_Compile,
+    MM_PT_Build_Validation,
+    MM_PT_Build_Collision,
+    MM_PT_Build_Automap,
+    # Always-visible
+    MM_PT_SelectionInspector,
 )
 
 
