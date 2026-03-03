@@ -9,13 +9,18 @@ Uses Pattern B (Cable 11501 / 3ds Max) scene graph structure where each
 body/segment unit has its own igBlendMatrixSelect. This is confirmed
 working with custom skins and segment toggling in-game.
 
+Multi-texture support: Each mesh object can have its own material and
+texture. The builder groups meshes by texture_name, building a separate
+igTextureBindAttr + igMaterialAttr per unique texture. Shared render
+state (igColorAttr, igTextureStateAttr) is still shared across all units.
+
 Skin file structure:
     igInfoList → [igAnimationDatabase]
     igAnimationDatabase → igSkeletonList → igSkeleton
     igSkin._skinnedGraph → igGroup "igActor01"
-        → igGroup "{name}" → BMS → AttrSet → Geometry (body)
+        → igGroup "{name}" → BMS → AttrSet(tex1) → Geometry (body)
         → igGroup "{name}_outline" → BMS → AttrSet → Geometry (body outline)
-        → igSegment "seg" → igGroup → BMS → AttrSet → Geometry (segments)
+        → igSegment "seg" → igGroup → BMS → AttrSet(tex2) → Geometry (segments)
         → igSegment "seg_outline" → igGroup → BMS → AttrSet → Geometry
 
 Usage:
@@ -431,36 +436,42 @@ class SkinBuilder:
         # ---- 2. Build BMS palette (igIntList) ----
         bms_int_list_idx = self._build_int_list(bms_palette)
 
-        # ---- 3. Build SHARED texture chain (vanilla shares ONE texture across all parts) ----
-        shared_tex_levels = None
-        shared_clut_data = None  # (palette_data, index_data, width, height) for CLUT mode
-        shared_tex_name = ''
-        shared_material = _default_material()
+        # ---- 3. Build per-texture chains ----
+        # Each unique texture gets its own igTextureBindAttr and igMaterialAttr.
+        # This allows different body parts / segments to use different textures
+        # (e.g. Cyclops body + winter accessories, Professor X + wheelchair).
+        tex_chain_map = {}  # tex_key -> {'tex_bind_idx': int, 'material_idx': int}
         outline_material = _default_outline_material()
 
         for sub in submeshes:
-            if not sub.get('is_outline', False):
-                if sub.get('clut_data') and shared_clut_data is None:
-                    shared_clut_data = sub['clut_data']
-                    shared_tex_name = sub.get('texture_name', '')
-                elif sub.get('texture_levels') and shared_tex_levels is None:
-                    shared_tex_levels = sub['texture_levels']
-                    shared_tex_name = sub.get('texture_name', '')
-                if sub.get('material'):
-                    shared_material = sub['material']
-            else:
+            if sub.get('is_outline', False):
                 if sub.get('material'):
                     outline_material = sub['material']
+                continue
 
-        if shared_clut_data is not None:
-            palette_data, index_data, cw, ch = shared_clut_data
-            shared_tex_attr_idx, shared_tex_bind_idx = self._build_clut_texture_chain(
-                palette_data, index_data, cw, ch, shared_tex_name
-            )
-        else:
-            shared_tex_attr_idx, shared_tex_bind_idx = self._build_texture_chain(
-                shared_tex_levels, shared_tex_name
-            )
+            tex_key = sub.get('texture_name', '') or ''
+            if tex_key in tex_chain_map:
+                continue  # Already built chain for this texture
+
+            # Build texture chain for this unique texture
+            if sub.get('clut_data'):
+                palette_data, index_data, cw, ch = sub['clut_data']
+                _, tex_bind_idx = self._build_clut_texture_chain(
+                    palette_data, index_data, cw, ch, tex_key
+                )
+            else:
+                _, tex_bind_idx = self._build_texture_chain(
+                    sub.get('texture_levels'), tex_key
+                )
+
+            # Build material for this texture group
+            mat_props = sub.get('material', _default_material())
+            material_idx = self._build_material(mat_props)
+
+            tex_chain_map[tex_key] = {
+                'tex_bind_idx': tex_bind_idx,
+                'material_idx': material_idx,
+            }
 
         # ---- 4. Build per-submesh geometry objects ----
         main_geom_entries = []    # [(geom_idx, sub_dict), ...]
@@ -585,21 +596,24 @@ class SkinBuilder:
         root_child_refs = []  # children of root igGroup
 
         # ---- 5a. Build shared render state attrs for main units ----
-        main_attrs = None
+        # Color and TextureState are shared across all main units.
+        # Material and TextureBindAttr are per-texture (looked up per unit).
+        main_color_idx = None
+        main_tex_state_idx = None
         if main_geom_entries:
             main_tex_state_idx = self._add_obj(MO_TEXTURE_STATE_ATTR, [
                 (2, 0, 'Short', 2),
                 (4, 1, 'Bool', 1),
                 (5, 0, 'Int', 4),
             ])
-            main_material_idx = self._build_material(shared_material)
-            color_val = shared_material.get('color_attr', (1.0, 1.0, 1.0, 1.0))
+            # Use first main submesh's material color_attr for shared color
+            first_main_sub = main_geom_entries[0][1]
+            first_mat = first_main_sub.get('material', {})
+            color_val = first_mat.get('color_attr', (1.0, 1.0, 1.0, 1.0))
             main_color_idx = self._add_obj(MO_COLOR_ATTR, [
                 (2, 0, 'Short', 2),
                 (4, color_val, 'Vec4f', 16),
             ])
-            main_attrs = [main_color_idx, main_material_idx,
-                          shared_tex_bind_idx, main_tex_state_idx]
 
         # ---- 5b. Build shared render state attrs for outline units ----
         outline_attrs = None
@@ -638,12 +652,23 @@ class SkinBuilder:
 
         # ---- 5c. Build per-unit chains for main geometry ----
         # Each main unit: igGroup/igSegment → igGroup → BMS → AttrSet → Geometry
+        # Each unit gets per-texture material + texture bind from tex_chain_map.
         for gi, sub in main_geom_entries:
             seg_name = sub.get('segment_name', '')
             seg_flags = sub.get('segment_flags', 0)
 
             unit_name = seg_name if seg_name else skin_name
-            attrset_idx = self._build_unit_attrset(gi, main_attrs, unit_name)
+
+            # Look up per-texture attrs for this submesh
+            tex_key = sub.get('texture_name', '') or ''
+            chain = tex_chain_map.get(tex_key, {})
+            tex_bind_idx = chain.get('tex_bind_idx', -1)
+            material_idx = chain.get('material_idx', -1)
+
+            # Compose per-unit attr list: color + material + texbind + texstate
+            unit_attrs = [main_color_idx, material_idx,
+                          tex_bind_idx, main_tex_state_idx]
+            attrset_idx = self._build_unit_attrset(gi, unit_attrs, unit_name)
             bms_idx = self._build_unit_bms(attrset_idx, bms_int_list_idx)
 
             if seg_name:
