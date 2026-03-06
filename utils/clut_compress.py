@@ -40,42 +40,62 @@ def quantize_rgba_to_clut(rgba_data, width, height):
 
 def _quantize_numpy(rgba_data, width, height):
     pixels = np.frombuffer(rgba_data, dtype=np.uint8).reshape(-1, 4)
-    unique, inverse = np.unique(pixels, axis=0, return_inverse=True)
+    n_pixels = len(pixels)
 
-    if len(unique) <= 256:
+    # Pack RGBA to uint32 for fast 1D unique (much faster than axis=0)
+    packed = (pixels[:, 0].astype(np.uint32) |
+              (pixels[:, 1].astype(np.uint32) << 8) |
+              (pixels[:, 2].astype(np.uint32) << 16) |
+              (pixels[:, 3].astype(np.uint32) << 24))
+
+    unique_packed, inverse, counts = np.unique(
+        packed, return_inverse=True, return_counts=True)
+
+    if len(unique_packed) <= 256:
         # Direct palette — no quantization loss
         palette = np.zeros((256, 4), dtype=np.uint8)
-        palette[:len(unique)] = unique
+        palette[:len(unique_packed), 0] = (unique_packed & 0xFF).astype(np.uint8)
+        palette[:len(unique_packed), 1] = ((unique_packed >> 8) & 0xFF).astype(np.uint8)
+        palette[:len(unique_packed), 2] = ((unique_packed >> 16) & 0xFF).astype(np.uint8)
+        palette[:len(unique_packed), 3] = ((unique_packed >> 24) & 0xFF).astype(np.uint8)
         index_data = inverse.astype(np.uint8)
     else:
-        # Weighted median-cut on unique colors
-        # Count occurrences of each unique color
-        _, counts = np.unique(inverse, return_counts=True)
-        palette = _median_cut_np(unique, counts, 256)
+        # Unpack unique colors for median-cut
+        unique_colors = np.zeros((len(unique_packed), 4), dtype=np.uint8)
+        unique_colors[:, 0] = (unique_packed & 0xFF).astype(np.uint8)
+        unique_colors[:, 1] = ((unique_packed >> 8) & 0xFF).astype(np.uint8)
+        unique_colors[:, 2] = ((unique_packed >> 16) & 0xFF).astype(np.uint8)
+        unique_colors[:, 3] = ((unique_packed >> 24) & 0xFF).astype(np.uint8)
 
-        # Nearest-neighbor via ||u-p||^2 = ||u||^2 + ||p||^2 - 2*u·p
-        # Uses BLAS matmul for the dot product — much faster than broadcasting
-        u32 = unique.astype(np.int32)
-        p32 = palette.astype(np.int32)
-        u_sq = (u32 * u32).sum(axis=1)       # (N,)
-        p_sq = (p32 * p32).sum(axis=1)       # (256,)
-        dot = u32 @ p32.T                     # (N, 256) — BLAS
-        dist = u_sq[:, np.newaxis] + p_sq[np.newaxis, :] - 2 * dot
-        nearest = dist.argmin(axis=1).astype(np.uint8)
+        palette = _median_cut_np(unique_colors, counts, 256)
 
-        # Map unique→palette index back to all pixels
-        index_data = nearest[inverse]
+        # Vectorized nearest-color mapping (fast for any size)
+        index_data = _nearest_color_chunked(pixels, palette)
 
-    # Build palette bytes
-    palette_data = bytearray(1024)
-    for i in range(min(256, len(palette))):
-        off = i * 4
-        palette_data[off] = int(palette[i, 0])
-        palette_data[off + 1] = int(palette[i, 1])
-        palette_data[off + 2] = int(palette[i, 2])
-        palette_data[off + 3] = int(palette[i, 3])
+    # Build palette bytes (vectorized)
+    return bytes(palette[:256].tobytes()), bytes(index_data)
 
-    return bytes(palette_data), bytes(index_data)
+
+def _nearest_color_chunked(pixels, palette):
+    """Vectorized nearest-palette-color mapping using numpy.
+
+    Processes pixels in chunks to limit memory usage while keeping
+    all computation in fast numpy operations.
+    """
+    n = len(pixels)
+    indices = np.empty(n, dtype=np.uint8)
+    pal = palette.astype(np.int32)  # (256, 4)
+
+    chunk_size = 8192
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        block = pixels[start:end].astype(np.int32)  # (chunk, 4)
+        # (chunk, 1, 4) - (1, 256, 4) → (chunk, 256, 4)
+        diff = block[:, np.newaxis, :] - pal[np.newaxis, :, :]
+        dist = (diff * diff).sum(axis=2)  # (chunk, 256) — int32, no overflow
+        indices[start:end] = dist.argmin(axis=1).astype(np.uint8)
+
+    return indices
 
 
 def _median_cut_np(unique_colors, counts, target):

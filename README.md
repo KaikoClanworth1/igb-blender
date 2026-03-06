@@ -1,10 +1,10 @@
 # IGB Blender Addon
 
-**Version 0.2**
+**Version 0.3**
 
 A Blender 4.4 addon for importing and exporting Alchemy Engine IGB/IGZ files used by **X-Men Legends II** and **Marvel Ultimate Alliance** (PC).
 
-Includes a full map maker toolkit, actor/skeleton pipeline, and rig converter for bringing custom characters into the game.
+Includes a full map maker toolkit, actor/skeleton pipeline, rig converter for custom characters, and a texture editor for creating and modifying game textures.
 
 Created by **Kaiko** with the aid of **Claude**.
 
@@ -23,7 +23,7 @@ Created by **Kaiko** with the aid of **Claude**.
    ```
 3. Open Blender and go to **Edit > Preferences > Add-ons**.
 4. Search for **"IGB Format"** and enable it.
-5. The addon adds four sidebar tabs (press `N` in the 3D viewport): **IGB**, **IGB Actors**, **Map Maker**, and **Menu Editor**.
+5. The addon adds five sidebar tabs (press `N` in the 3D viewport): **IGB**, **IGB Actors**, **Map Maker**, **Menu Editor**, and **Texture Editor**.
 
 ### PySide6 (Optional)
 
@@ -359,6 +359,36 @@ Edit the selected menu item's attributes: name, type, text, font, position, rota
 
 **Precache:**
 Manage precache entries for textures and models used by the menu.
+
+---
+
+### Texture Editor Tab
+
+A standalone PySide6 window for viewing, replacing, and creating game texture IGB files. Works with any texture in the game: loading screens, HUD elements, fonts, skins, models, and more.
+
+The editor builds brand-new PS2 CLUT (PSMT8) IGB files from scratch, so the output works in both XML2 and MUA regardless of the source format.
+
+**Opening the Editor:**
+- Find the **Texture Editor** tab in the sidebar and click **Open Texture Editor**.
+- Requires PySide6 (install from **IGB > IGB Extras** if not already installed).
+
+**File Operations:**
+- **Open IGB** (Ctrl+O) - Load textures from an existing IGB file. Supports all formats (DXT3, DXT5, CLUT, uncompressed).
+- **Create from Image** (Ctrl+I) - Build a new IGB directly from PNG, TGA, BMP, or JPG images. Multi-select supported.
+- **Save** (Ctrl+S) - Overwrite the original file.
+- **Save As** (Ctrl+Shift+S) - Save to a new path.
+
+**Editing:**
+- Textures display as thumbnails with name and dimensions.
+- **Replace Selected** - Swap a texture with a new image file. Auto-scales and auto-flips to match the game format.
+- **Swap R/B** - Swap red and blue channels on all textures (fixes color issues on some platform textures).
+- **Show Mipmaps** - Toggle visibility of mipmap levels in the thumbnail grid.
+
+**Export Resolution:**
+- Choose from **Original**, **2048**, **1024**, or **512** in the toolbar dropdown.
+- When set to a specific size, all textures are scaled to that square resolution on save.
+
+> **Note:** 2048 resolution is experimental. It works in-game but the engine forces a 4:3 aspect ratio on loading screen textures, which may stretch non-4:3 source images.
 
 ---
 
