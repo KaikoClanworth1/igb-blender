@@ -2,9 +2,12 @@
 
 Launched from Blender via modal operator. Loads any IGB file (any format),
 displays all textures as thumbnails, allows replacing individual textures,
-and exports a brand-new PS2 CLUT IGB that works in both XML2 and MUA.
+and exports a modified IGB.
 
-The save always builds from scratch -- no format patching or round-tripping.
+Two save modes:
+  - Model/skin IGBs (with geometry/skeleton): round-trip via from_reader(),
+    patching only the texture data while preserving everything else.
+  - Texture-only IGBs (or created from image): build from scratch as CLUT.
 """
 
 import os
@@ -349,6 +352,7 @@ class TextureEditorWindow(QMainWindow):
         self._textures = []        # list of TextureInfo
         self._selected_index = -1
         self._modified = False
+        self._is_model_igb = False  # True if loaded IGB has geometry/skeleton
         self._cache_dir = Path(__file__).parent / "texture_cache"
 
         self._build_ui()
@@ -480,6 +484,7 @@ class TextureEditorWindow(QMainWindow):
         self._reader = None
         self._igb_path = None
         self._modified = False
+        self._is_model_igb = False
         self._selected_index = -1
         self._textures.clear()
 
@@ -754,13 +759,27 @@ class TextureEditorWindow(QMainWindow):
             self._textures.append(ti)
             tex_index += 1
 
+        # Detect model/skin IGB (has geometry or skeleton → round-trip save)
+        self._is_model_igb = False
+        _MODEL_TYPES = (
+            b"igGeometryAttr", b"igGeometryAttr1_5", b"igGeometryAttr2",
+            b"igSkin", b"igSkeleton",
+        )
+        for obj in reader.objects:
+            if not isinstance(obj, IGBObject):
+                continue
+            if any(obj.is_type(t) for t in _MODEL_TYPES):
+                self._is_model_igb = True
+                break
+
         mip_count = len(mipmap_set)
         self._rebuild_grid()
         self._save_action.setEnabled(True)
         info = f"{base_count} texture(s)"
         if mip_count:
             info += f", {mip_count} mipmaps (auto-generated on save)"
-        self._statusbar.showMessage(f"Loaded {path}  —  {info}")
+        mode = " [Model — round-trip save]" if self._is_model_igb else ""
+        self._statusbar.showMessage(f"Loaded {path}  —  {info}{mode}")
         self.setWindowTitle(f"IGB Texture Editor — {Path(path).name}")
 
     # -- Grid management --
@@ -943,7 +962,7 @@ class TextureEditorWindow(QMainWindow):
     # -- Save IGB --
 
     def _save_igb(self, output_path):
-        """Save a brand-new PS2 CLUT IGB built from scratch."""
+        """Save IGB (round-trip for models, from-scratch for texture-only)."""
         if not self._textures:
             return
 
@@ -960,6 +979,13 @@ class TextureEditorWindow(QMainWindow):
                                  f"Failed to save IGB:\n{e}")
 
     def _do_save(self, output_path):
+        """Save IGB — model round-trip or from-scratch depending on source."""
+        if self._is_model_igb and self._reader is not None:
+            self._do_save_model(output_path)
+        else:
+            self._do_save_scratch(output_path)
+
+    def _do_save_scratch(self, output_path):
         """Build a brand-new PS2 CLUT IGB from scratch with all textures."""
         from ..utils.clut_compress import quantize_rgba_to_clut
         from .texture_igb_builder import build_texture_igb
@@ -1000,6 +1026,163 @@ class TextureEditorWindow(QMainWindow):
             raise RuntimeError("No texture data available to save.")
 
         build_texture_igb(tex_entries, output_path)
+
+    # -- Model round-trip save --
+
+    def _do_save_model(self, output_path):
+        """Save model IGB via from_reader round-trip, patching only replaced textures.
+
+        Preserves all geometry, skeleton, materials, and scene graph data.
+        Only the texture pixel/palette memory blocks are replaced.
+        """
+        from ..igb_format.igb_writer import from_reader, MemoryBlockDef
+        from ..igb_format.igb_objects import IGBObject
+        from ..utils.clut_compress import quantize_rgba_to_clut, map_rgba_to_palette
+        from ..utils.dxt_compress import compress_with_mipmaps
+
+        writer = from_reader(self._reader)
+
+        res_text = self._res_combo.currentText()
+        target_res = int(res_text) if res_text != "Original" else None
+
+        for ti in self._textures:
+            if ti.is_mipmap or ti.replacement_rgba is None or ti.obj_index < 0:
+                continue
+
+            rgba = ti.replacement_rgba
+            w, h = ti.replacement_w, ti.replacement_h
+
+            if target_res is not None and (w != target_res or h != target_res):
+                rgba, w, h = self._scale_rgba(rgba, w, h, target_res, target_res)
+
+            img_odef = writer.objects[ti.obj_index]
+            pfmt, pimage_idx, clut_ref = self._get_odef_image_info(img_odef)
+
+            if pfmt == 65536:
+                # CLUT/PSMT8 — quantize and replace palette + index data
+                palette_data, index_data = quantize_rgba_to_clut(rgba, w, h)
+                self._patch_memblock(writer, pimage_idx, index_data)
+                self._patch_image_fields(img_odef, w, h, len(index_data), w)
+
+                # Replace igClut palette
+                if clut_ref >= 0:
+                    clut_odef = writer.objects[clut_ref]
+                    pal_mem_idx = self._get_odef_field(clut_odef, 5)  # _pData
+                    if pal_mem_idx is not None and pal_mem_idx >= 0:
+                        self._patch_memblock(writer, pal_mem_idx, palette_data)
+
+                # Handle CLUT mipmaps — map to same palette
+                if ti.mipmap_obj_indices:
+                    mw, mh = w, h
+                    for mip_obj_idx in ti.mipmap_obj_indices:
+                        mw = max(1, mw // 2)
+                        mh = max(1, mh // 2)
+                        mip_rgba, mw2, mh2 = self._scale_rgba(rgba, w, h, mw, mh)
+                        mip_indices = map_rgba_to_palette(mip_rgba, mw2, mh2, palette_data)
+                        mip_odef = writer.objects[mip_obj_idx]
+                        _, mip_pimg_idx, _ = self._get_odef_image_info(mip_odef)
+                        self._patch_memblock(writer, mip_pimg_idx, mip_indices)
+                        self._patch_image_fields(mip_odef, mw2, mh2, len(mip_indices), mw2)
+
+            elif pfmt in (15, 16):
+                # DXT3/DXT5 — recompress as DXT5
+                mip_levels = compress_with_mipmaps(rgba, w, h)
+                base_data, _, _ = mip_levels[0]
+                bpr = max(1, w // 4) * 16
+                self._patch_memblock(writer, pimage_idx, base_data)
+                self._patch_image_fields(img_odef, w, h, len(base_data), bpr)
+                # Update pfmt to DXT5 if was DXT3
+                if pfmt == 15:
+                    self._set_odef_field(img_odef, 11, 16)
+
+                # Handle DXT mipmaps
+                if ti.mipmap_obj_indices:
+                    for m_idx, mip_obj_idx in enumerate(ti.mipmap_obj_indices):
+                        level = m_idx + 1
+                        if level < len(mip_levels):
+                            mip_data, mip_w, mip_h = mip_levels[level]
+                        else:
+                            mip_w = max(1, w >> level)
+                            mip_h = max(1, h >> level)
+                            mip_rgba, mip_w, mip_h = self._scale_rgba(
+                                rgba, w, h, mip_w, mip_h)
+                            extra = compress_with_mipmaps(mip_rgba, mip_w, mip_h)
+                            mip_data, _, _ = extra[0]
+
+                        mip_bpr = max(1, mip_w // 4) * 16
+                        mip_odef = writer.objects[mip_obj_idx]
+                        _, mip_pimg_idx, _ = self._get_odef_image_info(mip_odef)
+                        self._patch_memblock(writer, mip_pimg_idx, mip_data)
+                        self._patch_image_fields(
+                            mip_odef, mip_w, mip_h, len(mip_data), mip_bpr)
+                        if pfmt == 15:
+                            self._set_odef_field(mip_odef, 11, 16)
+
+            else:
+                # Raw RGBA or unknown — write raw pixels
+                self._patch_memblock(writer, pimage_idx, rgba)
+                self._patch_image_fields(img_odef, w, h, len(rgba), w * 4)
+
+        writer.write(output_path)
+
+    # -- ObjectDef patching helpers --
+
+    @staticmethod
+    def _get_odef_image_info(odef):
+        """Extract (pfmt, pimage_memblock_idx, clut_obj_idx) from an igImage ObjectDef."""
+        pfmt = 0
+        pimage_idx = -1
+        clut_ref = -1
+        for slot, val, fd in odef.raw_fields:
+            if slot == 11:    # _pfmt
+                pfmt = val
+            elif slot == 13:  # _pImage (MemoryRef)
+                pimage_idx = val
+            elif slot == 17:  # _clut (ObjectRef)
+                clut_ref = val
+        return pfmt, pimage_idx, clut_ref
+
+    @staticmethod
+    def _get_odef_field(odef, target_slot):
+        """Get a field value from an ObjectDef by slot number."""
+        for slot, val, fd in odef.raw_fields:
+            if slot == target_slot:
+                return val
+        return None
+
+    @staticmethod
+    def _set_odef_field(odef, target_slot, new_val):
+        """Set a field value in an ObjectDef by slot number. Clears raw_bytes."""
+        odef.raw_bytes = None
+        for j, (slot, val, fd) in enumerate(odef.raw_fields):
+            if slot == target_slot:
+                odef.raw_fields[j] = (slot, new_val, fd)
+                return
+
+    @staticmethod
+    def _patch_image_fields(img_odef, w, h, image_size, bytes_per_row):
+        """Update igImage dimension/size fields in an ObjectDef."""
+        img_odef.raw_bytes = None
+        for j, (slot, val, fd) in enumerate(img_odef.raw_fields):
+            if slot == 2:     # _px (width)
+                img_odef.raw_fields[j] = (slot, w, fd)
+            elif slot == 3:   # _py (height)
+                img_odef.raw_fields[j] = (slot, h, fd)
+            elif slot == 12:  # _imageSize
+                img_odef.raw_fields[j] = (slot, image_size, fd)
+            elif slot == 19:  # _bytesPerRow
+                img_odef.raw_fields[j] = (slot, bytes_per_row, fd)
+
+    @staticmethod
+    def _patch_memblock(writer, mem_idx, new_data):
+        """Replace a memory block's data and update ref_info/entries."""
+        from ..igb_format.igb_writer import MemoryBlockDef
+        if mem_idx < 0 or mem_idx >= len(writer.objects):
+            return
+        writer.objects[mem_idx] = MemoryBlockDef(new_data)
+        writer.ref_info[mem_idx]['mem_size'] = len(new_data)
+        entry_idx = writer.index_map[mem_idx]
+        writer.entries[entry_idx].field_values[1] = len(new_data)
 
     @staticmethod
     def _scale_rgba(rgba, src_w, src_h, dst_w, dst_h):

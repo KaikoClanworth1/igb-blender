@@ -332,3 +332,56 @@ def _median_cut_pure(color_list, target_count):
     while len(palette) < target_count:
         palette.append(0)
     return palette[:target_count]
+
+
+# ── palette re-mapping (for mipmap levels sharing a base palette) ─────
+
+def map_rgba_to_palette(rgba_data, width, height, palette_data):
+    """Map RGBA pixels to nearest colors in an existing 256-color palette.
+
+    Used when mipmap levels must share a palette generated from the base image.
+
+    Args:
+        rgba_data: bytes of width*height*4 RGBA pixels
+        width: image width
+        height: image height
+        palette_data: 1024 bytes (256 RGBA palette entries)
+
+    Returns:
+        bytes: width*height palette indices
+    """
+    if _HAS_NUMPY:
+        pixels = np.frombuffer(rgba_data, dtype=np.uint8).reshape(-1, 4)
+        palette = np.frombuffer(palette_data, dtype=np.uint8).reshape(256, 4)
+        return bytes(_nearest_color_chunked(pixels, palette))
+    return _map_pure(rgba_data, width, height, palette_data)
+
+
+def _map_pure(rgba_data, width, height, palette_data):
+    """Pure Python nearest-color palette mapping."""
+    pixel_count = width * height
+    mv_pix = memoryview(rgba_data)
+    mv_pal = memoryview(palette_data)
+    pal_r = [mv_pal[i * 4] for i in range(256)]
+    pal_g = [mv_pal[i * 4 + 1] for i in range(256)]
+    pal_b = [mv_pal[i * 4 + 2] for i in range(256)]
+    pal_a = [mv_pal[i * 4 + 3] for i in range(256)]
+    indices = bytearray(pixel_count)
+    for i in range(pixel_count):
+        off = i * 4
+        cr, cg, cb, ca = mv_pix[off], mv_pix[off + 1], mv_pix[off + 2], mv_pix[off + 3]
+        best_idx = 0
+        best_dist = 0x7FFFFFFF
+        for j in range(256):
+            dr = cr - pal_r[j]
+            dg = cg - pal_g[j]
+            db = cb - pal_b[j]
+            da = ca - pal_a[j]
+            d = dr * dr + dg * dg + db * db + da * da
+            if d < best_dist:
+                best_dist = d
+                best_idx = j
+                if d == 0:
+                    break
+        indices[i] = best_idx
+    return bytes(indices)
