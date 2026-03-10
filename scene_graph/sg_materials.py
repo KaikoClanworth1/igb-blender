@@ -252,20 +252,20 @@ def extract_material(reader, material_obj, profile=None):
 
     mat = ParsedMaterial()
     mat.source_obj = material_obj
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: only the base Short (slot 2) shifts in v4; slots 4+ are fixed.
 
     for slot, val, fi in material_obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Float":
+        if slot == 4 and fi.short_name == b"Float":
             mat.shininess = val
-        elif slot == 5 + s and fi.short_name == b"Vec4f":
+        elif slot == 5 and fi.short_name == b"Vec4f":
             mat.diffuse = val
-        elif slot == 6 + s and fi.short_name == b"Vec4f":
+        elif slot == 6 and fi.short_name == b"Vec4f":
             mat.ambient = val
-        elif slot == 7 + s and fi.short_name == b"Vec4f":
+        elif slot == 7 and fi.short_name == b"Vec4f":
             mat.specular = val
-        elif slot == 8 + s and fi.short_name == b"Vec4f":
+        elif slot == 8 and fi.short_name == b"Vec4f":
             mat.emission = val
-        elif slot == 9 + s and fi.short_name == b"UnsignedInt":
+        elif slot == 9 and fi.short_name == b"UnsignedInt":
             mat.flags = val
 
     return mat
@@ -292,12 +292,12 @@ def extract_texture_bind(reader, texbind_obj, profile=None):
     tex.source_obj = texbind_obj
 
     # Extract texture attr reference and unit ID
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: only the base Short (slot 2) shifts in v4; slots 4+ are fixed.
     texture_attr_ref = None
     for slot, val, fi in texbind_obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"ObjectRef" and val != -1:
+        if slot == 4 and fi.short_name == b"ObjectRef" and val != -1:
             texture_attr_ref = val
-        elif slot == 5 + s and fi.short_name == b"Int":
+        elif slot == 5 and fi.short_name == b"Int":
             tex.unit_id = val
 
     if texture_attr_ref is None:
@@ -308,21 +308,21 @@ def extract_texture_bind(reader, texbind_obj, profile=None):
     if not isinstance(texture_attr, IGBObject):
         return None
 
-    # Extract texture properties
+    # Extract texture properties (igTextureAttr is igAttr-derived: slots 4+ are fixed)
     image_ref = None
     texdata_ref = None  # slot 19: _data (igUnsignedCharList, Wii pixel data)
     for slot, val, fi in texture_attr._raw_fields:
-        if slot == 5 + s and fi.short_name == b"Enum":
+        if slot == 5 and fi.short_name == b"Enum":
             tex.mag_filter = val
-        elif slot == 6 + s and fi.short_name == b"Enum":
+        elif slot == 6 and fi.short_name == b"Enum":
             tex.min_filter = val
-        elif slot == 7 + s and fi.short_name == b"Enum":
+        elif slot == 7 and fi.short_name == b"Enum":
             tex.wrap_s = val
-        elif slot == 8 + s and fi.short_name == b"Enum":
+        elif slot == 8 and fi.short_name == b"Enum":
             tex.wrap_t = val
-        elif slot == 12 + s and fi.short_name == b"ObjectRef" and val != -1:
+        elif slot == 12 and fi.short_name == b"ObjectRef" and val != -1:
             image_ref = val
-        elif slot == 19 + s and fi.short_name == b"ObjectRef" and val != -1:
+        elif slot == 19 and fi.short_name == b"ObjectRef" and val != -1:
             texdata_ref = val
 
     if image_ref is None:
@@ -500,9 +500,9 @@ def extract_blend_state(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Bool":
+        if slot == 4 and fi.short_name == b"Bool":
             return {'enabled': bool(val)}
     return {'enabled': False}
 
@@ -528,7 +528,7 @@ def extract_blend_function(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     result = {
         'src': BLEND_SRC_ALPHA,
         'dst': BLEND_ONE_MINUS_SRC_ALPHA,
@@ -536,23 +536,23 @@ def extract_blend_function(reader, obj, profile=None):
         'blend_a': 0, 'blend_b': 0, 'blend_c': 0, 'blend_d': 0,
     }
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Enum":
+        if slot == 4 and fi.short_name == b"Enum":
             result['src'] = val
-        elif slot == 5 + s and fi.short_name == b"Enum":
+        elif slot == 5 and fi.short_name == b"Enum":
             result['dst'] = val
-        elif slot == 6 + s and fi.short_name == b"Enum":
+        elif slot == 6 and fi.short_name == b"Enum":
             result['eq'] = val
-        elif slot == 8 + s and fi.short_name == b"UnsignedChar":
+        elif slot == 8 and fi.short_name == b"UnsignedChar":
             result['blend_constant'] = val
-        elif slot == 9 + s and fi.short_name == b"Short":
+        elif slot == 9 and fi.short_name == b"Short":
             result['blend_stage'] = val
-        elif slot == 11 + s and fi.short_name == b"Enum":
+        elif slot == 11 and fi.short_name == b"Enum":
             result['blend_a'] = val
-        elif slot == 12 + s and fi.short_name == b"Enum":
+        elif slot == 12 and fi.short_name == b"Enum":
             result['blend_b'] = val
-        elif slot == 13 + s and fi.short_name == b"Enum":
+        elif slot == 13 and fi.short_name == b"Enum":
             result['blend_c'] = val
-        elif slot == 14 + s and fi.short_name == b"Enum":
+        elif slot == 14 and fi.short_name == b"Enum":
             result['blend_d'] = val
     return result
 
@@ -569,9 +569,9 @@ def extract_alpha_state(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Bool":
+        if slot == 4 and fi.short_name == b"Bool":
             return {'enabled': bool(val)}
     return {'enabled': False}
 
@@ -589,12 +589,12 @@ def extract_alpha_function(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     result = {'func': ALPHA_GEQUAL, 'ref': 0.5}
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Enum":
+        if slot == 4 and fi.short_name == b"Enum":
             result['func'] = val
-        elif slot == 5 + s and fi.short_name == b"Float":
+        elif slot == 5 and fi.short_name == b"Float":
             result['ref'] = val
     return result
 
@@ -611,9 +611,9 @@ def extract_color_attr(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Vec4f":
+        if slot == 4 and fi.short_name == b"Vec4f":
             return val  # already a tuple (r, g, b, a)
     return (1.0, 1.0, 1.0, 1.0)
 
@@ -630,9 +630,9 @@ def extract_lighting_state(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Bool":
+        if slot == 4 and fi.short_name == b"Bool":
             return {'enabled': bool(val)}
     return {'enabled': True}  # default: lighting on
 
@@ -650,12 +650,12 @@ def extract_tex_matrix_state(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     result = {'enabled': False, 'unit_id': 0}
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Bool":
+        if slot == 4 and fi.short_name == b"Bool":
             result['enabled'] = bool(val)
-        elif slot == 5 + s and fi.short_name == b"Int":
+        elif slot == 5 and fi.short_name == b"Int":
             result['unit_id'] = val
     return result
 
@@ -673,11 +673,11 @@ def extract_cull_face(reader, obj, profile=None):
     """
     if not isinstance(obj, IGBObject):
         return None
-    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
+    # igAttr-derived: slots 4+ are fixed across versions.
     result = {'enabled': True, 'mode': 0}
     for slot, val, fi in obj._raw_fields:
-        if slot == 4 + s and fi.short_name == b"Bool":
+        if slot == 4 and fi.short_name == b"Bool":
             result['enabled'] = bool(val)
-        elif slot == 5 + s and fi.short_name == b"Enum":
+        elif slot == 5 and fi.short_name == b"Enum":
             result['mode'] = val
     return result
