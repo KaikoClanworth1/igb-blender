@@ -115,15 +115,41 @@ class ACTOR_PT_Import(Panel):
             box = layout.box()
             box.label(text="Skin Setup", icon='ARMATURE_DATA')
             if has_igb_data:
-                box.label(text="Armature has XML2 skeleton data",
-                          icon='CHECKMARK')
+                # Validate existing skeleton data
+                from .rig_converter import validate_bip01_rig
+                issues = validate_bip01_rig(obj)
+
+                if not issues:
+                    box.label(text="Skeleton data valid", icon='CHECKMARK')
+                else:
+                    errors = sum(1 for lvl, _ in issues if lvl == 'ERROR')
+                    warns = sum(1 for lvl, _ in issues if lvl == 'WARNING')
+                    if errors:
+                        box.label(text=f"{errors} error(s), {warns} warning(s)",
+                                  icon='ERROR')
+                    else:
+                        box.label(text=f"{warns} warning(s)", icon='INFO')
+                    for lvl, msg in issues[:5]:
+                        icon = 'ERROR' if lvl == 'ERROR' else 'INFO'
+                        box.label(text=msg, icon=icon)
+                    if len(issues) > 5:
+                        box.label(text=f"...and {len(issues) - 5} more")
+
+                # Info line
+                bone_count = obj.get("igb_bone_count", 0)
+                mesh_children = sum(1 for c in obj.children if c.type == 'MESH')
+                box.label(text=f"{bone_count} bones, {mesh_children} mesh(es)",
+                          icon='BONE_DATA')
+
+                box.operator("actor.setup_skin", text="Re-setup Skin",
+                             icon='FILE_REFRESH')
             else:
                 has_bip01 = "Bip01" in obj.data.bones
                 if has_bip01:
                     box.label(text="Bip01 rig — will configure for export")
                 else:
                     box.label(text="Non-XML2 rig — will convert and setup")
-            box.operator("actor.setup_skin", icon='FILE_REFRESH')
+                box.operator("actor.setup_skin", icon='FILE_REFRESH')
 
         # Active armature info
         if props.active_armature:
@@ -474,6 +500,89 @@ class ACTOR_PT_Materials(Panel):
         op.selected_only = False
 
 
+class ACTOR_PT_VMC(Panel):
+    """VMC4B VR Motion Capture integration"""
+    bl_label = "VR Motion Capture"
+    bl_idname = "ACTOR_PT_VMC"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "IGB Actors"
+    bl_parent_id = "ACTOR_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.igb_actor.active_armature != ""
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.igb_actor
+
+        # VMC4B status
+        has_vmc4b = hasattr(context.scene, 'vmc4b_target_armature')
+
+        if not has_vmc4b:
+            box = layout.box()
+            box.label(text="VMC4B addon not installed.", icon='ERROR')
+            box.label(text="Install VMC4B to use VR motion capture.")
+            return
+
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        is_configured = (armature_obj and
+                         "vmc_use_standard_orientations" in armature_obj)
+
+        # ---- Setup Section ----
+        box = layout.box()
+        box.label(text="VMC4B Setup", icon='ARMATURE_DATA')
+
+        if is_configured:
+            box.label(text="Orientation correction active", icon='CHECKMARK')
+
+            vmc_target = context.scene.vmc4b_target_armature
+            if armature_obj and vmc_target == armature_obj.name:
+                box.label(text=f"VMC4B target: {vmc_target}", icon='CHECKMARK')
+            else:
+                box.label(text=f"VMC4B target: {vmc_target}", icon='INFO')
+
+            row = box.row(align=True)
+            row.operator("actor.setup_vmc4b",
+                          text="Reconfigure",
+                          icon='FILE_REFRESH')
+            row.operator("actor.cleanup_vmc",
+                          text="Remove",
+                          icon='TRASH')
+        else:
+            box.label(text="Binds VMC4B bones and enables",
+                      icon='INFO')
+            box.label(text="orientation correction for XML2 rigs.")
+            box.operator("actor.setup_vmc4b",
+                          text="Setup VMC4B",
+                          icon='LINKED')
+
+        # ---- Export Section ----
+        layout.separator()
+        box = layout.box()
+        box.label(text="Export Custom Animation", icon='EXPORT')
+
+        if armature_obj and armature_obj.animation_data:
+            action = armature_obj.animation_data.action
+            if action:
+                box.label(text=f"Active: {action.name}", icon='ACTION')
+                frame_range = action.frame_range
+                fps = context.scene.render.fps
+                dur = (frame_range[1] - frame_range[0]) / fps if fps > 0 else 0
+                box.label(text=f"Duration: {dur:.2f}s "
+                          f"({int(frame_range[1] - frame_range[0])} frames)")
+            else:
+                box.label(text="No active animation", icon='INFO')
+        else:
+            box.label(text="No animation data", icon='INFO')
+
+        box.operator("actor.export_anim_scratch",
+                      text="Export as New IGB",
+                      icon='FILE_NEW')
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -487,6 +596,7 @@ _classes = (
     ACTOR_PT_Segments,
     ACTOR_PT_Animations,
     ACTOR_PT_Materials,
+    ACTOR_PT_VMC,
 )
 
 

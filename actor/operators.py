@@ -881,7 +881,7 @@ class ACTOR_OT_setup_skin(Operator):
         Does NOT modify bone orientations or round-trip the mesh — the
         model is already in the correct state.
         """
-        from .rig_converter import setup_bip01_rig
+        from .rig_converter import setup_bip01_rig, validate_bip01_rig
 
         result = setup_bip01_rig(armature_obj,
                                  auto_scale=self.auto_scale,
@@ -900,11 +900,20 @@ class ACTOR_OT_setup_skin(Operator):
             if child.type == 'MESH':
                 _ensure_igb_material_properties(child)
 
+        # Post-setup validation
+        post_issues = validate_bip01_rig(armature_obj)
         added = result.get('added', 0)
-        msg = "Skin setup complete — skeleton data stored"
-        if added > 0:
-            msg += f", created {added} missing bone(s)"
-        self.report({'INFO'}, msg)
+
+        if post_issues:
+            issue_msgs = [msg for _, msg in post_issues[:3]]
+            self.report({'WARNING'},
+                        f"Setup done but {len(post_issues)} issue(s) remain: "
+                        + "; ".join(issue_msgs))
+        else:
+            msg = "Skin setup complete — skeleton data valid"
+            if added > 0:
+                msg += f", created {added} missing bone(s)"
+            self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
@@ -1939,6 +1948,184 @@ class ACTOR_OT_toggle_segment(Operator):
         return {'FINISHED'}
 
 
+class ACTOR_OT_setup_vmc4b(Operator):
+    """Configure VMC4B bone bindings for XML2/MUA skeleton"""
+    bl_idname = "actor.setup_vmc4b"
+    bl_label = "Setup VMC4B for XML2"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        return (props.active_armature and
+                props.active_armature in bpy.data.objects and
+                hasattr(context.scene, 'vmc4b_target_armature'))
+
+    def execute(self, context):
+        from .vmc_bridge import setup_vmc4b_bindings
+
+        props = context.scene.igb_actor
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if armature_obj is None or armature_obj.type != 'ARMATURE':
+            self.report({'ERROR'}, "No active armature found")
+            return {'CANCELLED'}
+
+        bound, skipped = setup_vmc4b_bindings(armature_obj)
+        if bound > 0:
+            self.report({'INFO'},
+                        f"VMC4B configured: {bound} bones bound"
+                        f"{f', {len(skipped)} skipped' if skipped else ''}. "
+                        f"Press Connect in VMC4B panel to start.")
+        else:
+            self.report({'WARNING'},
+                        "No VMC4B bone bindings could be set. "
+                        "Is the VMC4B addon installed?")
+
+        return {'FINISHED'}
+
+
+class ACTOR_OT_cleanup_vmc(Operator):
+    """Remove VMC4B orientation correction from armature"""
+    bl_idname = "actor.cleanup_vmc"
+    bl_label = "Remove VMC Setup"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        if not props.active_armature:
+            return False
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if not armature_obj:
+            return False
+        return "vmc_use_standard_orientations" in armature_obj
+
+    def execute(self, context):
+        from .vmc_bridge import cleanup_vmc_setup
+
+        props = context.scene.igb_actor
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if armature_obj is None:
+            self.report({'ERROR'}, "No active armature found")
+            return {'CANCELLED'}
+
+        cleanup_vmc_setup(armature_obj)
+        self.report({'INFO'}, "VMC orientation correction removed")
+        return {'FINISHED'}
+
+
+class ACTOR_OT_export_anim_from_scratch(Operator, ExportHelper):
+    """Export current animation as a new IGB file (from scratch, no template needed)"""
+    bl_idname = "actor.export_anim_scratch"
+    bl_label = "Export Animation (New IGB)"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".igb"
+
+    filter_glob: StringProperty(
+        default="*.igb",
+        options={'HIDDEN'},
+    )
+
+    anim_name: StringProperty(
+        name="Animation Name",
+        description="Name for the animation in the IGB file",
+        default="idle",
+    )
+
+    game_preset: EnumProperty(
+        name="Game",
+        items=[
+            ('xml2', "XML2", "X-Men Legends II"),
+            ('mua', "MUA", "Marvel Ultimate Alliance"),
+        ],
+        default='xml2',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.igb_actor
+        if not props.active_armature:
+            return False
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if armature_obj is None:
+            return False
+        return (armature_obj.animation_data is not None and
+                armature_obj.animation_data.action is not None)
+
+    def execute(self, context):
+        from .vmc_bridge import export_action_as_igb
+
+        props = context.scene.igb_actor
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if armature_obj is None:
+            self.report({'ERROR'}, "No active armature found")
+            return {'CANCELLED'}
+
+        action = armature_obj.animation_data.action
+        if action is None:
+            self.report({'ERROR'}, "No active animation on armature")
+            return {'CANCELLED'}
+
+        fps = context.scene.render.fps
+
+        # Find a reference IGB for schema
+        ref_path = armature_obj.get("igb_anim_file", "")
+        if not ref_path or not os.path.exists(ref_path):
+            self.report({'ERROR'},
+                        "No reference IGB file found. Import an actor first "
+                        "to provide the IGB schema.")
+            return {'CANCELLED'}
+
+        try:
+            result = export_action_as_igb(
+                armature_obj, action, self.filepath,
+                game=self.game_preset,
+                reference_path=ref_path,
+                anim_name=self.anim_name,
+                fps=fps,
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Export failed: {exc}")
+            return {'CANCELLED'}
+
+        if result:
+            size = os.path.getsize(self.filepath)
+            self.report({'INFO'},
+                        f"Exported '{self.anim_name}' to "
+                        f"{os.path.basename(self.filepath)} ({size} bytes)")
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, "Export failed — check console for details")
+            return {'CANCELLED'}
+
+    def invoke(self, context, event):
+        props = context.scene.igb_actor
+        armature_obj = bpy.data.objects.get(props.active_armature)
+        if armature_obj and armature_obj.animation_data:
+            action = armature_obj.animation_data.action
+            if action:
+                # Use the action's IGB name if available
+                igb_name = action.get("igb_anim_name", "")
+                if igb_name:
+                    self.anim_name = igb_name
+                else:
+                    self.anim_name = action.name
+
+                # Default output path: alongside the original anim file
+                ref_path = armature_obj.get("igb_anim_file", "")
+                if ref_path and os.path.exists(ref_path):
+                    dirname = os.path.dirname(ref_path)
+                    safe_name = self.anim_name.replace(" ", "_")
+                    self.filepath = os.path.join(dirname,
+                                                 f"{safe_name}_custom.igb")
+
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
 _classes = (
     ACTOR_OT_import_actor,
     ACTOR_OT_import_skin,
@@ -1964,6 +2151,9 @@ _classes = (
     ACTOR_OT_rename_segment,
     ACTOR_OT_select_segment,
     ACTOR_OT_toggle_segment,
+    ACTOR_OT_setup_vmc4b,
+    ACTOR_OT_cleanup_vmc,
+    ACTOR_OT_export_anim_from_scratch,
 )
 
 

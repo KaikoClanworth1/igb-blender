@@ -1349,6 +1349,115 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
     }
 
 
+def validate_bip01_rig(armature_obj):
+    """Validate a Bip01 rig's skeleton data for export readiness.
+
+    Read-only check — does not modify the armature. Returns a list of
+    (level, message) tuples describing any issues found. An empty list
+    means the rig is fully valid and ready for export.
+
+    Levels: 'ERROR' (will break export), 'WARNING' (may cause issues).
+
+    Args:
+        armature_obj: Blender armature object to validate.
+
+    Returns:
+        list of (level, message) tuples.
+    """
+    issues = []
+
+    if armature_obj is None or armature_obj.type != 'ARMATURE':
+        return [('ERROR', "Not an armature object")]
+
+    bones = armature_obj.data.bones
+
+    # 1. Missing bones
+    missing = []
+    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+        display_name = name if name else "Bone_000"
+        if display_name not in bones:
+            missing.append(display_name)
+    if missing:
+        if len(missing) <= 3:
+            issues.append(('ERROR', f"Missing bones: {', '.join(missing)}"))
+        else:
+            issues.append(('ERROR',
+                           f"Missing {len(missing)} bones: "
+                           f"{', '.join(missing[:3])}..."))
+
+    # 2. Wrong parent hierarchy
+    hierarchy_fixes = 0
+    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+        display_name = name if name else "Bone_000"
+        bone = bones.get(display_name)
+        if bone is None:
+            continue
+        if parent_idx >= 0:
+            expected_parent = XML2_SKELETON[parent_idx][0]
+            if not expected_parent:
+                expected_parent = "Bone_000"
+            actual_parent = bone.parent.name if bone.parent else None
+            if actual_parent != expected_parent:
+                hierarchy_fixes += 1
+    if hierarchy_fixes:
+        issues.append(('WARNING',
+                       f"{hierarchy_fixes} bone(s) have wrong parent"))
+
+    # 3. Connected bones (XML2 requires all disconnected)
+    connected = sum(1 for b in bones if b.use_connect)
+    if connected:
+        issues.append(('WARNING',
+                       f"{connected} bone(s) are connected (should be disconnected)"))
+
+    # 4. Missing armature-level properties
+    required_props = [
+        'igb_skin_bone_info_list',
+        'igb_skin_inv_joint_matrices',
+        'igb_skin_bone_translations',
+        'igb_bms_palette',
+    ]
+    missing_props = [p for p in required_props if p not in armature_obj]
+    if missing_props:
+        issues.append(('ERROR',
+                       f"Missing skeleton data: {', '.join(missing_props)}"))
+
+    # 5. Stale bone counts
+    bone_count = armature_obj.get("igb_bone_count", 0)
+    joint_count = armature_obj.get("igb_skin_joint_count", 0)
+    if bone_count != len(XML2_SKELETON):
+        issues.append(('WARNING',
+                       f"Bone count {bone_count} != expected {len(XML2_SKELETON)}"))
+    if joint_count != XML2_JOINT_COUNT:
+        issues.append(('WARNING',
+                       f"Joint count {joint_count} != expected {XML2_JOINT_COUNT}"))
+
+    # 6. Missing per-bone metadata
+    missing_meta = 0
+    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+        display_name = name if name else "Bone_000"
+        if display_name in armature_obj.pose.bones:
+            pb = armature_obj.pose.bones[display_name]
+            if "igb_bone_index" not in pb:
+                missing_meta += 1
+    if missing_meta:
+        issues.append(('WARNING',
+                       f"{missing_meta} bone(s) missing IGB metadata"))
+
+    # 7. Mesh children without Armature modifier
+    for child in armature_obj.children:
+        if child.type != 'MESH':
+            continue
+        has_mod = any(
+            m.type == 'ARMATURE' and m.object == armature_obj
+            for m in child.modifiers
+        )
+        if not has_mod:
+            issues.append(('WARNING',
+                           f"Mesh '{child.name}' has no Armature modifier"))
+
+    return issues
+
+
 # ============================================================================
 # Vertex Group Operations
 # ============================================================================
