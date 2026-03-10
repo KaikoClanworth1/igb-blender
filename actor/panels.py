@@ -138,14 +138,22 @@ class ACTOR_PT_Import(Panel):
                 # Info line
                 bone_count = obj.get("igb_bone_count", 0)
                 mesh_children = sum(1 for c in obj.children if c.type == 'MESH')
-                box.label(text=f"{bone_count} bones, {mesh_children} mesh(es)",
-                          icon='BONE_DATA')
+                target_game = obj.get("igb_target_game", "XML2")
+                fx_count = sum(1 for b in obj.data.bones
+                               if b.name in ('Gun1',) or
+                               (b.name.startswith('fx') and
+                                b.name[2:].isdigit()))
+                info_text = f"{bone_count} bones, {mesh_children} mesh(es)"
+                if target_game == 'MUA':
+                    info_text += f", {fx_count} FX"
+                box.label(text=info_text, icon='BONE_DATA')
+                box.label(text=f"Target: {target_game}", icon='GAME')
 
                 box.operator("actor.setup_skin", text="Re-setup Skin",
                              icon='FILE_REFRESH')
             else:
-                has_bip01 = "Bip01" in obj.data.bones
-                if has_bip01:
+                from .rig_converter import is_bip01_rig
+                if is_bip01_rig(obj):
                     box.label(text="Bip01 rig — will configure for export")
                 else:
                     box.label(text="Non-XML2 rig — will convert and setup")

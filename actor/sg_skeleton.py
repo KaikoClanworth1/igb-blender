@@ -143,6 +143,7 @@ def _parse_skeleton(reader, skel_obj) -> Optional[ParsedSkeleton]:
         ParsedSkeleton or None on failure.
     """
     endian = reader.header.endian
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     name = ""
     trans_ref = None
     bone_list_ref = None
@@ -154,15 +155,15 @@ def _parse_skeleton(reader, skel_obj) -> Optional[ParsedSkeleton]:
         if fi.short_name == b"String":
             name = val if isinstance(val, str) else val.decode("utf-8", errors="replace")
         elif fi.short_name == b"MemoryRef":
-            if slot == 3:
+            if slot == 3 + s:
                 trans_ref = val       # _boneTranslationArray
-            elif slot == 5:
+            elif slot == 5 + s:
                 inv_joint_ref = val   # _invJointArray
         elif fi.short_name == b"ObjectRef" and val != -1:
-            if slot == 4:
+            if slot == 4 + s:
                 bone_list_ref = val   # _boneInfoList
         elif fi.short_name == b"Int":
-            if slot == 6:
+            if slot == 6 + s:
                 joint_count = val     # _jointCount
 
     # Parse bone info list
@@ -222,6 +223,7 @@ def _parse_bone_info_list(reader, list_ref_index):
     if not isinstance(list_obj, IGBObject):
         return []
 
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     items = reader.resolve_object_list(list_obj)
     result = []
 
@@ -238,11 +240,11 @@ def _parse_bone_info_list(reader, list_ref_index):
             if fi.short_name == b"String":
                 bone_name = val if isinstance(val, str) else val.decode("utf-8", errors="replace")
             elif fi.short_name == b"Int":
-                if slot == 3:
+                if slot == 3 + s:
                     parent_idx = val
-                elif slot == 4:
+                elif slot == 4 + s:
                     bm_idx = val
-                elif slot == 5:
+                elif slot == 5 + s:
                     flags = val
 
         result.append((bone_name, parent_idx, bm_idx, flags))

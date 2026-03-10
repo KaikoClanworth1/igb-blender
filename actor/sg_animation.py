@@ -132,6 +132,7 @@ def extract_animation_names(reader) -> List[Tuple[str, float]]:
     """
     anim_objs = reader.get_objects_by_type(b"igAnimation")
 
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     results = []
     for obj in anim_objs:
         if not isinstance(obj, IGBObject):
@@ -141,7 +142,7 @@ def extract_animation_names(reader) -> List[Tuple[str, float]]:
         for slot, val, fi in obj._raw_fields:
             if fi.short_name == b"String":
                 name = val if isinstance(val, str) else ""
-            elif fi.short_name == b"Long" and slot == 9:
+            elif fi.short_name == b"Long" and slot == 9 + s:
                 duration_ns = val
         results.append((name, duration_ns / 1_000_000.0))  # ns -> ms
 
@@ -150,8 +151,9 @@ def extract_animation_names(reader) -> List[Tuple[str, float]]:
 
 def _find_anim_list(reader, anim_db_obj):
     """Find the igAnimationList from an igAnimationDatabase."""
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     for slot, val, fi in anim_db_obj._raw_fields:
-        if fi.short_name == b"ObjectRef" and val != -1 and slot == 6:
+        if fi.short_name == b"ObjectRef" and val != -1 and slot == 6 + s:
             ref = reader.resolve_ref(val)
             if isinstance(ref, IGBObject) and ref.is_type(b"igObjectList"):
                 return ref
@@ -170,19 +172,20 @@ def _parse_animation(reader, anim_obj, skeleton=None, enbaya_cache=None) -> Opti
     if enbaya_cache is None:
         enbaya_cache = {}
 
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     for slot, val, fi in anim_obj._raw_fields:
         if fi.short_name == b"String":
             name = val if isinstance(val, str) else ""
-        elif fi.short_name == b"Int" and slot == 3:
+        elif fi.short_name == b"Int" and slot == 3 + s:
             priority = val
-        elif fi.short_name == b"Long" and slot == 9:
+        elif fi.short_name == b"Long" and slot == 9 + s:
             duration_ns = val
         elif fi.short_name == b"ObjectRef" and val != -1:
             ref = reader.resolve_ref(val)
             if isinstance(ref, IGBObject):
-                if ref.is_type(b"igAnimationTrackList") or (slot == 5 and ref.is_type(b"igObjectList")):
+                if ref.is_type(b"igAnimationTrackList") or (slot == 5 + s and ref.is_type(b"igObjectList")):
                     track_list_ref = val
-                elif ref.is_type(b"igAnimationBindingList") or (slot == 4 and ref.is_type(b"igObjectList")):
+                elif ref.is_type(b"igAnimationBindingList") or (slot == 4 + s and ref.is_type(b"igObjectList")):
                     binding_list_ref = val
 
     # Parse binding to get bone->track mapping
@@ -232,10 +235,11 @@ def _parse_binding(reader, binding_list_ref, endian) -> Optional[Dict[int, int]]
         bind_count = 0
         track_idx_ref = None
 
+        s = reader.slot_offset  # v4/v5 slots are +1 vs v6
         for slot, val, fi in binding._raw_fields:
             if fi.short_name == b"MemoryRef" and val != -1:
                 track_idx_ref = val
-            elif fi.short_name == b"Int" and slot == 4:
+            elif fi.short_name == b"Int" and slot == 4 + s:
                 bind_count = val
 
         if track_idx_ref is not None:
@@ -262,10 +266,11 @@ def _parse_track(reader, track_obj, track_index, endian, enbaya_cache=None) -> O
     if enbaya_cache is None:
         enbaya_cache = {}
 
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     for slot, val, fi in track_obj._raw_fields:
         if fi.short_name == b"String":
             bone_name = val if isinstance(val, str) else ""
-        elif fi.short_name == b"ObjectRef" and val != -1 and slot == 3:
+        elif fi.short_name == b"ObjectRef" and val != -1 and slot == 3 + s:
             source_ref = val
         elif fi.short_name in (b"Vec4f", b"Quaternionf"):
             const_quat = val  # (x, y, z, w) Alchemy order
@@ -323,15 +328,16 @@ def _parse_transform_sequence(reader, seq_obj, endian) -> List[ParsedKeyframe]:
     time_list_ref = None
     driven_channels = 0x03  # default: translation + quaternion
 
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     for slot, val, fi in seq_obj._raw_fields:
         if fi.short_name == b"ObjectRef" and val != -1:
-            if slot == 2:
+            if slot == 2 + s:
                 xlate_list_ref = val
-            elif slot == 3:
+            elif slot == 3 + s:
                 quat_list_ref = val
-            elif slot == 11:
+            elif slot == 11 + s:
                 time_list_ref = val
-        elif fi.short_name == b"UnsignedChar" and slot == 15:
+        elif fi.short_name == b"UnsignedChar" and slot == 15 + s:
             driven_channels = val
 
     # Parse time list
@@ -392,8 +398,9 @@ def _parse_enbaya_source(reader, src_obj, endian, enbaya_cache=None) -> List[Par
     track_id = -1
     eas_ref = None
 
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     for slot, val, fi in src_obj._raw_fields:
-        if fi.short_name == b"Int" and slot == 2:
+        if fi.short_name == b"Int" and slot == 2 + s:
             track_id = val
         elif fi.short_name == b"ObjectRef" and val != -1:
             eas_ref = val

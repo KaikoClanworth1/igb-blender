@@ -104,31 +104,32 @@ def extract_light(reader, light_attr_obj, node_name="", profile=None):
     light = ParsedLight()
     light.source_obj = light_attr_obj
     light.node_name = node_name
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
 
     for slot, val, fi in light_attr_obj._raw_fields:
-        if slot == 4 and fi.short_name == b"Enum":
+        if slot == 4 + s and fi.short_name == b"Enum":
             light.light_type = val
-        elif slot == 5 and fi.short_name == b"Int":
+        elif slot == 5 + s and fi.short_name == b"Int":
             light.light_id = val
-        elif slot == 6 and fi.short_name == b"Vec3f":
+        elif slot == 6 + s and fi.short_name == b"Vec3f":
             light.position = val
-        elif slot == 7 and fi.short_name == b"Vec4f":
+        elif slot == 7 + s and fi.short_name == b"Vec4f":
             light.ambient = val
-        elif slot == 8 and fi.short_name == b"Vec4f":
+        elif slot == 8 + s and fi.short_name == b"Vec4f":
             light.diffuse = val
-        elif slot == 9 and fi.short_name == b"Vec4f":
+        elif slot == 9 + s and fi.short_name == b"Vec4f":
             light.specular = val
-        elif slot == 10 and fi.short_name == b"Vec3f":
+        elif slot == 10 + s and fi.short_name == b"Vec3f":
             light.direction = val
-        elif slot == 11 and fi.short_name == b"Float":
+        elif slot == 11 + s and fi.short_name == b"Float":
             light.falloff = val
-        elif slot == 12 and fi.short_name == b"Float":
+        elif slot == 12 + s and fi.short_name == b"Float":
             light.cutoff = val
-        elif slot == 13 and fi.short_name == b"Vec3f":
+        elif slot == 13 + s and fi.short_name == b"Vec3f":
             light.attenuation = val
-        elif slot == 14 and fi.short_name == b"Float":
+        elif slot == 14 + s and fi.short_name == b"Float":
             light.shininess = val
-        elif slot == 17 and fi.short_name == b"Bool":
+        elif slot == 17 + s and fi.short_name == b"Bool":
             light.cast_shadow = bool(val)
 
     return light
@@ -153,9 +154,10 @@ def extract_lights_from_light_set(reader, light_set_obj, profile=None):
         return []
 
     # Get node name from slot 2 (String, from igNamedObject)
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     node_name = ""
     for slot, val, fi in light_set_obj._raw_fields:
-        if slot == 2 and fi.short_name == b"String":
+        if slot == 2 + s and fi.short_name == b"String":
             if isinstance(val, str):
                 node_name = val
             elif isinstance(val, bytes):

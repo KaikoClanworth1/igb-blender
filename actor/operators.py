@@ -659,19 +659,28 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
 
 
 class ACTOR_OT_convert_rig(Operator):
-    """Convert a Unity Humanoid or Mixamo armature to the XML2 Bip01 skeleton"""
+    """Convert a Unity Humanoid or Mixamo armature to the XML2/MUA Bip01 skeleton"""
     bl_idname = "actor.convert_rig"
-    bl_label = "Convert Rig to XML2"
+    bl_label = "Convert Rig"
     bl_options = {'REGISTER', 'UNDO'}
 
     rig_profile: EnumProperty(
         name="Source Rig",
         items=[
-            ('AUTO', "Auto-Detect", "Detect Unity or Mixamo automatically"),
-            ('UNITY', "Unity Humanoid", "Unity Humanoid bone naming"),
-            ('MIXAMO', "Mixamo", "Mixamo bone naming (mixamorig: prefix)"),
+            ('AUTO', "Auto-Detect",
+             "Auto-detect any rig (Unity, Mixamo, Source Engine, MMD, etc.)"),
         ],
         default='AUTO',
+    )
+
+    target_game: EnumProperty(
+        name="Target Game",
+        description="Target game determines skeleton (XML2=35 bones, MUA=35+14 FX bones)",
+        items=[
+            ('XML2', "XML2", "X-Men Legends II (35 bones, no FX)"),
+            ('MUA', "MUA", "Marvel Ultimate Alliance (35 + 14 FX bones)"),
+        ],
+        default='MUA',
     )
 
     auto_scale: BoolProperty(
@@ -711,16 +720,18 @@ class ACTOR_OT_convert_rig(Operator):
         result = convert_rig(armature_obj, profile=self.rig_profile,
                              auto_scale=self.auto_scale,
                              target_height=self.target_height,
-                             target_pose=self.target_pose)
+                             target_pose=self.target_pose,
+                             target_game=self.target_game)
 
         if result['success']:
             pose_info = ""
             src = result.get('source_pose', 'UNKNOWN')
             if src != 'UNKNOWN':
                 pose_info = f" (detected {src} → {self.target_pose})"
+            game_info = f" [{self.target_game}]"
             self.report(
                 {'INFO'},
-                f"Converted rig: {result['mapped']} mapped, "
+                f"Converted rig{game_info}: {result['mapped']} mapped, "
                 f"{result['added']} added, {result['removed']} removed"
                 f"{pose_info}")
             # Set as active armature in the IGB Actors panel
@@ -767,11 +778,20 @@ class ACTOR_OT_setup_skin(Operator):
     rig_profile: EnumProperty(
         name="Source Rig",
         items=[
-            ('AUTO', "Auto-Detect", "Detect Unity or Mixamo automatically"),
-            ('UNITY', "Unity Humanoid", "Unity Humanoid bone naming"),
-            ('MIXAMO', "Mixamo", "Mixamo bone naming (mixamorig: prefix)"),
+            ('AUTO', "Auto-Detect",
+             "Auto-detect any rig (Unity, Mixamo, Source Engine, MMD, etc.)"),
         ],
         default='AUTO',
+    )
+
+    target_game: EnumProperty(
+        name="Target Game",
+        description="Target game determines skeleton (XML2=35 bones, MUA=35+14 FX bones)",
+        items=[
+            ('XML2', "XML2", "X-Men Legends II (35 bones, no FX)"),
+            ('MUA', "MUA", "Marvel Ultimate Alliance (35 + 14 FX bones)"),
+        ],
+        default='MUA',
     )
 
     target_pose: EnumProperty(
@@ -812,18 +832,19 @@ class ACTOR_OT_setup_skin(Operator):
     def draw(self, context):
         layout = self.layout
         armature_obj = context.active_object
-        has_bip01 = ("Bip01" in armature_obj.data.bones
-                     if armature_obj else False)
+        from .rig_converter import is_bip01_rig
+        has_bip01 = is_bip01_rig(armature_obj) if armature_obj else False
 
         if has_bip01:
             layout.label(text="Bip01 rig detected", icon='CHECKMARK')
-            layout.label(text="Will compute skeleton data and round-trip")
         else:
             layout.label(text="Non-XML2 rig detected", icon='INFO')
-            layout.label(text="Will convert to XML2 and round-trip")
-            layout.separator()
-            layout.prop(self, "rig_profile")
-            layout.prop(self, "target_pose")
+        layout.label(text="Will convert, clean up, and round-trip")
+        layout.separator()
+        layout.prop(self, "target_game")
+        if self.target_game == 'MUA':
+            layout.label(text="  +14 FX bones (Gun1, fx01-fx13)", icon='BONE_DATA')
+        layout.prop(self, "target_pose")
 
         layout.separator()
         layout.prop(self, "auto_scale")
@@ -832,21 +853,17 @@ class ACTOR_OT_setup_skin(Operator):
 
     def execute(self, context):
         armature_obj = context.active_object
-        has_bip01 = "Bip01" in armature_obj.data.bones
-
-        if has_bip01:
-            return self._setup_bip01(context, armature_obj)
-        else:
-            return self._convert_and_setup(context, armature_obj)
+        return self._convert_and_setup(context, armature_obj)
 
     def _convert_and_setup(self, context, armature_obj):
-        """Full conversion path for non-XML2 rigs."""
+        """Full conversion path — handles both Bip01 and non-XML2 rigs."""
         from .rig_converter import convert_rig
 
         result = convert_rig(armature_obj, profile=self.rig_profile,
                              auto_scale=self.auto_scale,
                              target_height=self.target_height,
-                             target_pose=self.target_pose)
+                             target_pose=self.target_pose,
+                             target_game=self.target_game)
 
         if not result['success']:
             self.report({'ERROR'}, result['error'])
@@ -856,9 +873,10 @@ class ACTOR_OT_setup_skin(Operator):
         src = result.get('source_pose', 'UNKNOWN')
         if src != 'UNKNOWN':
             pose_info = f" (detected {src} → {self.target_pose})"
+        game_info = f" [{self.target_game}]"
         self.report(
             {'INFO'},
-            f"Converted rig: {result['mapped']} mapped, "
+            f"Converted rig{game_info}: {result['mapped']} mapped, "
             f"{result['added']} added, {result['removed']} removed"
             f"{pose_info}")
 
@@ -873,49 +891,6 @@ class ACTOR_OT_setup_skin(Operator):
 
         _round_trip_skin(context, armature_obj, props, operator=self)
         return {'FINISHED'}
-
-    def _setup_bip01(self, context, armature_obj):
-        """Setup path for existing Bip01 rigs.
-
-        Only computes and stores skeleton metadata needed for export.
-        Does NOT modify bone orientations or round-trip the mesh — the
-        model is already in the correct state.
-        """
-        from .rig_converter import setup_bip01_rig, validate_bip01_rig
-
-        result = setup_bip01_rig(armature_obj,
-                                 auto_scale=self.auto_scale,
-                                 target_height=self.target_height)
-
-        if not result['success']:
-            self.report({'ERROR'}, result['error'])
-            return {'CANCELLED'}
-
-        props = context.scene.igb_actor
-        props.active_armature = armature_obj.name
-
-        _populate_skins_from_children(props, armature_obj)
-
-        for child in armature_obj.children:
-            if child.type == 'MESH':
-                _ensure_igb_material_properties(child)
-
-        # Post-setup validation
-        post_issues = validate_bip01_rig(armature_obj)
-        added = result.get('added', 0)
-
-        if post_issues:
-            issue_msgs = [msg for _, msg in post_issues[:3]]
-            self.report({'WARNING'},
-                        f"Setup done but {len(post_issues)} issue(s) remain: "
-                        + "; ".join(issue_msgs))
-        else:
-            msg = "Skin setup complete — skeleton data valid"
-            if added > 0:
-                msg += f", created {added} missing bone(s)"
-            self.report({'INFO'}, msg)
-        return {'FINISHED'}
-
 
 class ACTOR_OT_add_mesh_as_skin(Operator):
     """Add the selected mesh as a skin in the IGB Actors panel"""

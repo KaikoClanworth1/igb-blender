@@ -178,6 +178,7 @@ def extract_geometry(reader, geom_attr, profile=None):
         return None
 
     endian = reader.header.endian
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
     geom = ParsedGeometry()
     geom.source_obj = geom_attr
 
@@ -199,7 +200,7 @@ def extract_geometry(reader, geom_attr, profile=None):
                     prim_lengths_ref = ref
         elif name == b"Enum":
             geom.prim_type = val
-        elif name == b"UnsignedInt" and slot == 7:
+        elif name == b"UnsignedInt" and slot == 7 + s:
             pass  # _numPrims
 
     if va_ref is None:
@@ -226,6 +227,7 @@ def _extract_vertex_data(reader, va_obj, geom, endian, profile=None):
     vertex_format = None
     blend_weights_ref = None
     blend_indices_ref = None
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
 
     for slot, val, fi in va_obj._raw_fields:
         name = fi.short_name
@@ -234,11 +236,11 @@ def _extract_vertex_data(reader, va_obj, geom, endian, profile=None):
         elif name == b"Struct":
             vertex_format = val
         elif name == b"MemoryRef":
-            if slot == 2:
+            if slot == 2 + s:
                 vdata_ref_val = val
-            elif slot == 7:
+            elif slot == 7 + s:
                 blend_weights_ref = val
-            elif slot == 8:
+            elif slot == 8 + s:
                 blend_indices_ref = val
 
     if num_verts is None or num_verts == 0:
@@ -512,13 +514,14 @@ def _extract_strip_lengths(reader, pla_obj, geom, endian):
     num_strips = None
     data_ref = None
     elem_bits = 32  # default 32-bit strip lengths
+    s = reader.slot_offset  # v4/v5 slots are +1 vs v6
 
     for slot, val, fi in pla_obj._raw_fields:
         name = fi.short_name
         if name == b"UnsignedInt":
             if num_strips is None:
                 num_strips = val
-            elif slot == 4:
+            elif slot == 4 + s:
                 elem_bits = val
 
         elif name == b"MemoryRef" and val != -1:

@@ -285,8 +285,9 @@ class SceneGraph:
 
     def _get_node_name(self, obj):
         """Read name (slot 2 String) from any igNamedObject."""
+        s = self.reader.slot_offset  # v4/v5 slots are +1 vs v6
         for slot, val, fi in obj._raw_fields:
-            if slot == 2 and fi.short_name == b"String":
+            if slot == 2 + s and fi.short_name == b"String":
                 if isinstance(val, bytes):
                     return val.decode('utf-8', errors='replace')
                 return val if isinstance(val, str) else ''
@@ -294,8 +295,9 @@ class SceneGraph:
 
     def _get_node_flags(self, obj):
         """Read _nodeFlags (slot 5 Int) from any igNode. Default 0."""
+        s = self.reader.slot_offset  # v4/v5 slots are +1 vs v6
         for slot, val, fi in obj._raw_fields:
-            if slot == 5 and fi.short_name in (b"Int", b"UInt"):
+            if slot == 5 + s and fi.short_name in (b"Int", b"UInt"):
                 return int(val)
         return 0
 

@@ -664,12 +664,13 @@ class TextureEditorWindow(QMainWindow):
             if not obj.is_type(b"igTextureAttr"):
                 continue
 
+            s = reader.slot_offset  # v4/v5 slots are +1 vs v6
             base_ref = None
             mml_ref = None
             for slot, val, fi in obj._raw_fields:
-                if slot == 12 and fi.short_name == b"ObjectRef" and val != -1:
+                if slot == 12 + s and fi.short_name == b"ObjectRef" and val != -1:
                     base_ref = val
-                if slot == 16 and fi.short_name == b"ObjectRef" and val != -1:
+                if slot == 16 + s and fi.short_name == b"ObjectRef" and val != -1:
                     mml_ref = val
 
             if base_ref is None or mml_ref is None:
@@ -690,7 +691,7 @@ class TextureEditorWindow(QMainWindow):
             # Read mipmap image refs from the MML's MemoryRef block
             mml_memref = None
             for slot, val, fi in mml_obj._raw_fields:
-                if slot == 4 and fi.short_name == b"MemoryRef" and val != -1:
+                if slot == 4 + s and fi.short_name == b"MemoryRef" and val != -1:
                     mml_memref = val
 
             if mml_memref is None:

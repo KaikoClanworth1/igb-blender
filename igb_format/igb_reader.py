@@ -46,6 +46,19 @@ class IGBReader:
         self.back_refs = {}     # tracks which objects reference which
         self._obj_list_data = set()  # indices that are igObjectList data blocks
 
+    @property
+    def slot_offset(self):
+        """Slot index offset for version compatibility.
+
+        IGB v4/v5 files have slot indices that are +1 compared to v6+
+        due to an extra base class field in older Alchemy versions.
+        All downstream code uses v6 slot constants; add this offset
+        when comparing against raw slot values from v4/v5 files.
+        """
+        if self.header and self.header.version <= 5:
+            return 1
+        return 0
+
     def read(self):
         """Read and parse the entire IGB file."""
         with open(self.filepath, "rb") as f:
@@ -65,12 +78,13 @@ class IGBReader:
         endian = self.header.endian
 
         # Compute expected minimum file size from header buffer sizes
+        index_buf_min = 8 if self.header.version >= 6 else 0  # v4 has no index buffer
         expected_min = (
             HEADER_SIZE + self.header.mf_buffer_size +
             4 +  # alignment buffer minimum (size prefix)
             self.header.meta_obj_buffer_size +
             self.header.entry_buffer_size +
-            8 +  # index buffer minimum (size + count)
+            index_buf_min +
             self.header.obj_buffer_size +
             self.header.mref_buffer_size
         )
@@ -117,14 +131,20 @@ class IGBReader:
         # 8. Entry buffer
         pos = self._read_entries(pos)
 
-        # 9. Index buffer
-        pos = self._read_index(pos)
+        # 9. Index buffer (v6+ only — v4/v5 don't have a separate index buffer)
+        if self.header.version >= 6:
+            pos = self._read_index(pos)
+        else:
+            # v4/v5: no index buffer. Entries are referenced sequentially.
+            self.index_map = list(range(self.header.entry_count))
 
         # 10. Prepare entries (build ref_info and objects list)
         self._prepare_entries()
 
-        # 11. Info V4 (optional)
-        if self.header.has_info:
+        # 11. Info list index (optional, in different position for v4/v5 vs v6+)
+        # v6+: appears between entries and objects (has_info flag)
+        # v4/v5: appears at end of file after mref buffer
+        if self.header.version >= 6 and self.header.has_info:
             self.info_list_index = struct.unpack_from(endian + "I", self.data, pos)[0]
             pos += 4
         else:
@@ -135,6 +155,11 @@ class IGBReader:
 
         # 13. Memory reference buffer
         pos = self._read_memory_refs(pos)
+
+        # 14. v4/v5: info list index at end of file (if has_info flag set)
+        if self.header.version < 6 and self.header.has_info and pos + 4 <= len(self.data):
+            self.info_list_index = struct.unpack_from(endian + "I", self.data, pos)[0]
+            pos += 4
 
         return self
 
@@ -251,24 +276,32 @@ class IGBReader:
         return pos + buf_size
 
     def _prepare_entries(self):
-        """Process entries: build ref_info and allocate object/memory slots."""
+        """Process entries: build ref_info and allocate object/memory slots.
+
+        Slot numbers differ by version:
+        - v6+: igMemoryDirEntry: _memSize=7, _memTypeIndex=10, _refCounted=11,
+                _alignmentTypeIndex=12, _memoryPoolHandle=13
+                igObjectDirEntry: _typeIndex=11, _memoryPoolHandle=12
+        - v4/v5: All slots are +1 (extra base class field shifts everything)
+        """
         self.ref_info = []
         self.objects = []
+
+        # v4/v5 slot indices are +1 relative to v6+ due to an extra
+        # base class field in older Alchemy versions.
+        s = 1 if self.header.version <= 5 else 0
 
         for idx in self.index_map:
             ent_type, fields = self.entries[idx]
             type_name = self.meta_objects[ent_type].name
 
             if type_name == b"igMemoryDirEntry":
-                # Actual slot layout (from meta-object definition):
-                # _name=slot2, _memSize=slot7, _memTypeIndex=slot10,
-                # _refCounted=slot11, _alignmentTypeIndex=slot12, _memoryPoolHandle=slot13
                 field_dict = {f[0]: f[1] for f in fields}
-                mem_size = field_dict.get(7, 0)
-                mem_type_idx = field_dict.get(10, -1)
-                ref_counted = field_dict.get(11, 0)
-                align_type_idx = field_dict.get(12, -1)
-                mem_pool_handle = field_dict.get(13, -1)
+                mem_size = field_dict.get(7 + s, 0)
+                mem_type_idx = field_dict.get(10 + s, -1)
+                ref_counted = field_dict.get(11 + s, 0)
+                align_type_idx = field_dict.get(12 + s, -1)
+                mem_pool_handle = field_dict.get(13 + s, -1)
 
                 # Resolve mem type name
                 mem_type_name = None
@@ -292,15 +325,14 @@ class IGBReader:
                 self.objects.append(mb)
 
             elif type_name == b"igObjectDirEntry":
-                # Actual slot layout: _name=slot2, _typeIndex=slot11, _memoryPoolHandle=slot12
                 field_dict = {f[0]: f[1] for f in fields}
-                type_idx = field_dict.get(11, 0)
+                type_idx = field_dict.get(11 + s, 0)
 
                 self.ref_info.append({
                     'is_object': True,
                     'type_index': type_idx,
                     'type_name': self.meta_objects[type_idx].name if type_idx < len(self.meta_objects) else None,
-                    'mem_pool_handle': field_dict.get(12, -1),
+                    'mem_pool_handle': field_dict.get(12 + s, -1),
                 })
 
                 obj = IGBObject(len(self.objects), self.meta_objects[type_idx])
@@ -380,7 +412,8 @@ class IGBReader:
                         actual_size = size + str_len
                         if data_offset + actual_size > ent_data_len:
                             break  # truncated string
-                        val = bytes(ent_data[data_offset + 4:data_offset + actual_size]).rstrip(b"\0")
+                        # Use split on first null to avoid v4 padding garbage
+                        val = bytes(ent_data[data_offset + 4:data_offset + actual_size]).split(b"\0", 1)[0]
                         try:
                             val = val.decode("utf-8")
                         except UnicodeDecodeError:

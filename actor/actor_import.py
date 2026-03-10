@@ -619,10 +619,11 @@ class _SkinGeometryCollector:
 
     def visit_geometry_attr(self, attr, transform, parent):
         # Get the parent node's name (igGeometry inherits igNamedObject, name at slot 2)
+        s = self.reader.slot_offset  # v4/v5 slots are +1 vs v6
         node_name = ""
         if parent is not None:
             for slot, val, fi in parent._raw_fields:
-                if slot == 2 and fi.short_name == b"String" and isinstance(val, (str, bytes)):
+                if slot == 2 + s and fi.short_name == b"String" and isinstance(val, (str, bytes)):
                     node_name = val.decode('utf-8', errors='replace') if isinstance(val, bytes) else val
                     break
 

@@ -65,206 +65,498 @@ XML2_JOINT_COUNT = sum(1 for _, _, _, bm, _ in XML2_SKELETON if bm >= 0)
 
 
 # ============================================================================
-# Bone Name Mapping: Unity Humanoid -> XML2
+# MUA Extended Skeleton (XML2 base + FX bones)
 # ============================================================================
+# FX bones are non-deforming effect attachment points used by MUA's engine.
+# The engine looks up bones by name to attach particles, weapon visuals, and
+# scripted effects. All parented to Bip01 by default — users can reparent
+# in Blender for per-character customization.
 
-# Maps various Unity Humanoid naming conventions to XML2 Bip01 names.
-# Includes both spaced ("Left UpperArm") and camelCase ("LeftUpperArm")
-# variants, plus common aliases.
-UNITY_TO_XML2 = {}
-
-_UNITY_MAPPING_RAW = [
-    # Spine chain
-    (["Hips", "hips"],                                        "Bip01 Pelvis"),
-    (["Spine", "spine"],                                      "Bip01 Spine"),
-    (["Chest", "chest"],                                      "Bip01 Spine1"),
-    (["UpperChest", "Upper Chest", "upperchest", "upper_chest"], "Bip01 Spine2"),
-    (["Neck", "neck"],                                        "Bip01 Neck"),
-    (["Head", "head"],                                        "Bip01 Head"),
-
-    # Left arm — Unity Humanoid + VRChat naming
-    (["LeftShoulder", "Left Shoulder", "Left shoulder",
-      "leftshoulder", "left_shoulder", "L Shoulder"],         "Bip01 L Clavicle"),
-    (["LeftUpperArm", "Left UpperArm", "Left Upper Arm",
-      "leftupperarm", "left_upper_arm", "L UpperArm",
-      "Left arm"],                                            "Bip01 L UpperArm"),
-    (["LeftLowerArm", "Left LowerArm", "Left Lower Arm",
-      "leftlowerarm", "left_lower_arm", "L LowerArm",
-      "LeftForeArm", "Left ForeArm",
-      "Left elbow"],                                          "Bip01 L Forearm"),
-    (["LeftHand", "Left Hand", "lefthand", "left_hand",
-      "L Hand", "Left wrist"],                                "Bip01 L Hand"),
-
-    # Left fingers — XML2 Finger0/01 = thumb, Finger1/11 = middle finger
-    # Thumb → Finger0 / Finger01
-    (["LeftThumbProximal", "Left Thumb Proximal",
-      "leftthumbproximal", "left_thumb_proximal",
-      "L Thumb1", "LeftThumb1",
-      "Thumb0_L"],                                            "Bip01 L Finger0"),
-    (["LeftThumbIntermediate", "Left Thumb Intermediate",
-      "leftthumbintermediate", "left_thumb_intermediate",
-      "L Thumb2", "LeftThumb2",
-      "Thumb1_L"],                                            "Bip01 L Finger01"),
-    # Middle finger → Finger1 / Finger11 (center finger = best representative)
-    (["LeftMiddleProximal", "Left Middle Proximal",
-      "leftmiddleproximal", "left_middle_proximal",
-      "MiddleFinger1_L"],                                     "Bip01 L Finger1"),
-    (["LeftMiddleIntermediate", "Left Middle Intermediate",
-      "leftmiddleintermediate", "left_middle_intermediate",
-      "MiddleFinger2_L"],                                     "Bip01 L Finger11"),
-
-    # Right arm — Unity Humanoid + VRChat naming
-    (["RightShoulder", "Right Shoulder", "Right shoulder",
-      "rightshoulder", "right_shoulder", "R Shoulder"],       "Bip01 R Clavicle"),
-    (["RightUpperArm", "Right UpperArm", "Right Upper Arm",
-      "rightupperarm", "right_upper_arm", "R UpperArm",
-      "Right arm"],                                           "Bip01 R UpperArm"),
-    (["RightLowerArm", "Right LowerArm", "Right Lower Arm",
-      "rightlowerarm", "right_lower_arm", "R LowerArm",
-      "RightForeArm", "Right ForeArm",
-      "Right elbow"],                                         "Bip01 R Forearm"),
-    (["RightHand", "Right Hand", "righthand", "right_hand",
-      "R Hand", "Right wrist"],                               "Bip01 R Hand"),
-
-    # Right fingers — XML2 Finger0/01 = thumb, Finger1/11 = middle finger
-    # Thumb → Finger0 / Finger01
-    (["RightThumbProximal", "Right Thumb Proximal",
-      "rightthumbproximal", "right_thumb_proximal",
-      "R Thumb1", "RightThumb1",
-      "Thumb0_R"],                                            "Bip01 R Finger0"),
-    (["RightThumbIntermediate", "Right Thumb Intermediate",
-      "rightthumbintermediate", "right_thumb_intermediate",
-      "R Thumb2", "RightThumb2",
-      "Thumb1_R"],                                            "Bip01 R Finger01"),
-    # Middle finger → Finger1 / Finger11 (center finger = best representative)
-    (["RightMiddleProximal", "Right Middle Proximal",
-      "rightmiddleproximal", "right_middle_proximal",
-      "MiddleFinger1_R"],                                     "Bip01 R Finger1"),
-    (["RightMiddleIntermediate", "Right Middle Intermediate",
-      "rightmiddleintermediate", "right_middle_intermediate",
-      "MiddleFinger2_R"],                                     "Bip01 R Finger11"),
-
-    # Left leg — Unity Humanoid + VRChat naming
-    (["LeftUpperLeg", "Left UpperLeg", "Left Upper Leg",
-      "leftupperleg", "left_upper_leg", "L UpperLeg",
-      "LeftThigh", "Left Thigh",
-      "Left leg"],                                            "Bip01 L Thigh"),
-    (["LeftLowerLeg", "Left LowerLeg", "Left Lower Leg",
-      "leftlowerleg", "left_lower_leg", "L LowerLeg",
-      "LeftCalf", "Left Calf",
-      "Left knee"],                                           "Bip01 L Calf"),
-    (["LeftFoot", "Left Foot", "leftfoot", "left_foot",
-      "L Foot", "Left ankle"],                                "Bip01 L Foot"),
-    (["LeftToes", "Left Toes", "lefttoes", "left_toes",
-      "L Toe", "LeftToe", "Left Toe",
-      "Left toe"],                                            "Bip01 L Toe0"),
-
-    # Right leg — Unity Humanoid + VRChat naming
-    (["RightUpperLeg", "Right UpperLeg", "Right Upper Leg",
-      "rightupperleg", "right_upper_leg", "R UpperLeg",
-      "RightThigh", "Right Thigh",
-      "Right leg"],                                           "Bip01 R Thigh"),
-    (["RightLowerLeg", "Right LowerLeg", "Right Lower Leg",
-      "rightlowerleg", "right_lower_leg", "R LowerLeg",
-      "RightCalf", "Right Calf",
-      "Right knee"],                                          "Bip01 R Calf"),
-    (["RightFoot", "Right Foot", "rightfoot", "right_foot",
-      "R Foot", "Right ankle"],                               "Bip01 R Foot"),
-    (["RightToes", "Right Toes", "righttoes", "right_toes",
-      "R Toe", "RightToe", "Right Toe",
-      "Right toe"],                                           "Bip01 R Toe0"),
+# (name, parent_name, bm_idx, flags)
+MUA_FX_BONES = [
+    ("Gun1", "Bip01", -1, 0x02),
+    ("fx01", "Bip01", -1, 0x02),
+    ("fx02", "Bip01", -1, 0x02),
+    ("fx03", "Bip01", -1, 0x02),
+    ("fx04", "Bip01", -1, 0x02),
+    ("fx05", "Bip01", -1, 0x02),
+    ("fx06", "Bip01", -1, 0x02),
+    ("fx07", "Bip01", -1, 0x02),
+    ("fx08", "Bip01", -1, 0x02),
+    ("fx09", "Bip01", -1, 0x02),
+    ("fx10", "Bip01", -1, 0x02),
+    ("fx11", "Bip01", -1, 0x02),
+    ("fx12", "Bip01", -1, 0x02),
+    ("fx13", "Bip01", -1, 0x02),
 ]
 
-# Build the flat lookup dict
-for aliases, xml2_name in _UNITY_MAPPING_RAW:
-    for alias in aliases:
-        UNITY_TO_XML2[alias] = xml2_name
+MUA_FX_BONE_NAMES = {name for name, _, _, _ in MUA_FX_BONES}
 
-# Bones whose vertex weights should merge INTO the mapped target when
-# the source bone doesn't have a direct XML2 equivalent.
-# Maps Unity bone name aliases -> XML2 bone to merge weights into.
+# Build MUA_SKELETON = XML2_SKELETON + FX bones (auto-indexed)
+def _build_mua_skeleton():
+    """Build MUA skeleton by appending FX bones to XML2 skeleton."""
+    # Start with XML2 base
+    skeleton = list(XML2_SKELETON)
+    # Build name→index lookup from XML2
+    name_to_idx = {entry[0]: entry[1] for entry in XML2_SKELETON}
+    next_idx = len(XML2_SKELETON)
+    for fx_name, parent_name, bm_idx, flags in MUA_FX_BONES:
+        parent_idx = name_to_idx.get(parent_name, 0)
+        skeleton.append((fx_name, next_idx, parent_idx, bm_idx, flags))
+        name_to_idx[fx_name] = next_idx
+        next_idx += 1
+    return skeleton
+
+MUA_SKELETON = _build_mua_skeleton()
+MUA_BONE_NAMES = {entry[0] for entry in MUA_SKELETON}
+MUA_JOINT_COUNT = sum(1 for _, _, _, bm, _ in MUA_SKELETON if bm >= 0)  # = 32 (same as XML2)
+
+
+def get_skeleton_for_game(game: str):
+    """Return the skeleton definition for the specified target game.
+
+    Args:
+        game: 'XML2' or 'MUA'
+
+    Returns:
+        List of (name, index, parent_idx, bm_idx, flags) tuples.
+    """
+    if game == 'MUA':
+        return MUA_SKELETON
+    return XML2_SKELETON
+
+
+def get_bone_names_for_game(game: str):
+    """Return set of bone names for the specified target game."""
+    if game == 'MUA':
+        return MUA_BONE_NAMES
+    return XML2_BONE_NAMES
+
+
+# ============================================================================
+# Universal Bone Name Normalization (CATS-style)
+# ============================================================================
+# Adapts the normalization approach from the CATS Blender Plugin to
+# standardize bone names from ANY rig format before matching against aliases.
+
+# Prefixes stripped during normalization (order matters — first match wins)
+_STRIP_PREFIXES = [
+    ('ValveBiped_', ''), ('Valvebiped_', ''),
+    ('Bip1_', 'Bip_'), ('Bip01_', 'Bip_'), ('Bip001_', 'Bip_'),
+    ('Bip02_', 'Bip_'), ('Bip01', ''),
+    ('Character1_', ''), ('HLP_', ''), ('JD_', ''), ('JU_', ''),
+    ('Armature|', ''), ('Bone_', ''), ('Cf_S_', ''), ('Cf_J_', ''),
+    ('Joint_', ''), ('Def_C_', ''), ('Def_', ''), ('DEF_', ''),
+    ('Chr_', ''), ('B_', ''), ('G_', ''), ('C_', ''),
+]
+_STRIP_SUFFIXES = [
+    ('_Bone', ''), ('_Bn', ''), ('_Le', '_L'), ('_Ri', '_R'), ('_', ''),
+]
+_REPLACEMENTS = [
+    (' ', '_'), ('-', '_'), ('.', '_'), (':', '_'),
+    ('____', '_'), ('___', '_'), ('__', '_'),
+    ('_Le_', '_L_'), ('_Ri_', '_R_'),
+    ('LEFT', 'Left'), ('RIGHT', 'Right'),
+]
+
+
+def _normalize_bone_name(name):
+    """Normalize a bone name to a standard form for alias matching.
+
+    Adapted from the CATS Blender Plugin normalization pipeline.
+    Capitalizes segments, strips common prefixes/suffixes, normalizes
+    separators so bone names from any rig converge to matchable forms.
+    """
+    # Capitalize first letter of each underscore-delimited segment
+    parts = name.split('_')
+    name = '_'.join(s[:1].upper() + s[1:] for s in parts)
+
+    # Apply character replacements
+    for old, new in _REPLACEMENTS:
+        name = name.replace(old, new)
+
+    # Strip known prefixes (repeat to handle chained prefixes like
+    # ValveBiped_Bip01_ → strip ValveBiped_ → strip Bip01_)
+    for _ in range(2):
+        for prefix, repl in _STRIP_PREFIXES:
+            if name.startswith(prefix):
+                name = repl + name[len(prefix):]
+                break
+
+    # Strip known suffixes (first match only)
+    for suffix, repl in _STRIP_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)] + repl
+            break
+
+    # Remove leading digit segment (e.g. "01_Spine" → "Spine")
+    parts = name.split('_')
+    if len(parts) > 1 and parts[0].isdigit():
+        name = parts[1]
+
+    # Remove trailing S0, _Jnt
+    if name.endswith('S0'):
+        name = name[:-2]
+    if name.endswith('_Jnt'):
+        name = name[:-4]
+
+    # Strip mixamorig prefix (after : → _ replacement)
+    if name.startswith('Mixamorig_'):
+        name = name[len('Mixamorig_'):]
+
+    return name
+
+
+# ============================================================================
+# Comprehensive Bone Alias → XML2 Mapping
+# ============================================================================
+# Aliases are in NORMALIZED form (post-normalization).
+# Uses \L / \Left templates expanded into L/R and Left/Right variants.
+# Derived from CATS Blender Plugin bone tables + Unity/VRChat/MMD conventions.
+
+def _expand_sides(template_key, aliases, xml2_l, xml2_r):
+    """Expand \\L / \\Left templates into Left/Right alias entries."""
+    entries = []
+    for side_data in [('Left', 'L', xml2_l), ('Right', 'R', xml2_r)]:
+        full, short, xml2 = side_data
+        expanded_aliases = []
+        for a in aliases:
+            expanded_aliases.append(
+                a.replace('\\Left', full).replace('\\left', full.lower())
+                 .replace('\\Lf', full[:1]).replace('\\L', short).replace('\\l', short.lower()))
+        entries.append((expanded_aliases, xml2))
+    return entries
+
+
+# Template aliases for bones with left/right sides.
+# Each entry: (CATS template key, [normalized aliases with \L/\Left], xml2_L, xml2_R)
+_SIDED_ALIASES = [
+    # Shoulder / Clavicle
+    ('\\Left_Shoulder', [
+        '\\Left_Shoulder', '\\LeftShoulder', 'Shoulder_\\L', '\\LShoulder',
+        '\\L_Shoulder', 'Bip_\\L_Clavicle', '\\L_Clavicle', '\\Left_Clavicle',
+        '\\LCollar', '\\LeftCollar', '\\L_Collar', 'Clavicle_\\L',
+        'ShoulderArm_\\L', 'Bip_Collar_\\L', 'Shol_\\L',
+        'J_Bip_\\L_Shoulder', 'Bip_Clavicle_\\L', 'Clav_\\L',
+        '\\LClavicle', 'Bip_\\L_Arm', 'J_\\L_Collar', 'J_\\L_Shoulder',
+        'Collarbone_\\L', 'J_Clavicle_\\L', '\\L_Clav',
+    ], 'Bip01 L Clavicle', 'Bip01 R Clavicle'),
+
+    # Upper arm
+    ('\\Left_Arm', [
+        '\\Left_Arm', '\\LeftArm', 'Arm_\\L', '\\LArm',
+        'Bip_\\L_UpperArm', 'Upper_Arm_\\L', 'UpperArm_\\L',
+        '\\Left_Upper_Arm', '\\L_UpperArm', '\\LeftUpArm',
+        'Uparm_\\L', '\\L_Arm', 'Arm_Upper_\\L',
+        'J_Bip_\\L_UpperArm', '\\LUpperArm', '\\LShldr',
+        'Bip_UpperArm_\\L', '\\L_Shldr', 'Arm_Stretch_\\L',
+        'J_Shoulder_\\L', '\\L_Uparm', 'Bip_\\L_Arm1',
+    ], 'Bip01 L UpperArm', 'Bip01 R UpperArm'),
+
+    # Forearm / Elbow
+    ('\\Left_Elbow', [
+        '\\Left_Elbow', '\\LeftElbow', 'Elbow_\\L', '\\L_Elbow',
+        'Bip_\\L_ForeArm', 'Fore_Arm_\\L', 'ForeArm_\\L',
+        '\\LForeArm', '\\L_ForeArm', '\\LeftLowArm', '\\Left_Forearm',
+        '\\LeftForeArm', 'Lower_Arm_\\L', 'LowerArm_\\L',
+        'Arm_Lower_\\L', 'J_Bip_\\L_LowerArm', 'Bip_Forearm_\\L',
+        '\\LElbow', 'Forearm_Stretch_\\L', 'J_Elbow_\\L',
+        '\\L_LowerArm', '\\L_Forearm', 'Bip_\\L_Arm2',
+        'Bip_LowerArm_\\L', '\\L_Hiji',
+    ], 'Bip01 L Forearm', 'Bip01 R Forearm'),
+
+    # Hand / Wrist
+    ('\\Left_Wrist', [
+        '\\Left_Wrist', '\\LeftWrist', 'Wrist_\\L', '\\LHand',
+        'Bip_\\L_Hand', 'Hand_\\L', '\\LeftHand', '\\Left_Hand',
+        '\\L_Hand', 'Palm_\\L', 'J_Bip_\\L_Hand', 'Bip_Hand_\\L',
+        'J_\\L_Wrist', '\\L_Wrist', '\\LWrist', 'J_Te_\\L', 'J_Wrist_\\L',
+    ], 'Bip01 L Hand', 'Bip01 R Hand'),
+
+    # Thigh / Upper leg
+    ('\\Left_Leg', [
+        '\\Left_Leg', '\\Left_Foot', '\\LeftLeg', 'Leg_\\L',
+        'Bip_\\L_Thigh', 'Upper_Leg_\\L', '\\LThigh', 'Thigh_\\L',
+        '\\L_Thigh', '\\LeftUpLeg', '\\Left_Thigh', '\\L_Hip',
+        'UpperLeg_\\L', 'J_Bip_\\L_UpperLeg', 'Bip_Thigh_\\L',
+        'Bip_Hip_\\L', 'Thigh_Stretch_\\L', 'J_Hip_\\L',
+        '\\LUpLeg', '\\L_UpperLeg', 'Bip_\\L_Leg', '\\L_Leg',
+        '\\LeftHip', '\\L_Momo',
+    ], 'Bip01 L Thigh', 'Bip01 R Thigh'),
+
+    # Calf / Knee / Lower leg
+    ('\\Left_Knee', [
+        '\\Left_Knee', '\\LeftKnee', 'Knee_\\L', '\\LLeg',
+        '\\LShin', 'Shin_\\L', '\\L_Calf', 'Calf_\\L',
+        '\\LeftLowLeg', '\\Left_Shin', 'Lower_Leg_\\L', 'LowerLeg_\\L',
+        'Bip_\\L_Calf', 'J_Bip_\\L_LowerLeg', 'Bip_Leg_\\L',
+        'Leg_Stretch_\\L', 'J_Knee_\\L', '\\LCalf', '\\L_LowerLeg',
+        'Bip_Knee_\\L', '\\L_Sune', 'Bip_\\L_Leg1',
+    ], 'Bip01 L Calf', 'Bip01 R Calf'),
+
+    # Foot / Ankle
+    ('\\Left_Ankle', [
+        '\\Left_Ankle', '\\LeftAnkle', 'Ankle_\\L', '\\L_Ankle',
+        'Bip_\\L_Foot', 'Foot_\\L', '\\LFoot', '\\L_Foot',
+        '\\LeftFoot', 'J_Bip_\\L_Foot', 'Bip_Foot_\\L',
+        '\\LAnkle', '\\Left_Heel', 'J_Ankle_\\L',
+    ], 'Bip01 L Foot', 'Bip01 R Foot'),
+
+    # Toe
+    ('\\Left_Toe', [
+        '\\Left_Toe', '\\Left_Toes', '\\LeftToe', 'LegTip_\\L',
+        'Bip_\\L_Toe0', 'Toe_\\L', '\\LToe', '\\L_Toe',
+        '\\LeftToeBase', 'Toes_\\L', 'J_Bip_\\L_ToeBase',
+        'Bip_Toe_\\L', 'J_Ball_\\L', '\\LToeBase', '\\LToe0',
+        '\\L_Toes', '\\L_Toe0', 'ToeTip_\\L',
+    ], 'Bip01 L Toe0', 'Bip01 R Toe0'),
+
+    # Thumb (proximal → Finger0, intermediate → Finger01)
+    ('Thumb0_\\L', [
+        'Thumb0_\\L', 'Thumb_0_\\L', '\\LThumb1', 'Thumb1_\\L',
+        'Finger0_\\L', 'Bip_\\L_Finger0', 'J_Bip_\\L_Thumb1',
+        'ThumbFinger1_\\L', 'Thumb_Proximal_\\L', 'Thumb_A_\\L',
+        '\\LFingerThumb1',
+    ], 'Bip01 L Finger0', 'Bip01 R Finger0'),
+    ('Thumb1_\\L', [
+        'Thumb1_\\L', 'Thumb_1_\\L', '\\LThumb2', 'Thumb2_\\L',
+        'Finger01_\\L', 'Bip_\\L_Finger01', 'J_Bip_\\L_Thumb2',
+        'ThumbFinger2_\\L', 'Thumb_Intermediate_\\L', 'Thumb_B_\\L',
+        '\\LFingerThumb2',
+    ], 'Bip01 L Finger01', 'Bip01 R Finger01'),
+
+    # Middle finger (proximal → Finger1, intermediate → Finger11)
+    ('MiddleFinger1_\\L', [
+        'MiddleFinger1_\\L', 'Middle1_\\L', 'Middle_Proximal_\\L',
+        'Bip_\\L_Finger1', 'J_Bip_\\L_Middle1', 'MiddleFinger_A_\\L',
+        '\\LFingerMiddle1', 'Mid1_\\L',
+    ], 'Bip01 L Finger1', 'Bip01 R Finger1'),
+    ('MiddleFinger2_\\L', [
+        'MiddleFinger2_\\L', 'Middle2_\\L', 'Middle_Intermediate_\\L',
+        'Bip_\\L_Finger11', 'J_Bip_\\L_Middle2', 'MiddleFinger_B_\\L',
+        '\\LFingerMiddle2', 'Mid2_\\L',
+    ], 'Bip01 L Finger11', 'Bip01 R Finger11'),
+]
+
+# Center (non-sided) aliases → XML2
+_CENTER_ALIASES = {
+    # Hips / Pelvis
+    'Bip01 Pelvis': [
+        'Hips', 'LowerBody', 'Lower_Body', 'Pelvis', 'Bip_Pelvis',
+        'Hip', 'Waist', 'Root', 'J_Bip_C_Hips', 'Root_X',
+        'HipN', 'J_Kosi', 'Kosi', 'J_Hip',
+    ],
+    # Spine
+    'Bip01 Spine': [
+        'Spine', 'UpperBody', 'Upper_Body', 'Bip_Spine',
+        'Spine_Lower', 'Abdomen', 'Spine0', 'SpineA', 'SpA',
+        'J_Bip_C_Spine', 'BODY1', 'WaistN', 'Torso_1',
+    ],
+    # Chest (Spine1)
+    'Bip01 Spine1': [
+        'Chest', 'Bip_Spine1', 'Bip_Chest', 'Spine_Upper',
+        'Spine1', 'SpineB', 'SpB', 'J_Bip_C_Chest', 'BODY2',
+        'BustN', 'Bust', 'Ribs', 'Torso_2', 'ChestLower',
+    ],
+    # Upper Chest (Spine2)
+    'Bip01 Spine2': [
+        'Upper_Chest', 'UpperChest', 'Bip_Spine2',
+        'Spine2', 'SpineC', 'SpC', 'J_Bip_C_UpperChest',
+        'Chest_Def', 'SpineTop',
+    ],
+    # Neck
+    'Bip01 Neck': [
+        'Neck', 'Bip_Neck', 'Bip_Neck1', 'Head_Neck_Lower',
+        'Head_Neck', 'J_Bip_C_Neck', 'NECK', 'NeckN', 'Kubi',
+        'J_Kubi', 'NeckLower', 'Neck_X',
+    ],
+    # Head
+    'Bip01 Head': [
+        'Head', 'Bip_Head', 'Bip_Head1', 'J_Bip_C_Head',
+        'HEAD', 'HeadN', 'Head_01', 'J_Head', 'Head_X', 'J_Kao',
+    ],
+}
+
+# Build the flat lookup: normalized_alias (lowercase) → XML2 name
+ALIAS_TO_XML2 = {}
+
+# Add center aliases
+for xml2_name, aliases in _CENTER_ALIASES.items():
+    for alias in aliases:
+        ALIAS_TO_XML2[alias.lower()] = xml2_name
+
+# Add sided aliases (expand \L/\Left templates)
+for _, aliases, xml2_l, xml2_r in _SIDED_ALIASES:
+    for entry_list in _expand_sides(_, aliases, xml2_l, xml2_r):
+        expanded_aliases, xml2_name = entry_list
+        for alias in expanded_aliases:
+            ALIAS_TO_XML2[alias.lower()] = xml2_name
+
+# ---- Unity Humanoid camelCase names (not covered by CATS templates) ----
+_UNITY_DIRECT = {
+    # Spine
+    'upperchest': 'Bip01 Spine2',
+    # Arms
+    'leftshoulder': 'Bip01 L Clavicle', 'rightshoulder': 'Bip01 R Clavicle',
+    'leftupperarm': 'Bip01 L UpperArm', 'rightupperarm': 'Bip01 R UpperArm',
+    'leftlowerarm': 'Bip01 L Forearm', 'rightlowerarm': 'Bip01 R Forearm',
+    'leftforearm': 'Bip01 L Forearm', 'rightforearm': 'Bip01 R Forearm',
+    'lefthand': 'Bip01 L Hand', 'righthand': 'Bip01 R Hand',
+    # Legs
+    'leftupperleg': 'Bip01 L Thigh', 'rightupperleg': 'Bip01 R Thigh',
+    'leftlowerleg': 'Bip01 L Calf', 'rightlowerleg': 'Bip01 R Calf',
+    'leftfoot': 'Bip01 L Foot', 'rightfoot': 'Bip01 R Foot',
+    'lefttoes': 'Bip01 L Toe0', 'righttoes': 'Bip01 R Toe0',
+    'lefttoebase': 'Bip01 L Toe0', 'righttoebase': 'Bip01 R Toe0',
+    'lefttoe': 'Bip01 L Toe0', 'righttoe': 'Bip01 R Toe0',
+    # Fingers (thumb → Finger0/01, middle → Finger1/11)
+    'leftthumbproximal': 'Bip01 L Finger0',
+    'rightthumbproximal': 'Bip01 R Finger0',
+    'leftthumbintermediate': 'Bip01 L Finger01',
+    'rightthumbintermediate': 'Bip01 R Finger01',
+    'leftmiddleproximal': 'Bip01 L Finger1',
+    'rightmiddleproximal': 'Bip01 R Finger1',
+    'leftmiddleintermediate': 'Bip01 L Finger11',
+    'rightmiddleintermediate': 'Bip01 R Finger11',
+}
+for _k, _v in _UNITY_DIRECT.items():
+    ALIAS_TO_XML2.setdefault(_k, _v)
+
+# Also add underscore variants (left_upper_arm, etc.)
+for _k, _v in list(_UNITY_DIRECT.items()):
+    # Insert underscores before uppercase letters
+    import re
+    _under = re.sub(r'([a-z])([A-Z])', r'\1_\2', _k).lower()
+    ALIAS_TO_XML2.setdefault(_under, _v)
+
+# ---- Legacy compat: keep UNITY_TO_XML2 as an alias for the new mapping ----
+UNITY_TO_XML2 = ALIAS_TO_XML2
+
+# ============================================================================
+# FX Bone Aliases (MUA effect attachment bones)
+# ============================================================================
+# Aliases for common modder naming variations → standard MUA FX bone names.
+# Stored in separate dict (not ALIAS_TO_XML2) since FX bones only exist in MUA.
+ALIAS_TO_MUA_FX = {}
+_FX_ALIAS_TABLE = {
+    'Gun1':  ['gun1', 'gun_1', 'gun01', 'weapon_r', 'weapon_right'],
+    'fx01':  ['fx1', 'fx_01', 'fx_1', 'effect01', 'effect1'],
+    'fx02':  ['fx2', 'fx_02', 'fx_2', 'effect02', 'effect2'],
+    'fx03':  ['fx3', 'fx_03', 'fx_3', 'effect03', 'effect3'],
+    'fx04':  ['fx4', 'fx_04', 'fx_4', 'effect04', 'effect4'],
+    'fx05':  ['fx5', 'fx_05', 'fx_5', 'effect05', 'effect5'],
+    'fx06':  ['fx6', 'fx_06', 'fx_6', 'effect06', 'effect6'],
+    'fx07':  ['fx7', 'fx_07', 'fx_7', 'effect07', 'effect7'],
+    'fx08':  ['fx8', 'fx_08', 'fx_8', 'effect08', 'effect8'],
+    'fx09':  ['fx9', 'fx_09', 'fx_9', 'effect09', 'effect9'],
+    'fx10':  ['fx_10', 'effect10'],
+    'fx11':  ['fx_11', 'effect11'],
+    'fx12':  ['fx_12', 'effect12'],
+    'fx13':  ['fx_13', 'effect13'],
+}
+for _fx_std, _fx_aliases in _FX_ALIAS_TABLE.items():
+    # Map the standard name itself
+    ALIAS_TO_MUA_FX[_fx_std.lower()] = _fx_std
+    for _alias in _fx_aliases:
+        ALIAS_TO_MUA_FX[_alias.lower()] = _fx_std
+
+
+# ============================================================================
+# Merge Weight Targets (bones that merge into XML2 targets)
+# ============================================================================
 MERGE_WEIGHT_TARGETS = {}
 
-_MERGE_RAW = [
-    # --- LEFT thumb distal -> merge into L Finger01 ---
-    (["LeftThumbDistal", "Left Thumb Distal",
-      "Thumb2_L"],                                            "Bip01 L Finger01"),
+_MERGE_SIDED = [
+    # Thumb distal → Finger01
+    ('Thumb2_\\L', [
+        'Thumb2_\\L', 'Thumb_2_\\L', '\\LThumb3', 'Thumb3_\\L',
+        'Thumb_Distal_\\L', 'ThumbFinger3_\\L', 'Thumb_C_\\L',
+        'J_Bip_\\L_Thumb3', 'Bip_\\L_Finger02',
+    ], 'Bip01 L Finger01', 'Bip01 R Finger01'),
 
-    # --- LEFT proximal finger bones (index/ring/pinky) -> merge into L Finger1 ---
-    (["LeftIndexProximal", "Left Index Proximal",
-      "leftindexproximal", "left_index_proximal",
-      "L Index1", "LeftIndex1", "IndexFinger1_L",
-      "LeftRingProximal", "Left Ring Proximal",
-      "leftringproximal", "left_ring_proximal",
-      "RingFinger1_L",
-      "LeftLittleProximal", "Left Little Proximal",
-      "leftlittleproximal", "left_little_proximal",
-      "LittleFinger1_L"],                                     "Bip01 L Finger1"),
+    # Index finger (proximal/intermediate/distal) → Finger1 / Finger11
+    ('IndexFinger1_\\L', [
+        'IndexFinger1_\\L', 'Index1_\\L', 'Fore1_\\L',
+        'Index_Proximal_\\L', 'J_Bip_\\L_Index1',
+        'Bip_\\L_Finger1', '\\LFingerIndex1',
+    ], 'Bip01 L Finger1', 'Bip01 R Finger1'),
+    ('IndexFinger2_\\L', [
+        'IndexFinger2_\\L', 'IndexFinger3_\\L',
+        'Index2_\\L', 'Index3_\\L', 'Fore2_\\L', 'Fore3_\\L',
+        'Index_Intermediate_\\L', 'Index_Distal_\\L',
+        'J_Bip_\\L_Index2', 'J_Bip_\\L_Index3',
+    ], 'Bip01 L Finger11', 'Bip01 R Finger11'),
 
-    # --- LEFT intermediate/distal finger bones -> merge into L Finger11 ---
-    (["LeftIndexIntermediate", "Left Index Intermediate",
-      "leftindexintermediate", "left_index_intermediate",
-      "L Index2", "LeftIndex2", "IndexFinger2_L",
-      "LeftIndexDistal", "Left Index Distal",
-      "IndexFinger3_L",
-      "LeftMiddleDistal", "Left Middle Distal",
-      "MiddleFinger3_L",
-      "LeftRingIntermediate", "Left Ring Intermediate",
-      "RingFinger2_L",
-      "LeftRingDistal", "Left Ring Distal",
-      "RingFinger3_L",
-      "LeftLittleIntermediate", "Left Little Intermediate",
-      "LittleFinger2_L",
-      "LeftLittleDistal", "Left Little Distal",
-      "LittleFinger3_L"],                                     "Bip01 L Finger11"),
+    # Ring finger → Finger1 / Finger11
+    ('RingFinger1_\\L', [
+        'RingFinger1_\\L', 'Third1_\\L', 'Ring1_\\L',
+        'Ring_Proximal_\\L', 'J_Bip_\\L_Ring1',
+    ], 'Bip01 L Finger1', 'Bip01 R Finger1'),
+    ('RingFinger2_\\L', [
+        'RingFinger2_\\L', 'RingFinger3_\\L',
+        'Third2_\\L', 'Third3_\\L', 'Ring2_\\L', 'Ring3_\\L',
+        'Ring_Intermediate_\\L', 'Ring_Distal_\\L',
+    ], 'Bip01 L Finger11', 'Bip01 R Finger11'),
 
-    # --- RIGHT thumb distal -> merge into R Finger01 ---
-    (["RightThumbDistal", "Right Thumb Distal",
-      "Thumb2_R"],                                            "Bip01 R Finger01"),
+    # Little finger → Finger1 / Finger11
+    ('LittleFinger1_\\L', [
+        'LittleFinger1_\\L', 'Little1_\\L', 'Pinky1_\\L',
+        'Little_Proximal_\\L', 'J_Bip_\\L_Little1',
+    ], 'Bip01 L Finger1', 'Bip01 R Finger1'),
+    ('LittleFinger2_\\L', [
+        'LittleFinger2_\\L', 'LittleFinger3_\\L',
+        'Little2_\\L', 'Little3_\\L', 'Pinky2_\\L', 'Pinky3_\\L',
+        'Little_Intermediate_\\L', 'Little_Distal_\\L',
+    ], 'Bip01 L Finger11', 'Bip01 R Finger11'),
 
-    # --- RIGHT proximal finger bones (index/ring/pinky) -> merge into R Finger1 ---
-    (["RightIndexProximal", "Right Index Proximal",
-      "rightindexproximal", "right_index_proximal",
-      "R Index1", "RightIndex1", "IndexFinger1_R",
-      "RightRingProximal", "Right Ring Proximal",
-      "rightringproximal", "right_ring_proximal",
-      "RingFinger1_R",
-      "RightLittleProximal", "Right Little Proximal",
-      "rightlittleproximal", "right_little_proximal",
-      "LittleFinger1_R"],                                     "Bip01 R Finger1"),
-
-    # --- RIGHT intermediate/distal finger bones -> merge into R Finger11 ---
-    (["RightIndexIntermediate", "Right Index Intermediate",
-      "rightindexintermediate", "right_index_intermediate",
-      "R Index2", "RightIndex2", "IndexFinger2_R",
-      "RightIndexDistal", "Right Index Distal",
-      "IndexFinger3_R",
-      "RightMiddleDistal", "Right Middle Distal",
-      "MiddleFinger3_R",
-      "RightRingIntermediate", "Right Ring Intermediate",
-      "RingFinger2_R",
-      "RightRingDistal", "Right Ring Distal",
-      "RingFinger3_R",
-      "RightLittleIntermediate", "Right Little Intermediate",
-      "LittleFinger2_R",
-      "RightLittleDistal", "Right Little Distal",
-      "LittleFinger3_R"],                                     "Bip01 R Finger11"),
-
-    # Eye / Jaw / Hair physics -> merge into Head
-    (["LeftEye", "Left Eye", "RightEye", "Right Eye",
-      "Eye_L", "Eye_R",
-      "Jaw", "jaw"],                                          "Bip01 Head"),
-
-    # Toe roots -> merge into Foot
-    (["ToeRoot_L"],                                           "Bip01 L Foot"),
-    (["ToeRoot_R"],                                           "Bip01 R Foot"),
+    # Middle finger distal → Finger11
+    ('MiddleFinger3_\\L', [
+        'MiddleFinger3_\\L', 'Middle3_\\L', 'Mid3_\\L',
+        'Middle_Distal_\\L', 'J_Bip_\\L_Middle3',
+    ], 'Bip01 L Finger11', 'Bip01 R Finger11'),
 ]
 
-for aliases, target in _MERGE_RAW:
-    for alias in aliases:
-        MERGE_WEIGHT_TARGETS[alias] = target
+# Expand sided merge targets
+for _, aliases, xml2_l, xml2_r in _MERGE_SIDED:
+    for entry_list in _expand_sides(_, aliases, xml2_l, xml2_r):
+        expanded_aliases, xml2_name = entry_list
+        for alias in expanded_aliases:
+            MERGE_WEIGHT_TARGETS[alias.lower()] = xml2_name
 
-# Mixamo prefix
+# Non-sided merge targets
+for alias in ['LeftEye', 'Left_Eye', 'RightEye', 'Right_Eye',
+              'Eye_L', 'Eye_R', 'Jaw', 'jaw']:
+    MERGE_WEIGHT_TARGETS[alias.lower()] = 'Bip01 Head'
+
+# Unity Humanoid camelCase merge targets
+_UNITY_MERGE_DIRECT = {
+    'leftthumbdistal': 'Bip01 L Finger01',
+    'rightthumbdistal': 'Bip01 R Finger01',
+    'leftindexproximal': 'Bip01 L Finger1',
+    'rightindexproximal': 'Bip01 R Finger1',
+    'leftindexintermediate': 'Bip01 L Finger11',
+    'rightindexintermediate': 'Bip01 R Finger11',
+    'leftindexdistal': 'Bip01 L Finger11',
+    'rightindexdistal': 'Bip01 R Finger11',
+    'leftmiddledistal': 'Bip01 L Finger11',
+    'rightmiddledistal': 'Bip01 R Finger11',
+    'leftringproximal': 'Bip01 L Finger1',
+    'rightringproximal': 'Bip01 R Finger1',
+    'leftringintermediate': 'Bip01 L Finger11',
+    'rightringintermediate': 'Bip01 R Finger11',
+    'leftringdistal': 'Bip01 L Finger11',
+    'rightringdistal': 'Bip01 R Finger11',
+    'leftlittleproximal': 'Bip01 L Finger1',
+    'rightlittleproximal': 'Bip01 R Finger1',
+    'leftlittleintermediate': 'Bip01 L Finger11',
+    'rightlittleintermediate': 'Bip01 R Finger11',
+    'leftlittledistal': 'Bip01 L Finger11',
+    'rightlittledistal': 'Bip01 R Finger11',
+}
+for _k, _v in _UNITY_MERGE_DIRECT.items():
+    MERGE_WEIGHT_TARGETS.setdefault(_k, _v)
+
+# Mixamo prefix (kept for legacy detection)
 MIXAMO_PREFIX = "mixamorig:"
 
 # ============================================================================
@@ -399,55 +691,100 @@ NATIVE_TRANSLATIONS = {
 
 
 # ============================================================================
+# Bip Prefix Normalization
+# ============================================================================
+
+def _rename_bip_prefix(armature_obj, old_prefix, new_prefix):
+    """Rename all bones from one Bip prefix to another (e.g. Bip001 → Bip01).
+
+    Also updates vertex group names on child meshes so skinning stays intact.
+    """
+    import bpy
+
+    # Build rename map: only rename bones that start with old_prefix
+    rename_map = {}
+    for bone in armature_obj.data.bones:
+        if bone.name.startswith(old_prefix):
+            new_name = new_prefix + bone.name[len(old_prefix):]
+            rename_map[bone.name] = new_name
+
+    if not rename_map:
+        return
+
+    # Rename bones in edit mode
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    for old_name, new_name in rename_map.items():
+        eb = armature_obj.data.edit_bones.get(old_name)
+        if eb:
+            eb.name = new_name
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Rename vertex groups on child meshes to match
+    for child in armature_obj.children:
+        if child.type != 'MESH':
+            continue
+        for vg in child.vertex_groups:
+            if vg.name in rename_map:
+                vg.name = rename_map[vg.name]
+
+
+# ============================================================================
 # Profile Detection
 # ============================================================================
+
+def _detect_bip_prefix(armature_obj):
+    """Detect which Bip prefix the rig uses (Bip01, Bip001, etc.).
+
+    Returns:
+        The prefix string (e.g. "Bip01", "Bip001") or None if not a Biped rig.
+    """
+    bone_names = [b.name for b in armature_obj.data.bones]
+    # Count bones by prefix — check common 3ds Max Biped variants
+    for prefix in ("Bip01", "Bip001", "Bip002"):
+        count = sum(1 for n in bone_names if n.startswith(prefix))
+        if count >= 3:
+            return prefix
+    return None
+
+
+def is_bip01_rig(armature_obj):
+    """Check if an armature is a Bip01-style rig (already XML2 naming or variant).
+
+    Detects rigs that use Bip01, Bip001, or similar 3ds Max Biped naming
+    and should go through the setup path (not the convert path).
+
+    Returns:
+        True if the rig has Biped-style bones.
+    """
+    return _detect_bip_prefix(armature_obj) is not None
+
 
 def detect_rig_profile(armature_obj):
     """Detect the source rig naming convention.
 
-    Supports:
-    - Mixamo (bones prefixed with 'mixamorig:')
-    - Unity Humanoid standard (LeftUpperArm, RightFoot, etc.)
-    - VRChat / Unity short form (Left arm, Left elbow, Thumb0_L, etc.)
+    Uses universal normalization to detect ANY supported rig type:
+    - Bip01/Bip001 (already XML2/3dsMax naming → 'bip01')
+    - Mixamo, Unity Humanoid, VRChat, Source Engine, MMD, etc. → 'universal'
 
     Args:
         armature_obj: Blender armature object.
 
     Returns:
-        'mixamo', 'unity', or None (unknown).
+        'bip01', 'universal', or None (unknown).
     """
-    bone_names = [b.name for b in armature_obj.data.bones]
-    bone_name_set = set(bone_names)
+    # Check for Bip01/Bip001 rig (already Biped naming)
+    if is_bip01_rig(armature_obj):
+        return 'bip01'
 
-    # Check for Mixamo prefix
-    mixamo_count = sum(1 for n in bone_names if n.startswith(MIXAMO_PREFIX))
-    if mixamo_count >= 3:
-        return 'mixamo'
-
-    # Check for Unity Humanoid standard names
-    unity_indicators = {'Hips', 'Spine', 'Head', 'LeftUpperArm', 'RightUpperArm',
-                        'LeftHand', 'RightHand', 'LeftFoot', 'RightFoot',
-                        'LeftUpperLeg', 'RightUpperLeg'}
-    unity_count = sum(1 for n in bone_name_set if n in unity_indicators)
-    if unity_count >= 3:
-        return 'unity'
-
-    # Check for VRChat / Unity short-form names
-    # These are all in the UNITY_TO_XML2 mapping, so we can check if any
-    # bone name matches a known alias.
-    vrchat_indicators = {'Left arm', 'Right arm', 'Left elbow', 'Right elbow',
-                         'Left wrist', 'Right wrist', 'Left leg', 'Right leg',
-                         'Left knee', 'Right knee', 'Left ankle', 'Right ankle',
-                         'Left shoulder', 'Right shoulder', 'Left toe', 'Right toe',
-                         'Thumb0_L', 'Thumb0_R', 'IndexFinger1_L', 'IndexFinger1_R'}
-    vrchat_count = sum(1 for n in bone_name_set if n in vrchat_indicators)
-    if vrchat_count >= 3:
-        return 'unity'  # Use 'unity' profile — same lookup table
-
-    # Broad fallback: check if ANY bone name is in the UNITY_TO_XML2 dict
-    matched = sum(1 for n in bone_name_set if n in UNITY_TO_XML2)
-    if matched >= 5:
-        return 'unity'
+    # Universal detection: try normalizing each bone and looking up
+    matched = 0
+    for bone in armature_obj.data.bones:
+        if _lookup_bone(bone.name) is not None:
+            matched += 1
+            if matched >= 3:
+                return 'universal'
 
     return None
 
@@ -456,75 +793,112 @@ def detect_rig_profile(armature_obj):
 # Bone Rename Map Builder
 # ============================================================================
 
-def build_rename_map(armature_obj, profile):
-    """Build a mapping from current bone names to XML2 bone names.
+def _lookup_bone(name, target_game='XML2'):
+    """Try to match a bone name to a target skeleton bone using normalization.
+
+    Tries: exact match → lowercase match → normalized match.
+    When target_game='MUA', also checks FX bone aliases.
+    Returns target bone name or None.
+    """
+    low = name.lower()
+
+    # 1. Check MUA FX aliases first (if targeting MUA)
+    if target_game == 'MUA':
+        fx = ALIAS_TO_MUA_FX.get(low)
+        if fx:
+            return fx
+
+    # 2. Exact lowercase match (handles Unity/VRChat names directly)
+    xml2 = ALIAS_TO_XML2.get(low)
+    if xml2:
+        return xml2
+
+    # 3. Normalize and try again (handles Bip001_, ValveBiped_, etc.)
+    normalized = _normalize_bone_name(name)
+    norm_low = normalized.lower()
+
+    if target_game == 'MUA':
+        fx = ALIAS_TO_MUA_FX.get(norm_low)
+        if fx:
+            return fx
+
+    xml2 = ALIAS_TO_XML2.get(norm_low)
+    if xml2:
+        return xml2
+
+    return None
+
+
+def build_rename_map(armature_obj, profile=None, target_game='XML2'):
+    """Build a mapping from current bone names to target skeleton bone names.
+
+    Uses CATS-style normalization to match bones from ANY rig format.
+    When target_game='MUA', also matches FX bone aliases.
 
     Args:
         armature_obj: Blender armature object.
-        profile: 'unity', 'mixamo', or 'auto'.
+        profile: Ignored (kept for API compatibility).
+        target_game: 'XML2' or 'MUA' — determines which bones are valid targets.
 
     Returns:
         Dict mapping old_name -> new_name for bones that can be mapped.
     """
     rename_map = {}
-    bone_names = [b.name for b in armature_obj.data.bones]
+    # Track which target bones are already claimed (prevent duplicates)
+    claimed = set()
+    valid_names = get_bone_names_for_game(target_game)
 
-    for old_name in bone_names:
-        # Strip Mixamo prefix if applicable
-        if profile == 'mixamo' and old_name.startswith(MIXAMO_PREFIX):
-            stripped = old_name[len(MIXAMO_PREFIX):]
-        else:
-            stripped = old_name
-
-        # Look up in Unity -> XML2 mapping
-        xml2_name = UNITY_TO_XML2.get(stripped)
-        if xml2_name:
-            rename_map[old_name] = xml2_name
+    for bone in armature_obj.data.bones:
+        target_name = _lookup_bone(bone.name, target_game=target_game)
+        if target_name and target_name in valid_names and target_name not in claimed:
+            rename_map[bone.name] = target_name
+            claimed.add(target_name)
 
     return rename_map
 
 
-def build_merge_map(armature_obj, profile, rename_map):
+def build_merge_map(armature_obj, profile=None, rename_map=None):
     """Build a mapping for bones whose weights should merge into a target.
+
+    Uses CATS-style normalization for universal matching.
 
     Args:
         armature_obj: Blender armature object.
-        profile: 'unity' or 'mixamo'.
+        profile: Ignored (kept for API compatibility).
         rename_map: Already-built rename map (to exclude already-mapped bones).
 
     Returns:
         Dict mapping old_bone_name -> xml2_target_name for weight merging.
     """
-    merge_map = {}
-    bone_names = [b.name for b in armature_obj.data.bones]
+    if rename_map is None:
+        rename_map = {}
 
-    for old_name in bone_names:
-        if old_name in rename_map:
+    merge_map = {}
+
+    for bone in armature_obj.data.bones:
+        if bone.name in rename_map:
             continue  # Already directly mapped
 
-        # Strip Mixamo prefix
-        if profile == 'mixamo' and old_name.startswith(MIXAMO_PREFIX):
-            stripped = old_name[len(MIXAMO_PREFIX):]
-        else:
-            stripped = old_name
+        # Try normalized lookup in merge targets
+        lower = bone.name.lower()
+        target = MERGE_WEIGHT_TARGETS.get(lower)
+        if not target:
+            normalized = _normalize_bone_name(bone.name)
+            target = MERGE_WEIGHT_TARGETS.get(normalized.lower())
 
-        # Check explicit merge targets first
-        target = MERGE_WEIGHT_TARGETS.get(stripped)
         if target:
-            merge_map[old_name] = target
+            merge_map[bone.name] = target
             continue
 
-        # Pattern-based merging for VRChat dynamic bones
-        # Hair physics chains (J_Sec_Hair*, J_Bip_Hair*, Hair_*, etc.)
-        lower = stripped.lower()
-        if ('hair' in lower or 'j_sec_' in lower or 'j_bip_' in lower
-                or 'j_adj_' in lower):
-            merge_map[old_name] = "Bip01 Head"
+        # Pattern-based merging for dynamic/physics bones
+        lower_name = bone.name.lower()
+        if ('hair' in lower_name or 'j_sec_' in lower_name
+                or 'j_bip_' in lower_name or 'j_adj_' in lower_name):
+            merge_map[bone.name] = "Bip01 Head"
             continue
 
-        # Any remaining breast/chest physics bones -> Spine2
-        if 'breast' in lower or 'bust' in lower:
-            merge_map[old_name] = "Bip01 Spine2"
+        if 'breast' in lower_name or 'bust' in lower_name:
+            merge_map[bone.name] = "Bip01 Spine2"
             continue
 
     return merge_map
@@ -894,8 +1268,8 @@ def _repose_meshes(armature_obj, source_pose, target_pose):
 # ============================================================================
 
 def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.0,
-                target_pose='T_POSE'):
-    """Convert an armature from Unity/Mixamo naming to XML2 Bip01 convention.
+                target_pose='T_POSE', target_game='XML2'):
+    """Convert an armature from Unity/Mixamo naming to XML2/MUA Bip01 convention.
 
     This is the main entry point. It:
     0. Applies object-level rotation/scale and optionally auto-scales
@@ -903,7 +1277,7 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     2. Renames bones and vertex groups
     3. Merges extra vertex weights into nearest mapped bones
     4. Removes unmapped bones
-    5. Creates missing XML2 bones as dummies
+    5. Creates missing XML2 bones (+ FX bones for MUA)
     6. Detects source pose and reposes if needed
     7. Computes inverse joint matrices and bone translations
     8. Stores all required custom properties for IGB export
@@ -915,6 +1289,7 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
         target_height: Target character height in game units (default ~80).
         target_pose: 'T_POSE' or 'A_POSE'. Target arm pose for export.
                      T_POSE recommended for XML2 animation compatibility.
+        target_game: 'XML2' or 'MUA'. MUA adds 14 non-deforming FX bones.
 
     Returns:
         dict with keys: success (bool), mapped (int), added (int),
@@ -935,24 +1310,33 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     # ---- 0. Apply object transforms and auto-scale ----
     _apply_transforms_and_scale(armature_obj, target_height, auto_scale)
 
+    # ---- 0b. Rename Bip001/Bip002 → Bip01 if needed ----
+    bip_prefix = _detect_bip_prefix(armature_obj)
+    if bip_prefix and bip_prefix != "Bip01":
+        _rename_bip_prefix(armature_obj, bip_prefix, "Bip01")
+
     # ---- 1. Detect profile ----
     if profile == 'AUTO':
         detected = detect_rig_profile(armature_obj)
         if detected is None:
+            bone_names = [b.name for b in armature_obj.data.bones[:10]]
             return {'success': False,
-                    'error': "Could not detect rig type. Select Unity or Mixamo manually.",
+                    'error': f"Could not detect rig type. Bones: {', '.join(bone_names)}... "
+                             "Try running CATS 'Fix Model' first.",
                     'mapped': 0, 'added': 0, 'removed': 0}
         profile = detected
     else:
         profile = profile.lower()
 
-    # ---- 2. Build rename and merge maps ----
-    rename_map = build_rename_map(armature_obj, profile)
-    merge_map = build_merge_map(armature_obj, profile, rename_map)
+    # ---- 2. Build rename and merge maps (universal normalization) ----
+    rename_map = build_rename_map(armature_obj, target_game=target_game)
+    merge_map = build_merge_map(armature_obj, rename_map=rename_map)
 
     if not rename_map:
+        bone_names = [b.name for b in armature_obj.data.bones[:10]]
         return {'success': False,
-                'error': f"No bones matched the {profile} naming convention.",
+                'error': f"No bones matched any known convention. "
+                         f"Bones: {', '.join(bone_names)}...",
                 'mapped': 0, 'added': 0, 'removed': 0}
 
     # ---- 2b. Detect source pose (before rename, using rename_map) ----
@@ -970,7 +1354,8 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     _rename_vertex_groups(armature_obj, rename_map)
 
     # Also remove vertex groups for bones being deleted (not in rename or merge)
-    all_xml2_names = {entry[0] for entry in XML2_SKELETON if entry[0]}
+    target_skeleton = get_skeleton_for_game(target_game)
+    all_target_names = {entry[0] for entry in target_skeleton if entry[0]}
     bones_to_remove = set()
     for bone in armature_obj.data.bones:
         if bone.name not in rename_map:
@@ -1003,11 +1388,11 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
             eb.name = new_name
             mapped_count += 1
 
-    # Remove unmapped bones (those not renamed to an XML2 name)
+    # Remove unmapped bones (those not renamed to a target skeleton name)
     current_names = {eb.name for eb in edit_bones}
     bones_to_delete = []
     for eb in edit_bones:
-        if eb.name not in all_xml2_names and eb.name not in {"", "Bone_000"}:
+        if eb.name not in all_target_names and eb.name not in {"", "Bone_000"}:
             bones_to_delete.append(eb.name)
 
     for name in bones_to_delete:
@@ -1016,22 +1401,22 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
             edit_bones.remove(eb)
             removed_count += 1
 
-    # ---- 6. Create missing XML2 bones ----
+    # ---- 6. Create missing target skeleton bones ----
     added_count = 0
     current_names = {eb.name for eb in edit_bones}
 
-    # Build parent name lookup from XML2_SKELETON
-    xml2_by_name = {}
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
-        parent_name = XML2_SKELETON[parent_idx][0] if parent_idx >= 0 else None
-        xml2_by_name[name] = (idx, parent_idx, parent_name, bm_idx, flags)
+    # Build parent name lookup from target skeleton
+    skel_by_name = {}
+    for name, idx, parent_idx, bm_idx, flags in target_skeleton:
+        parent_name = target_skeleton[parent_idx][0] if parent_idx >= 0 else None
+        skel_by_name[name] = (idx, parent_idx, parent_name, bm_idx, flags)
 
     # Helper: compute a small bone length based on existing bones
     bone_lengths = [eb.length for eb in edit_bones if eb.length > 0.001]
     avg_bone_len = sum(bone_lengths) / len(bone_lengths) if bone_lengths else 0.05
 
     # Process in index order so parents are created before children
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+    for name, idx, parent_idx, bm_idx, flags in target_skeleton:
         if not name:
             display_name = "Bone_000"
         else:
@@ -1046,7 +1431,7 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
 
         # Find parent bone
         if parent_idx >= 0:
-            parent_bone_name = XML2_SKELETON[parent_idx][0]
+            parent_bone_name = target_skeleton[parent_idx][0]
             if not parent_bone_name:
                 parent_bone_name = "Bone_000"
             parent_eb = edit_bones.get(parent_bone_name)
@@ -1100,16 +1485,16 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
         added_count += 1
         current_names.add(display_name)
 
-    # Fix parent relationships for ALL XML2 bones (some renamed ones may
-    # need re-parenting to match the XML2 hierarchy)
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+    # Fix parent relationships for ALL target skeleton bones (some renamed
+    # ones may need re-parenting to match the target hierarchy)
+    for name, idx, parent_idx, bm_idx, flags in target_skeleton:
         display_name = name if name else "Bone_000"
         eb = edit_bones.get(display_name)
         if not eb:
             continue
 
         if parent_idx >= 0:
-            parent_name = XML2_SKELETON[parent_idx][0]
+            parent_name = target_skeleton[parent_idx][0]
             parent_display = parent_name if parent_name else "Bone_000"
             parent_eb = edit_bones.get(parent_display)
             if parent_eb and eb.parent != parent_eb:
@@ -1154,7 +1539,19 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     _force_native_root_translations(translations, export_scale)
 
     # ---- 10. Store all custom properties ----
-    _store_skeleton_properties(armature_obj, inv_matrices, translations)
+    _store_skeleton_properties(armature_obj, inv_matrices, translations,
+                               target_game=target_game)
+
+    # Store target game for export pipeline
+    armature_obj["igb_target_game"] = target_game
+
+    # Determine if axis rotation is needed during export.
+    # If bones were identity-renamed (Bip01 Pelvis → Bip01 Pelvis), the rig
+    # was already in XML2 orientation and does NOT need the +90° Z rotation.
+    # If bones were actually renamed (Hips → Bip01 Pelvis), the rig came from
+    # a non-XML2 convention and needs the rotation.
+    actually_renamed = sum(1 for old, new in rename_map.items() if old != new)
+    armature_obj["igb_converted_rig"] = actually_renamed > 0
 
     # ---- 11. Update bone display to show XML2 orientations ----
     # Set bone tails based on native XML2 rotations so the skeleton
@@ -1172,14 +1569,15 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     }
 
 
-def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
+def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0,
+                    target_game='XML2'):
     """Setup an existing Bip01 rig for IGB skin export.
 
     Unlike convert_rig(), this does NOT rename or reparent bones — it assumes
     the armature already uses XML2 bone naming (Bip01, Bip01 Pelvis, etc.).
-    It creates any missing XML2 bones, fixes the parent hierarchy, computes
-    inverse joint matrices and bone translations, and stores all required
-    custom properties for the skin exporter.
+    It creates any missing XML2 bones (+ FX bones for MUA), fixes the parent
+    hierarchy, computes inverse joint matrices and bone translations, and
+    stores all required custom properties for the skin exporter.
 
     Use this for:
     - Native XML2 rigs from other importers or manual creation
@@ -1190,6 +1588,7 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
         armature_obj: Blender armature object with XML2 bone names.
         auto_scale: If True, auto-scale rig to match XML2 character proportions.
         target_height: Target character height in game units (default ~68).
+        target_game: 'XML2' or 'MUA'. MUA adds 14 non-deforming FX bones.
 
     Returns:
         dict with keys: success (bool), added (int), error (str or None).
@@ -1201,13 +1600,18 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
         return {'success': False, 'added': 0,
                 'error': "No armature selected"}
 
-    # Check that it actually has Bip01
-    if "Bip01" not in armature_obj.data.bones:
+    # Detect Biped prefix variant (Bip01, Bip001, etc.)
+    bip_prefix = _detect_bip_prefix(armature_obj)
+    if bip_prefix is None:
         return {'success': False, 'added': 0,
-                'error': "Armature has no 'Bip01' bone. "
+                'error': "Armature has no Bip01/Bip001 bones. "
                          "Use Convert Rig for non-XML2 rigs."}
 
-    # ---- 0. Apply object transforms and auto-scale ----
+    # ---- 0. Rename Bip001 → Bip01 if needed ----
+    if bip_prefix != "Bip01":
+        _rename_bip_prefix(armature_obj, bip_prefix, "Bip01")
+
+    # ---- 0b. Apply object transforms and auto-scale ----
     _apply_transforms_and_scale(armature_obj, target_height, auto_scale)
 
     # ---- 1. Enter edit mode: create missing bones, fix hierarchy ----
@@ -1228,9 +1632,10 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
     avg_bone_len = (sum(bone_lengths) / len(bone_lengths)
                     if bone_lengths else 0.05)
 
-    # Create missing XML2 bones
+    # Create missing target skeleton bones (XML2 or MUA)
+    skeleton = get_skeleton_for_game(target_game)
     current_names = {eb.name for eb in edit_bones}
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+    for name, idx, parent_idx, bm_idx, flags in skeleton:
         display_name = name if name else "Bone_000"
         if display_name in current_names:
             continue
@@ -1239,7 +1644,7 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
         small_len = avg_bone_len * 0.3
 
         if parent_idx >= 0:
-            parent_bone_name = XML2_SKELETON[parent_idx][0]
+            parent_bone_name = skeleton[parent_idx][0]
             if not parent_bone_name:
                 parent_bone_name = "Bone_000"
             parent_eb = edit_bones.get(parent_bone_name)
@@ -1278,14 +1683,14 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
         newly_created.add(display_name)
         current_names.add(display_name)
 
-    # Fix parent hierarchy for ALL XML2 bones
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+    # Fix parent hierarchy for ALL target skeleton bones
+    for name, idx, parent_idx, bm_idx, flags in skeleton:
         display_name = name if name else "Bone_000"
         eb = edit_bones.get(display_name)
         if not eb:
             continue
         if parent_idx >= 0:
-            parent_name = XML2_SKELETON[parent_idx][0]
+            parent_name = skeleton[parent_idx][0]
             parent_display = parent_name if parent_name else "Bone_000"
             parent_eb = edit_bones.get(parent_display)
             if parent_eb and eb.parent != parent_eb:
@@ -1328,7 +1733,11 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0):
     export_scale = armature_obj.get("igb_export_scale", 1.0)
     _force_native_root_translations(translations, export_scale)
 
-    _store_skeleton_properties(armature_obj, inv_matrices, translations)
+    _store_skeleton_properties(armature_obj, inv_matrices, translations,
+                               target_game=target_game)
+
+    # Store target game for export pipeline
+    armature_obj["igb_target_game"] = target_game
 
     # CRITICAL: Override igb_converted_rig to False for existing Bip01 rigs.
     # _store_skeleton_properties() sets it to True (which tells the exporter
@@ -1891,27 +2300,43 @@ def _force_native_root_translations(translations, export_scale):
 # Custom Property Storage
 # ============================================================================
 
-def _store_skeleton_properties(armature_obj, inv_matrices, translations):
+def _store_skeleton_properties(armature_obj, inv_matrices, translations,
+                               target_game='XML2'):
     """Store all IGB skeleton custom properties on the armature.
 
     This makes the armature compatible with the from-scratch skin exporter.
+    Uses the target game's skeleton definition (XML2=35 bones, MUA=49 bones).
     """
     import bpy
 
+    skeleton = get_skeleton_for_game(target_game)
+    joint_count = sum(1 for _, _, _, bm, _ in skeleton if bm >= 0)
+
     # Skeleton-level properties
     armature_obj["igb_skin_skeleton_name"] = ""
-    armature_obj["igb_skin_joint_count"] = XML2_JOINT_COUNT
-    armature_obj["igb_bone_count"] = len(XML2_SKELETON)
+    armature_obj["igb_skin_joint_count"] = joint_count
+    armature_obj["igb_bone_count"] = len(skeleton)
 
     # Bone translations (indexed by bone index)
-    armature_obj["igb_skin_bone_translations"] = json.dumps(translations)
+    # translations is a list from _compute_bone_translations (35 entries for XML2).
+    # For MUA, extend with zeros for FX bone indices (35-48).
+    n_skel = len(skeleton)
+    extended_trans = list(translations)  # copy
+    while len(extended_trans) < n_skel:
+        extended_trans.append([0.0, 0.0, 0.0])
+    armature_obj["igb_skin_bone_translations"] = json.dumps(extended_trans)
 
     # Inverse joint matrices (indexed by bone index)
-    armature_obj["igb_skin_inv_joint_matrices"] = json.dumps(inv_matrices)
+    # FX bones have bm_idx=-1 so they don't get inv_joint entries.
+    # Extend with None for FX bone indices.
+    extended_inv = list(inv_matrices)  # copy
+    while len(extended_inv) < n_skel:
+        extended_inv.append(None)
+    armature_obj["igb_skin_inv_joint_matrices"] = json.dumps(extended_inv)
 
     # Complete bone info list (the authoritative source for export)
     bone_info_list = []
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+    for name, idx, parent_idx, bm_idx, flags in skeleton:
         bone_info_list.append({
             'name': name,
             'index': idx,
@@ -1922,7 +2347,7 @@ def _store_skeleton_properties(armature_obj, inv_matrices, translations):
     armature_obj["igb_skin_bone_info_list"] = json.dumps(bone_info_list)
 
     # BMS palette: identity [0, 1, 2, ..., 31] for 32 deforming bones
-    bms_palette = list(range(XML2_JOINT_COUNT))
+    bms_palette = list(range(joint_count))
     armature_obj["igb_bms_palette"] = json.dumps(bms_palette)
 
     # Flag: rig was converted from non-XML2 convention.  The exporter uses
@@ -1932,7 +2357,7 @@ def _store_skeleton_properties(armature_obj, inv_matrices, translations):
     armature_obj["igb_converted_rig"] = True
 
     # Per-bone metadata on pose bones
-    for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
+    for name, idx, parent_idx, bm_idx, flags in skeleton:
         display_name = name if name else "Bone_000"
         if display_name in armature_obj.pose.bones:
             pb = armature_obj.pose.bones[display_name]
@@ -1941,3 +2366,6 @@ def _store_skeleton_properties(armature_obj, inv_matrices, translations):
             pb["igb_skin_bm_idx"] = bm_idx if bm_idx >= 0 else idx
             pb["igb_bm_idx"] = bm_idx if bm_idx >= 0 else idx
             pb["igb_flags"] = flags
+            # Tag FX bones for easy identification
+            if name in MUA_FX_BONE_NAMES:
+                pb["igb_fx_bone"] = True

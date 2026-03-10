@@ -319,7 +319,7 @@ def _lerp_vec3(a, b, t):
 # Encoder pipeline
 # ---------------------------------------------------------------------------
 def compress_enbaya(track_keyframes, duration, sample_rate=30,
-                    quantization_error=0.005):
+                    quantization_error=0.005, signature=0):
     """Compress animation keyframes to an enbaya blob.
 
     Args:
@@ -330,6 +330,8 @@ def compress_enbaya(track_keyframes, duration, sample_rate=30,
         sample_rate: Target sample rate in Hz (default 30).
         quantization_error: Precision parameter (default 0.005).  Smaller
             values → higher quality, larger blob.
+        signature: Game-specific signature for the enbaya header.
+            XML2 uses 0x10079C10, MUA uses 0x100A8BAC.  Default 0.
 
     Returns:
         ``bytes`` — the complete enbaya blob (header + sub-stream data).
@@ -376,7 +378,8 @@ def compress_enbaya(track_keyframes, duration, sample_rate=30,
     # 7. Assemble blob
     return _assemble_blob(
         num_tracks, qe_doubled, duration, sample_rate,
-        init_enc, track_enc, state_enc, flags_stream
+        init_enc, track_enc, state_enc, flags_stream,
+        signature=signature
     )
 
 
@@ -627,7 +630,8 @@ def _encode_streams(samples_per_track, num_tracks, num_samples,
 
 
 def _assemble_blob(num_tracks, qe_doubled, duration, sample_rate,
-                   init_enc, track_enc, state_enc, flags_stream):
+                   init_enc, track_enc, state_enc, flags_stream,
+                   signature=0):
     """Assemble the final enbaya blob.
 
     Physical layout in memory (matching decoder getter functions):
@@ -682,7 +686,7 @@ def _assemble_blob(num_tracks, qe_doubled, duration, sample_rate,
         'I'          # state_data_u32_length
         'I'          # track_flags_length
         'I',         # data (runtime pointer, set to 0)
-        0,                              # signature
+        signature,                      # signature
         num_tracks,                     # track_count
         qe_doubled,                     # quantization_error
         duration,                       # duration

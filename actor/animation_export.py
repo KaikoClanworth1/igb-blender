@@ -50,6 +50,22 @@ def _update_entry_mem_size(reader, writer, ref_index, new_size):
     writer.ref_info[ref_index]['mem_size'] = new_size
 
 
+def _update_object_long_field(writer, obj_index, slot, new_value):
+    """Update a Long (int64) field on a writer ObjectDef by slot number.
+
+    Sets raw_bytes to None to force re-serialization.
+    """
+    from ..igb_format.igb_writer import ObjectDef
+    writer_obj = writer.objects[obj_index]
+    if not isinstance(writer_obj, ObjectDef):
+        return
+    for i, (s, val, fd) in enumerate(writer_obj.raw_fields):
+        if fd.short_name == b"Long" and s == slot:
+            writer_obj.raw_fields[i] = (s, new_value, fd)
+            writer_obj.raw_bytes = None
+            return
+
+
 def export_animations(context, filepath, operator=None):
     """Export animations from the active armature to an IGB file.
 
@@ -198,6 +214,15 @@ def export_animations(context, filepath, operator=None):
         if success:
             matched_anims.add(anim_name)
             patched_count += 1
+
+            # Update igAnimation._duration from the Blender action's frame range
+            frame_range = action.frame_range  # (start, end)
+            action_duration_sec = (frame_range[1] - frame_range[0]) / fps if fps > 0 else 0
+            action_duration_ns = int(action_duration_sec * 1_000_000_000)
+            if action_duration_ns > 0:
+                _update_object_long_field(
+                    writer, anim_info['anim_obj_index'], 9, action_duration_ns
+                )
 
     # Phase 2: process each enbaya blob once with ALL its tracks merged
     enbaya_blobs_ok = 0
@@ -427,10 +452,10 @@ def _patch_animation(reader, writer, anim_info, action, armature_obj,
             keyframes, rest_q, rest_rot, bind_trans
         )
 
-        # Pack and patch the memory blocks
+        # Pack and patch the memory blocks + update duration/offset
         _patch_transform_sequence(
             reader, writer, quat_list_ref, xlate_list_ref, time_list_ref,
-            alchemy_keyframes, endian
+            alchemy_keyframes, endian, source_obj_idx
         )
         patched += 1
 
@@ -543,7 +568,8 @@ def _convert_keyframes_to_alchemy(keyframes, rest_q, rest_rot, bind_trans):
 
 
 def _patch_transform_sequence(reader, writer, quat_list_ref, xlate_list_ref,
-                              time_list_ref, alchemy_keyframes, endian):
+                              time_list_ref, alchemy_keyframes, endian,
+                              seq_obj_idx=None):
     """Patch igTransformSequence1_5 memory blocks with new keyframe data.
 
     Each list (quat, xlate, time) is stored as:
@@ -552,6 +578,8 @@ def _patch_transform_sequence(reader, writer, quat_list_ref, xlate_list_ref,
             slot: MemoryRef (raw data)
 
     We patch the MemoryRef data with new values and update the count.
+    Also updates _keyFrameTimeOffset (slot 17) and _animationDuration
+    (slot 18) on the igTransformSequence1_5 object if seq_obj_idx is given.
     """
     from ..igb_format.igb_objects import IGBObject, IGBMemoryBlock
     from ..igb_format.igb_writer import MemoryBlockDef
@@ -588,6 +616,17 @@ def _patch_transform_sequence(reader, writer, quat_list_ref, xlate_list_ref,
                              alchemy_keyframes,
                              lambda kf: struct.pack(endian + "q", kf[0]),
                              8, endian)
+
+    # Update _keyFrameTimeOffset (slot 17) and _animationDuration (slot 18)
+    # on the igTransformSequence1_5 object
+    if seq_obj_idx is not None and num_keys > 0:
+        first_time_ns = alchemy_keyframes[0][0]
+        last_time_ns = alchemy_keyframes[-1][0]
+        duration_ns = last_time_ns - first_time_ns
+        if duration_ns < 0:
+            duration_ns = 0
+        _update_object_long_field(writer, seq_obj_idx, 17, first_time_ns)
+        _update_object_long_field(writer, seq_obj_idx, 18, duration_ns)
 
 
 def _patch_data_list(reader, writer, list_obj, num_keys, keyframes,
@@ -692,13 +731,12 @@ def _patch_enbaya_blob(reader, writer, blob_ref, track_map, duration_ns,
         orig_header.quantization_error <= 0.5
     )
 
-    # Compute duration from action frame range or animation metadata
-    if duration_ns > 0:
-        duration_sec = duration_ns / 1_000_000_000.0
-    elif header_valid:
-        duration_sec = orig_header.duration
-    else:
-        duration_sec = 0.0
+    # Duration will be computed from Blender action frame range below.
+    # Template duration_ns and header duration serve only as fallbacks.
+    duration_sec = 0.0  # computed after frame range scan
+
+    # Preserve the game-specific signature from the template blob
+    orig_signature = orig_header.signature if header_valid else 0
 
     if header_valid:
         sample_rate = orig_header.sample_rate
@@ -732,12 +770,27 @@ def _patch_enbaya_blob(reader, writer, blob_ref, track_map, duration_ns,
                 if frame_end is None or fr > frame_end:
                     frame_end = fr
 
+    # Compute duration from Blender action frame range (preferred),
+    # falling back to template duration_ns, then original blob header.
+    if frame_start is not None and frame_end is not None and fps > 0:
+        duration_sec = (frame_end - frame_start) / fps
+    elif duration_ns > 0:
+        duration_sec = duration_ns / 1_000_000_000.0
+        frame_start = 0
+        frame_end = duration_sec * fps
+    elif header_valid:
+        duration_sec = orig_header.duration
+        frame_start = 0
+        frame_end = duration_sec * fps
+    else:
+        frame_start = 0
+        frame_end = max(1.0, fps / sample_rate)
+        duration_sec = 0.0
+
     if frame_start is None:
         frame_start = 0
-        frame_end = max(1.0, duration_sec * fps)
-    else:
-        if duration_sec <= 0 and fps > 0:
-            duration_sec = (frame_end - frame_start) / fps
+    if frame_end is None:
+        frame_end = max(1.0, fps / sample_rate)
 
     # Ensure duration is sane (at least 1 frame)
     if duration_sec <= 0:
@@ -814,6 +867,7 @@ def _patch_enbaya_blob(reader, writer, blob_ref, track_map, duration_ns,
             encoder_input, duration_sec,
             sample_rate=sample_rate,
             quantization_error=qe_orig,
+            signature=orig_signature,
         )
     except Exception as exc:
         _log.error("Enbaya compression failed for blob %d: %s", blob_ref, exc)
