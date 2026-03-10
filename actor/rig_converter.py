@@ -429,6 +429,118 @@ for _k, _v in list(_UNITY_DIRECT.items()):
     _under = re.sub(r'([a-z])([A-Z])', r'\1_\2', _k).lower()
     ALIAS_TO_XML2.setdefault(_under, _v)
 
+# ---- Descriptive naming convention (e.g., "arm left shoulder 1") ----
+# After normalization, spaces → underscores, first letter capitalized per segment.
+# "arm left shoulder 1" → "arm_left_shoulder_1" (lowered).
+_DESCRIPTIVE_DIRECT = {
+    # Center bones
+    'root pelvis': 'Bip01 Pelvis',
+    'root_pelvis': 'Bip01 Pelvis',
+    'spine lower': 'Bip01 Spine',
+    'spine_lower': 'Bip01 Spine',
+    'spine middle': 'Bip01 Spine1',
+    'spine_middle': 'Bip01 Spine1',
+    'spine upper': 'Bip01 Spine2',
+    'spine_upper': 'Bip01 Spine2',
+    'head neck lower': 'Bip01 Neck',
+    'head_neck_lower': 'Bip01 Neck',
+    'head neck upper': 'Bip01 Head',
+    'head_neck_upper': 'Bip01 Head',
+    # Arms (sided)
+    'arm left shoulder 1': 'Bip01 L Clavicle',
+    'arm_left_shoulder_1': 'Bip01 L Clavicle',
+    'arm right shoulder 1': 'Bip01 R Clavicle',
+    'arm_right_shoulder_1': 'Bip01 R Clavicle',
+    'arm left shoulder 2': 'Bip01 L UpperArm',
+    'arm_left_shoulder_2': 'Bip01 L UpperArm',
+    'arm right shoulder 2': 'Bip01 R UpperArm',
+    'arm_right_shoulder_2': 'Bip01 R UpperArm',
+    'arm left elbow': 'Bip01 L Forearm',
+    'arm_left_elbow': 'Bip01 L Forearm',
+    'arm right elbow': 'Bip01 R Forearm',
+    'arm_right_elbow': 'Bip01 R Forearm',
+    'arm left wrist': 'Bip01 L Hand',
+    'arm_left_wrist': 'Bip01 L Hand',
+    'arm right wrist': 'Bip01 R Hand',
+    'arm_right_wrist': 'Bip01 R Hand',
+    # Legs (sided)
+    'leg left thigh': 'Bip01 L Thigh',
+    'leg_left_thigh': 'Bip01 L Thigh',
+    'leg right thigh': 'Bip01 R Thigh',
+    'leg_right_thigh': 'Bip01 R Thigh',
+    'leg left knee': 'Bip01 L Calf',
+    'leg_left_knee': 'Bip01 L Calf',
+    'leg right knee': 'Bip01 R Calf',
+    'leg_right_knee': 'Bip01 R Calf',
+    'leg left ankle': 'Bip01 L Foot',
+    'leg_left_ankle': 'Bip01 L Foot',
+    'leg right ankle': 'Bip01 R Foot',
+    'leg_right_ankle': 'Bip01 R Foot',
+    'leg left toes': 'Bip01 L Toe0',
+    'leg_left_toes': 'Bip01 L Toe0',
+    'leg right toes': 'Bip01 R Toe0',
+    'leg_right_toes': 'Bip01 R Toe0',
+    # Thumb (finger 1): proximal → Finger0, intermediate → Finger01
+    'arm left finger 1a': 'Bip01 L Finger0',
+    'arm_left_finger_1a': 'Bip01 L Finger0',
+    'arm right finger 1a': 'Bip01 R Finger0',
+    'arm_right_finger_1a': 'Bip01 R Finger0',
+    'arm left finger 1b': 'Bip01 L Finger01',
+    'arm_left_finger_1b': 'Bip01 L Finger01',
+    'arm right finger 1b': 'Bip01 R Finger01',
+    'arm_right_finger_1b': 'Bip01 R Finger01',
+    # Middle finger (finger 3): proximal → Finger1, intermediate → Finger11
+    'arm left finger 3a': 'Bip01 L Finger1',
+    'arm_left_finger_3a': 'Bip01 L Finger1',
+    'arm right finger 3a': 'Bip01 R Finger1',
+    'arm_right_finger_3a': 'Bip01 R Finger1',
+    'arm left finger 3b': 'Bip01 L Finger11',
+    'arm_left_finger_3b': 'Bip01 L Finger11',
+    'arm right finger 3b': 'Bip01 R Finger11',
+    'arm_right_finger_3b': 'Bip01 R Finger11',
+}
+for _k, _v in _DESCRIPTIVE_DIRECT.items():
+    ALIAS_TO_XML2.setdefault(_k.lower(), _v)
+
+# Descriptive naming: merge targets (weights fold into nearest XML2 bone)
+_DESCRIPTIVE_MERGE = {}
+for _side in ('left', 'right'):
+    _s = 'L' if _side == 'left' else 'R'
+    # Thumb distal → Finger01
+    for _var in (f'arm {_side} finger 1c', f'arm_{_side}_finger_1c'):
+        _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Finger01'
+    # Middle finger metacarpal + distal → Finger1 / Finger11
+    for _var in (f'arm {_side} finger 3', f'arm_{_side}_finger_3'):
+        _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Finger1'
+    for _var in (f'arm {_side} finger 3c', f'arm_{_side}_finger_3c'):
+        _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Finger11'
+    # Index (finger 2), ring (finger 4), pinky (finger 5) → merge to Finger1/Finger11
+    for _fnum in ('2', '4', '5'):
+        for _var in (f'arm {_side} finger {_fnum}', f'arm_{_side}_finger_{_fnum}',
+                     f'arm {_side} finger {_fnum}a', f'arm_{_side}_finger_{_fnum}a'):
+            _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Finger1'
+        for _var in (f'arm {_side} finger {_fnum}b', f'arm_{_side}_finger_{_fnum}b',
+                     f'arm {_side} finger {_fnum}c', f'arm_{_side}_finger_{_fnum}c'):
+            _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Finger11'
+    # Thigh adjustment bones → merge to Thigh
+    for _var in (f'leg {_side} thigh adj. 1', f'leg_{_side}_thigh_adj._1',
+                 f'leg {_side} thigh adj 1', f'leg_{_side}_thigh_adj_1'):
+        _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Thigh'
+    # Elbow adjustment → merge to Forearm
+    for _var in (f'unused arm {_side} elbow adj. 2', f'unused_arm_{_side}_elbow_adj._2',
+                 f'unused arm {_side} elbow adj 2', f'unused_arm_{_side}_elbow_adj_2'):
+        _DESCRIPTIVE_MERGE[_var] = f'Bip01 {_s} Forearm'
+
+# Facial bones → merge to Head (base names + left/right variants)
+for _face_base in ['head eyeball', 'head cheek', 'head eyebrow', 'head eyelid',
+                   'head lip', 'head nose', 'head jaw', 'head lip upper',
+                   'head lip lower', 'head lip corner']:
+    _DESCRIPTIVE_MERGE[_face_base] = 'Bip01 Head'
+    for _side_suffix in (' left', ' right', '_left', '_right'):
+        _DESCRIPTIVE_MERGE[_face_base + _side_suffix] = 'Bip01 Head'
+
+# (Descriptive merge targets registered later, after MERGE_WEIGHT_TARGETS is defined)
+
 # ---- Legacy compat: keep UNITY_TO_XML2 as an alias for the new mapping ----
 UNITY_TO_XML2 = ALIAS_TO_XML2
 
@@ -555,6 +667,10 @@ _UNITY_MERGE_DIRECT = {
 }
 for _k, _v in _UNITY_MERGE_DIRECT.items():
     MERGE_WEIGHT_TARGETS.setdefault(_k, _v)
+
+# Register descriptive naming merge targets (defined earlier, registered here)
+for _k, _v in _DESCRIPTIVE_MERGE.items():
+    MERGE_WEIGHT_TARGETS.setdefault(_k.lower(), _v)
 
 # Mixamo prefix (kept for legacy detection)
 MIXAMO_PREFIX = "mixamorig:"
@@ -899,6 +1015,20 @@ def build_merge_map(armature_obj, profile=None, rename_map=None):
 
         if 'breast' in lower_name or 'bust' in lower_name:
             merge_map[bone.name] = "Bip01 Spine2"
+            continue
+
+        # Tentacle / tail / cape chains → merge to Pelvis (root of body)
+        if ('tentacle' in lower_name or 'tail' in lower_name
+                or 'cape' in lower_name):
+            merge_map[bone.name] = "Bip01 Pelvis"
+            continue
+
+        # Weapon attachment bones → merge to nearest hand
+        if 'weapon' in lower_name:
+            if 'right' in lower_name or '_r' in lower_name:
+                merge_map[bone.name] = "Bip01 R Hand"
+            else:
+                merge_map[bone.name] = "Bip01 L Hand"
             continue
 
     return merge_map
