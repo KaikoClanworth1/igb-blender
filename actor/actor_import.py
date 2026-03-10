@@ -208,6 +208,23 @@ def _import_skin_file(context, filepath, skeleton, armature_obj,
     collector = _SkinGeometryCollector(reader, profile)
     sg.walk(collector)
 
+    # v4 actor files (3ds Max 5 / Alchemy 2.5) have igSceneInfo whose root
+    # contains the animation tree (igActor → igAppearance), NOT the mesh
+    # geometry.  Mesh geometry lives under igSkin._skinnedGraph instead.
+    # When the normal scene graph walk finds nothing, explicitly walk from
+    # igSkin._skinnedGraph as a fallback.
+    if not collector.instances:
+        from ..igb_format.igb_objects import IGBObject as _IGBObj
+        for skin_obj in reader.get_objects_by_type(b"igSkin"):
+            for _slot, _val, _fi in skin_obj._raw_fields:
+                if _fi.short_name == b"ObjectRef" and _val != -1:
+                    _ref = reader.resolve_ref(_val)
+                    if isinstance(_ref, _IGBObj) and _ref.is_type(b"igNode"):
+                        sg.walk(collector, node=_ref)
+                        break
+            if collector.instances:
+                break
+
     if not collector.instances:
         return None
 
