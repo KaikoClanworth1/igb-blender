@@ -224,7 +224,7 @@ register_profile(GameProfile(
     game_id="xml2_pc",
     game_name="X-Men Legends 2 (PC)",
     engine_version="Alchemy 2.5/3.2",
-    min_version=5,
+    min_version=4,
     max_version=7,
     expected_endian="little",
     geometry=GeometryConfig(

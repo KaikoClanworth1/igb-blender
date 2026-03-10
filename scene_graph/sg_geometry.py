@@ -347,23 +347,26 @@ def _extract_vertex_data(reader, va_obj, geom, endian, profile=None):
 def _resolve_ext_indexed(reader, mem_block, endian):
     """Resolve an igExternalIndexedEntry to a dict of slot -> IGBMemoryBlock.
 
-    The 80-byte entry has 20 uint32 slots. Non-0xFFFFFFFF values are indices
-    to memory blocks. Returns {slot_number: IGBMemoryBlock}.
+    The entry has N uint32 slots (v4/v5: 19 slots = 76 bytes, v6+: 20 slots
+    = 80 bytes). Non-0xFFFFFFFF values are indices to memory blocks. Returns
+    {slot_number: IGBMemoryBlock}.
 
     Note: Some platforms (e.g. Wii v8) assign a different mem_type_name
     (b'igImage') to ext indexed entries. We validate structurally: the block
-    must be exactly 80 bytes and contain at least one valid slot referencing
-    a memory block, with all other entries being either valid references or
-    0xFFFFFFFF (empty).
+    must be a multiple of 4 bytes (76 or 80) and contain at least one valid
+    slot referencing a memory block, with all other entries being either valid
+    references or 0xFFFFFFFF (empty).
     """
-    if mem_block.mem_size != 80:
+    # v4/v5: 19 slots (76 bytes), v6+: 20 slots (80 bytes)
+    if mem_block.mem_size not in (76, 80):
         return None
-    if mem_block.data is None or len(mem_block.data) < 80:
+    if mem_block.data is None or len(mem_block.data) < mem_block.mem_size:
         return None
 
+    num_slots = mem_block.mem_size // 4
     slots = {}
     invalid_count = 0
-    for i in range(20):
+    for i in range(num_slots):
         idx = struct.unpack_from(endian + "I", mem_block.data, i * 4)[0]
         if idx == 0xFFFFFFFF:
             continue  # empty slot
