@@ -147,7 +147,7 @@ class ACTOR_PT_Import(Panel):
                 if target_game == 'MUA':
                     info_text += f", {fx_count} FX"
                 box.label(text=info_text, icon='BONE_DATA')
-                box.label(text=f"Target: {target_game}", icon='GAME')
+                box.label(text=f"Target: {target_game}", icon='SCENE')
 
                 box.operator("actor.setup_skin", text="Re-setup Skin",
                              icon='FILE_REFRESH')
