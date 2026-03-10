@@ -46,6 +46,12 @@ def import_actor(context, anim_filepath, skin_filepaths=None,
     if options is None:
         options = {}
 
+    # Clear material/image caches from any previous import.
+    # Critical for undo+reconvert: Python module-level caches survive Blender's
+    # undo, leaving stale Material/Image references that cause texture loss.
+    from ..importer.material_builder import clear_caches
+    clear_caches()
+
     t0 = time.perf_counter()
 
     # ---- 1. Parse animation file ----

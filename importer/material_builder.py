@@ -91,7 +91,14 @@ def build_material(parsed_material, parsed_texture=None,
 
     cache_key = (mat_idx, tex_idx, extra_key)
     if cache_key in _material_cache:
-        return _material_cache[cache_key]
+        cached_mat = _material_cache[cache_key]
+        try:
+            # Validate the reference is still alive (survives undo)
+            _ = cached_mat.name
+            return cached_mat
+        except ReferenceError:
+            # Stale reference from a previous undo — discard it
+            del _material_cache[cache_key]
 
     # --- Determine blend mode BEFORE building the node tree ---
     # Alchemy IGB materials have explicit state attrs that control transparency.
@@ -580,7 +587,12 @@ def build_igz_multitex_material(parsed_material, texture_role_map,
     cache_key = ('igz_mt', mat_idx, tuple(role_keys),
                  tuple(extra_key_parts) if extra_key_parts else ())
     if cache_key in _material_cache:
-        return _material_cache[cache_key]
+        cached_mat = _material_cache[cache_key]
+        try:
+            _ = cached_mat.name
+            return cached_mat
+        except ReferenceError:
+            del _material_cache[cache_key]
 
     # --- Blend decision ---
     # For IGZ, build a minimal ParsedTexture for blend heuristics from diffuse

@@ -853,6 +853,15 @@ def _extract_image_rgba(bl_image, w, h):
     Returns:
         (rgba_bytes, final_w, final_h) tuple.
     """
+    # Ensure pixel data is loaded. After undo, Blender may have unloaded
+    # the pixel buffer from memory. For file-backed images, reload() will
+    # re-read from disk. For packed images, the data is already in memory.
+    if bl_image.filepath and not bl_image.packed_file:
+        try:
+            bl_image.reload()
+        except RuntimeError:
+            pass  # File might not exist; pixels.foreach_get will give zeros
+
     try:
         import numpy as np
         return _extract_image_rgba_numpy(bl_image, w, h, np)
