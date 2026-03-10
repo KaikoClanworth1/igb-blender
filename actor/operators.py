@@ -39,6 +39,18 @@ def _discover_skin_files(anim_filepath, game_dir=""):
                             name = f"skin_{variant}" if variant != "01" else "default"
                             skin_filepaths.append((name, path))
 
+    if not skin_filepaths:
+        # Monolithic files (v4 from 3ds Max 5 / Alchemy 2.5) contain skeleton,
+        # animation, AND mesh in a single IGB.  Use the anim file itself as skin.
+        try:
+            from ..igb_format.igb_reader import IGBReader
+            reader = IGBReader(anim_filepath)
+            reader.read()
+            if reader.get_objects_by_type(b"igSkin"):
+                skin_filepaths.append(("default", anim_filepath))
+        except Exception:
+            pass
+
     return skin_filepaths
 
 
