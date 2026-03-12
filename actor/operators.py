@@ -2113,6 +2113,130 @@ class ACTOR_OT_export_anim_from_scratch(Operator, ExportHelper):
         return {'RUNNING_MODAL'}
 
 
+class ACTOR_OT_convert_animation(Operator, ExportHelper):
+    """Convert animation from any rig to XML2/MUA IGB (non-destructive)"""
+    bl_idname = "actor.convert_animation"
+    bl_label = "Convert Animation to IGB"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".igb"
+
+    filter_glob: StringProperty(
+        default="*.igb",
+        options={'HIDDEN'},
+    )
+
+    anim_name: StringProperty(
+        name="Animation Name",
+        description="Name for the animation in the IGB file",
+        default="idle",
+    )
+
+    game_preset: EnumProperty(
+        name="Game",
+        items=[
+            ('xml2', "XML2", "X-Men Legends II"),
+            ('mua', "MUA", "Marvel Ultimate Alliance"),
+        ],
+        default='xml2',
+    )
+
+    reference_igb: StringProperty(
+        name="Reference IGB",
+        description="Path to any game animation IGB (for format schema)",
+        subtype='FILE_PATH',
+    )
+
+    scale_mode: EnumProperty(
+        name="Scale",
+        items=[
+            ('AUTO', "Auto-detect", "Auto-detect from skeleton proportions"),
+            ('CUSTOM', "Custom", "Use a custom scale factor"),
+        ],
+        default='AUTO',
+    )
+
+    custom_scale: FloatProperty(
+        name="Scale Factor",
+        description="Custom scale multiplier (source * factor = game units)",
+        default=1.0,
+        min=0.001,
+        max=10000.0,
+    )
+
+    sample_rate: IntProperty(
+        name="Sample Rate",
+        description="Samples per second for animation baking",
+        default=30,
+        min=1,
+        max=120,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'ARMATURE'
+                and obj.animation_data is not None
+                and obj.animation_data.action is not None)
+
+    def execute(self, context):
+        from .anim_converter import convert_animation
+
+        obj = context.active_object
+        action = obj.animation_data.action
+
+        # Resolve reference IGB
+        ref_path = self.reference_igb
+        if not ref_path or not os.path.exists(ref_path):
+            ref_path = obj.get("igb_anim_file", "")
+        if not ref_path or not os.path.exists(ref_path):
+            # Try to find any IGB in the game actors folder
+            self.report({'ERROR'},
+                        "Reference IGB required. Provide a path to any game "
+                        "animation .igb file for format schema extraction.")
+            return {'CANCELLED'}
+
+        scale = None if self.scale_mode == 'AUTO' else self.custom_scale
+
+        try:
+            result = convert_animation(
+                context, obj, action, self.filepath,
+                game=self.game_preset,
+                reference_path=ref_path,
+                anim_name=self.anim_name,
+                scale_factor=scale,
+                sample_rate=self.sample_rate,
+            )
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Conversion failed: {exc}")
+            return {'CANCELLED'}
+
+        size = os.path.getsize(self.filepath)
+        self.report({'INFO'},
+                    f"Converted '{self.anim_name}' to "
+                    f"{os.path.basename(self.filepath)} ({size} bytes)")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        obj = context.active_object
+        if obj and obj.animation_data and obj.animation_data.action:
+            action = obj.animation_data.action
+            self.anim_name = action.get("igb_anim_name", action.name)
+
+            # Default output path
+            ref_path = obj.get("igb_anim_file", "")
+            if ref_path and os.path.exists(ref_path):
+                self.reference_igb = ref_path
+                dirname = os.path.dirname(ref_path)
+                safe_name = self.anim_name.replace(" ", "_")
+                self.filepath = os.path.join(dirname, f"{safe_name}_conv.igb")
+
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
 _classes = (
     ACTOR_OT_import_actor,
     ACTOR_OT_import_skin,
@@ -2141,6 +2265,7 @@ _classes = (
     ACTOR_OT_setup_vmc4b,
     ACTOR_OT_cleanup_vmc,
     ACTOR_OT_export_anim_from_scratch,
+    ACTOR_OT_convert_animation,
 )
 
 

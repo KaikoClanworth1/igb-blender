@@ -591,6 +591,72 @@ class ACTOR_PT_VMC(Panel):
                       icon='FILE_NEW')
 
 
+class ACTOR_PT_AnimConverter(Panel):
+    """Convert animations from any rig to XML2/MUA IGB"""
+    bl_label = "Animation Converter"
+    bl_idname = "ACTOR_PT_AnimConverter"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "IGB Actors"
+    bl_parent_id = "ACTOR_PT_Main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'ARMATURE'
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+
+        # Rig analysis
+        from .rig_converter import build_rename_map
+        bone_mapping = build_rename_map(obj)
+
+        box = layout.box()
+        box.label(text="Rig Analysis", icon='BONE_DATA')
+        box.label(text=f"Source bones: {len(obj.data.bones)}")
+        box.label(text=f"Mapped to XML2: {len(bone_mapping)}")
+
+        if bone_mapping:
+            mapped = set(bone_mapping.values())
+            row = box.row()
+            row.label(text="Spine",
+                      icon='CHECKMARK' if 'Bip01 Spine' in mapped else 'X')
+            row.label(text="Arms",
+                      icon='CHECKMARK' if ('Bip01 L UpperArm' in mapped
+                                           and 'Bip01 R UpperArm' in mapped)
+                      else 'X')
+            row.label(text="Legs",
+                      icon='CHECKMARK' if ('Bip01 L Thigh' in mapped
+                                           and 'Bip01 R Thigh' in mapped)
+                      else 'X')
+
+        # Action info
+        if (obj.animation_data and obj.animation_data.action):
+            action = obj.animation_data.action
+            box = layout.box()
+            box.label(text=f"Action: {action.name}", icon='ACTION')
+            fr = action.frame_range
+            fps = context.scene.render.fps
+            dur = (fr[1] - fr[0]) / fps if fps > 0 else 0
+            box.label(text=f"Duration: {dur:.2f}s ({int(fr[1] - fr[0])} frames)")
+        else:
+            layout.label(text="No active animation", icon='INFO')
+
+        # Convert button
+        layout.separator()
+        row = layout.row(align=True)
+        row.scale_y = 1.3
+        row.operator("actor.convert_animation",
+                     text="Convert to IGB",
+                     icon='EXPORT')
+        row.enabled = (len(bone_mapping) >= 3
+                       and obj.animation_data is not None
+                       and obj.animation_data.action is not None)
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -605,6 +671,7 @@ _classes = (
     ACTOR_PT_Animations,
     ACTOR_PT_Materials,
     ACTOR_PT_VMC,
+    ACTOR_PT_AnimConverter,
 )
 
 
