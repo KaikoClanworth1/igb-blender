@@ -355,6 +355,231 @@ PROPERTY_SCHEMAS = {
             },
         ],
     },
+    'affectableharment': {
+        'sections': [
+            {
+                'label': "Harm Area",
+                'icon': 'ERROR',
+                'properties': [
+                    {'key': 'dmg', 'type': 'int', 'default': '10',
+                     'label': "Damage", 'desc': "Damage per tick"},
+                    {'key': 'dmgradius', 'type': 'int', 'default': '50',
+                     'label': "Damage Radius", 'desc': "Area of effect radius"},
+                    {'key': 'dmgtype', 'type': 'enum', 'default': '',
+                     'items': ['', 'fire', 'ice', 'electric', 'radiation', 'psychic', 'physical'],
+                     'label': "Damage Type"},
+                    {'key': 'boxcollision', 'type': 'bool', 'default': 'true',
+                     'label': "Box Collision"},
+                ],
+            },
+        ],
+    },
+    'enabletargetent': {
+        'sections': [
+            {
+                'label': "Enable/Disable",
+                'icon': 'CHECKBOX_HLT',
+                'properties': [
+                    {'key': 'startenabled', 'type': 'bool', 'default': 'true',
+                     'label': "Start Enabled", 'desc': "Entity starts enabled"},
+                    {'key': 'target', 'type': 'string', 'default': '',
+                     'label': "Target", 'desc': "Name of entity to enable/disable"},
+                ],
+            },
+        ],
+    },
+    'tileent': {
+        'sections': [
+            {
+                'label': "Breakable Tile",
+                'icon': 'MESH_GRID',
+                'properties': [
+                    {'key': 'tilemodelfolder', 'type': 'string', 'default': '',
+                     'label': "Model Folder", 'desc': "Folder containing tile model variants"},
+                    {'key': 'health', 'type': 'int', 'default': '100',
+                     'label': "Health", 'desc': "Tile health before breaking"},
+                    {'key': 'structure', 'type': 'enum', 'default': '1',
+                     'items': ['0', '1', '2', '3'],
+                     'label': "Structure", 'desc': "Structure tier"},
+                ],
+            },
+        ],
+    },
+    'waypointent': {
+        'sections': [
+            {
+                'label': "Waypoint",
+                'icon': 'CURVE_PATH',
+                'properties': [
+                    {'key': 'nextwaypoint', 'type': 'string', 'default': '',
+                     'label': "Next Waypoint", 'desc': "Name of next waypoint in chain"},
+                ],
+            },
+        ],
+    },
+    'rememberent': {
+        'sections': [
+            {
+                'label': "State Persistence",
+                'icon': 'FILE_CACHE',
+                'properties': [
+                    {'key': 'statename', 'type': 'string', 'default': '',
+                     'label': "State Name", 'desc': "Persistent state variable name"},
+                ],
+            },
+        ],
+    },
+    'projectileent': {
+        'sections': [
+            {
+                'label': "Projectile",
+                'icon': 'EMPTY_SINGLE_ARROW',
+                'properties': [
+                    {'key': 'speed', 'type': 'int', 'default': '500',
+                     'label': "Speed", 'desc': "Projectile speed"},
+                    {'key': 'dmg', 'type': 'int', 'default': '10',
+                     'label': "Damage"},
+                    {'key': 'dmgtype', 'type': 'enum', 'default': '',
+                     'items': ['', 'fire', 'ice', 'electric', 'radiation', 'psychic', 'physical'],
+                     'label': "Damage Type"},
+                ],
+            },
+        ],
+    },
+    'harmtargetent': {
+        'sections': [
+            {
+                'label': "Harm Target",
+                'icon': 'ERROR',
+                'properties': [
+                    {'key': 'harmdamage', 'type': 'int', 'default': '10',
+                     'label': "Damage", 'desc': "Damage dealt to targets"},
+                    {'key': 'harmradius', 'type': 'int', 'default': '50',
+                     'label': "Radius", 'desc': "Harm effect radius"},
+                ],
+            },
+        ],
+    },
+    # --- MUA-only classnames ---
+    'interactent': {
+        'sections': [
+            {
+                'label': "Interaction",
+                'icon': 'HAND',
+                'properties': [
+                    {'key': 'actonuse', 'type': 'bool', 'default': 'true',
+                     'label': "On Use", 'desc': "Activate when interacted with"},
+                    {'key': 'actscript', 'type': 'string', 'default': '',
+                     'label': "Act Script", 'desc': "Script to run on interaction"},
+                    {'key': 'boxcollision', 'type': 'bool', 'default': 'true',
+                     'label': "Box Collision"},
+                ],
+            },
+        ],
+    },
+    'pressureplateent': {
+        'sections': [
+            {
+                'label': "Pressure Plate",
+                'icon': 'MESH_PLANE',
+                'properties': [
+                    {'key': 'actscript', 'type': 'string', 'default': '',
+                     'label': "Act Script", 'desc': "Script to run when triggered"},
+                    {'key': 'boxcollision', 'type': 'bool', 'default': 'true',
+                     'label': "Box Collision"},
+                    {'key': 'team', 'type': 'enum', 'default': 'hero',
+                     'items': ['hero', 'enemy', 'neutral'],
+                     'label': "Team"},
+                ],
+            },
+        ],
+    },
+    'ropeent': {
+        'sections': [
+            {
+                'label': "Rope",
+                'icon': 'CURVE_BEZCURVE',
+                'properties': [
+                    {'key': 'ropelength', 'type': 'int', 'default': '200',
+                     'label': "Length", 'desc': "Rope length in game units"},
+                    {'key': 'ropespeed', 'type': 'int', 'default': '100',
+                     'label': "Swing Speed", 'desc': "Swing speed"},
+                ],
+            },
+        ],
+    },
+    'orbent': {
+        'sections': [
+            {
+                'label': "Orb",
+                'icon': 'SPHERE',
+                'properties': [
+                    {'key': 'orbtype', 'type': 'enum', 'default': 'health',
+                     'items': ['health', 'energy', 'xtreme', 'shield'],
+                     'label': "Orb Type", 'desc': "What the orb restores"},
+                    {'key': 'orbvalue', 'type': 'int', 'default': '10',
+                     'label': "Value", 'desc': "Amount restored on pickup"},
+                ],
+            },
+        ],
+    },
+    'laserent': {
+        'sections': [
+            {
+                'label': "Laser",
+                'icon': 'LIGHT_AREA',
+                'properties': [
+                    {'key': 'dmg', 'type': 'int', 'default': '10',
+                     'label': "Damage", 'desc': "Damage on contact"},
+                    {'key': 'dmgtype', 'type': 'enum', 'default': 'electric',
+                     'items': ['', 'fire', 'ice', 'electric', 'radiation'],
+                     'label': "Damage Type"},
+                ],
+            },
+        ],
+    },
+    'holdent': {
+        'sections': [
+            {
+                'label': "Hold Point",
+                'icon': 'PINNED',
+                'properties': [
+                    {'key': 'holdtime', 'type': 'int', 'default': '0',
+                     'label': "Hold Time", 'desc': "Seconds AI holds position (0 = indefinite)"},
+                ],
+            },
+        ],
+    },
+    'challengeent': {
+        'sections': [
+            {
+                'label': "Challenge",
+                'icon': 'TROPHY',
+                'properties': [
+                    {'key': 'challengetype', 'type': 'string', 'default': '',
+                     'label': "Challenge Type", 'desc': "Type of challenge"},
+                    {'key': 'actscript', 'type': 'string', 'default': '',
+                     'label': "Act Script", 'desc': "Script to run for challenge"},
+                ],
+            },
+        ],
+    },
+    'guidedprojectileent': {
+        'sections': [
+            {
+                'label': "Guided Projectile",
+                'icon': 'EMPTY_SINGLE_ARROW',
+                'properties': [
+                    {'key': 'speed', 'type': 'int', 'default': '300',
+                     'label': "Speed", 'desc': "Projectile speed"},
+                    {'key': 'turnrate', 'type': 'int', 'default': '90',
+                     'label': "Turn Rate", 'desc': "Degrees per second turning"},
+                    {'key': 'dmg', 'type': 'int', 'default': '20',
+                     'label': "Damage"},
+                ],
+            },
+        ],
+    },
 }
 
 

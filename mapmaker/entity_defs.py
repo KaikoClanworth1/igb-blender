@@ -27,6 +27,15 @@ ENTITY_CLASSNAMES = [
     ('rememberent', "Remember", "State persistence entity"),
     ('actor', "Actor", "NPC actor (cutscene/scripted)"),
     ('ent', "Null", "Empty/null entity"),
+    # --- MUA-only classnames ---
+    ('challengeent', "Challenge", "Challenge mode trigger (MUA)"),
+    ('holdent', "Hold", "Hold position entity (MUA)"),
+    ('interactent', "Interact", "Interactive object (MUA)"),
+    ('laserent', "Laser", "Laser beam entity (MUA)"),
+    ('orbent', "Orb", "Collectible orb (MUA)"),
+    ('pressureplateent', "Pressure Plate", "Pressure plate trigger (MUA)"),
+    ('ropeent', "Rope", "Rope/swing entity (MUA)"),
+    ('guidedprojectileent', "Guided Projectile", "Guided projectile entity (MUA)"),
 ]
 
 # Precache type options
@@ -66,6 +75,15 @@ ENTITY_VISUALS = {
     'rememberent':       ('PLAIN_AXES',   (0.4, 0.4, 0.6, 1.0)),   # Muted blue-gray
     'actor':             ('SINGLE_ARROW', (0.2, 0.7, 0.3, 1.0)),   # Green
     'ent':               ('PLAIN_AXES',   (0.7, 0.7, 0.7, 1.0)),   # Light gray
+    # MUA-only
+    'challengeent':      ('PLAIN_AXES',   (0.9, 0.6, 0.1, 1.0)),   # Amber
+    'holdent':           ('PLAIN_AXES',   (0.4, 0.6, 0.8, 1.0)),   # Steel blue
+    'interactent':       ('CUBE',         (0.3, 0.8, 0.5, 1.0)),   # Mint
+    'laserent':          ('SINGLE_ARROW', (1.0, 0.2, 0.2, 1.0)),   # Bright red
+    'orbent':            ('SPHERE',       (0.8, 0.6, 1.0, 1.0)),   # Lavender
+    'pressureplateent':  ('CUBE',         (0.6, 0.5, 0.3, 1.0)),   # Tan
+    'ropeent':           ('ARROWS',       (0.5, 0.4, 0.2, 1.0)),   # Brown
+    'guidedprojectileent': ('SINGLE_ARROW', (0.8, 0.2, 0.5, 1.0)), # Magenta-red
 }
 
 # Default empty display size for entity empties
@@ -129,6 +147,51 @@ ENTITY_DEFAULTS = {
     },
     'waypointent': {},
     'ent': {},
+    'tileent': {
+        'health': '100',
+        'structure': '1',
+        'nogravity': 'true',
+    },
+    'inventoryent': {
+        'invtype': 'health',
+        'invcount': '25',
+    },
+    'treasureent': {
+        'treasuretype': 'comic',
+    },
+    'affectableharment': {
+        'boxcollision': 'true',
+        'dmg': '10',
+        'dmgradius': '50',
+    },
+    'moverent': {
+        'speed': '100',
+        'nogravity': 'true',
+        'nopickup': 'true',
+        'nopush': 'true',
+    },
+    'scripttriggerent': {
+        'actontouch': 'true',
+        'boxcollision': 'true',
+        'team': 'hero',
+    },
+    'powertriggerent': {
+        'boxcollision': 'true',
+    },
+    'waterent': {
+        'boxcollision': 'true',
+    },
+    # MUA-only
+    'interactent': {
+        'actonuse': 'true',
+        'boxcollision': 'true',
+    },
+    'pressureplateent': {
+        'boxcollision': 'true',
+    },
+    'orbent': {
+        'orbtype': 'health',
+    },
 }
 
 
@@ -337,6 +400,361 @@ ENTITY_PRESETS = [
             'smartent': 'true',
         },
     ),
+    # --- Triggers & Zones ---
+    (
+        'use_trigger', "Use Trigger", "Invisible trigger activated by pressing Use",
+        'gameent',
+        {'nocollide': False},
+        {
+            'actonuse': 'true',
+            'actleader': 'true',
+            'actmatchteam': 'true',
+            'boxcollision': 'true',
+            'team': 'hero',
+        },
+    ),
+    (
+        'script_trigger', "Script Trigger", "Area trigger that runs a BehavEd script",
+        'scripttriggerent',
+        {'nocollide': False},
+        {
+            'actontouch': 'true',
+            'boxcollision': 'true',
+            'team': 'hero',
+        },
+    ),
+    (
+        'kill_trigger', "Kill Trigger", "Removes entity count on touch (one-shot)",
+        'gameent',
+        {'nocollide': False},
+        {
+            'actcountremove': '1',
+            'actontouch': 'true',
+            'boxcollision': 'true',
+            'team': 'hero',
+        },
+    ),
+    (
+        'power_trigger_preset', "Power Trigger", "Trigger that requires a specific superpower",
+        'powertriggerent',
+        {'nocollide': False},
+        {
+            'boxcollision': 'true',
+        },
+    ),
+    (
+        'camera_zone', "Camera Zone", "Camera magnet control zone",
+        'cameramagnetent',
+        {'nocollide': False},
+        {
+            'actleader': 'true',
+            'actmatchteam': 'true',
+            'boxcollision': 'true',
+            'cameramagtype': '0',
+            'team': 'hero',
+        },
+    ),
+    # --- Enemies & NPCs ---
+    (
+        'enemy_basic', "Enemy (Basic)", "Melee enemy spawner",
+        'monsterspawnerent',
+        {'nocollide': True},
+        {
+            'actcountremove': '1',
+            'checkteam': 'true',
+            'instantspawn': 'true',
+            'monster_spawnexactlocation': 'true',
+        },
+    ),
+    (
+        'enemy_ranged', "Enemy (Ranged)", "Ranged enemy spawner",
+        'monsterspawnerent',
+        {'nocollide': True},
+        {
+            'actcountremove': '1',
+            'checkteam': 'true',
+            'instantspawn': 'true',
+            'monster_spawnexactlocation': 'true',
+        },
+    ),
+    (
+        'enemy_boss', "Boss", "Boss enemy spawner (no respawn)",
+        'monsterspawnerent',
+        {'nocollide': True},
+        {
+            'actcountremove': '1',
+            'checkteam': 'true',
+            'instantspawn': 'true',
+            'monster_spawnexactlocation': 'true',
+        },
+    ),
+    (
+        'npc_talker', "NPC (Talker)", "NPC that starts a conversation on Use",
+        'monsterspawnerent',
+        {'nocollide': True},
+        {
+            'actcountremove': '-1',
+            'checkteam': 'true',
+            'instantspawn': 'true',
+            'monster_actonuse': 'true',
+            'monster_spawnexactlocation': 'true',
+        },
+    ),
+    (
+        'npc_passive', "NPC (Passive)", "Non-interactive background NPC",
+        'monsterspawnerent',
+        {'nocollide': True},
+        {
+            'actcountremove': '-1',
+            'checkteam': 'true',
+            'instantspawn': 'true',
+            'monster_spawnexactlocation': 'true',
+        },
+    ),
+    # --- Environment ---
+    (
+        'water_volume', "Water Volume", "Water area with optional damage",
+        'waterent',
+        {'nocollide': False},
+        {
+            'boxcollision': 'true',
+            'waterdmg': '0',
+        },
+    ),
+    (
+        'hazard_electric', "Hazard (Electric)", "Electric damage zone",
+        'actionent',
+        {'nocollide': False},
+        {
+            'acttogglesloopfx': 'true',
+            'dmg': '15',
+            'dmgradius': '50',
+            'dmgtype': 'electric',
+            'loopfxstarton': 'true',
+            'smartent': 'true',
+        },
+    ),
+    # --- Doors & Movers ---
+    (
+        'door_basic', "Door", "Standard indestructible door",
+        'doorent',
+        {'nocollide': True},
+        {
+            'health': '32000',
+            'material': 'solid_metal',
+            'nogravity': 'true',
+            'nopickup': 'true',
+            'nopush': 'true',
+            'structure': '2',
+        },
+    ),
+    (
+        'door_breakable', "Door (Breakable)", "Breakable door or barricade",
+        'doorent',
+        {'nocollide': True},
+        {
+            'health': '200',
+            'material': 'solid_wood',
+            'nogravity': 'true',
+            'nopickup': 'true',
+            'nopush': 'true',
+            'structure': '1',
+        },
+    ),
+    (
+        'mover_platform', "Moving Platform", "Horizontal moving platform",
+        'moverent',
+        {'nocollide': True},
+        {
+            'moverdist': '200',
+            'moveraxis': 'x',
+            'nogravity': 'true',
+            'nopickup': 'true',
+            'nopush': 'true',
+            'speed': '100',
+        },
+    ),
+    (
+        'mover_elevator', "Elevator", "Vertical moving platform",
+        'moverent',
+        {'nocollide': True},
+        {
+            'moverdist': '300',
+            'moveraxis': 'z',
+            'nogravity': 'true',
+            'nopickup': 'true',
+            'nopush': 'true',
+            'speed': '80',
+        },
+    ),
+    # --- Pickups & Items ---
+    (
+        'pickup_health', "Health Pickup", "Small health orb",
+        'inventoryent',
+        {'nocollide': True},
+        {
+            'invcount': '25',
+            'invtype': 'health',
+            'respawntime': '30',
+        },
+    ),
+    (
+        'pickup_energy', "Energy Pickup", "Small energy orb",
+        'inventoryent',
+        {'nocollide': True},
+        {
+            'invcount': '25',
+            'invtype': 'energy',
+            'respawntime': '30',
+        },
+    ),
+    (
+        'pickup_xtreme', "Xtreme Pickup", "Xtreme meter orb",
+        'inventoryent',
+        {'nocollide': True},
+        {
+            'invcount': '10',
+            'invtype': 'xtreme',
+            'respawntime': '60',
+        },
+    ),
+    (
+        'treasure_comic', "Comic Book", "Collectible comic book",
+        'treasureent',
+        {'nocollide': True},
+        {
+            'comicindex': '0',
+            'treasuretype': 'comic',
+        },
+    ),
+    (
+        'treasure_gear', "Gear Drop", "Random equipment drop",
+        'treasureent',
+        {'nocollide': True},
+        {
+            'treasuretype': 'gear',
+        },
+    ),
+    # --- Camera & Lights ---
+    (
+        'camera_magnet', "Camera Magnet", "Camera control zone",
+        'cameramagnetent',
+        {'nocollide': False},
+        {
+            'actleader': 'true',
+            'actmatchteam': 'true',
+            'boxcollision': 'true',
+            'cameramagtype': '0',
+            'team': 'hero',
+        },
+    ),
+    (
+        'light_point', "Point Light", "Omnidirectional dynamic light",
+        'lightent',
+        {'nocollide': True},
+        {
+            'lightcolor': '1 1 1',
+            'lightradius': '200',
+            'startoff': 'false',
+        },
+    ),
+    (
+        'light_spot', "Spot Light", "Directional spotlight (warm tone)",
+        'lightent',
+        {'nocollide': True},
+        {
+            'lightcolor': '1 0.9 0.7',
+            'lightradius': '300',
+            'startoff': 'false',
+        },
+    ),
+    # --- MUA-only presets ---
+    (
+        'interact_object', "Interact Object", "MUA interactive object (use button)",
+        'interactent',
+        {'nocollide': True},
+        {
+            'actonuse': 'true',
+            'boxcollision': 'true',
+        },
+    ),
+    (
+        'pressure_plate', "Pressure Plate", "MUA floor switch triggered by weight",
+        'pressureplateent',
+        {'nocollide': False},
+        {
+            'boxcollision': 'true',
+        },
+    ),
+    (
+        'rope_swing', "Rope Swing", "MUA swingable rope",
+        'ropeent',
+        {'nocollide': True},
+        {},
+    ),
+    (
+        'orb_collect', "Orb", "MUA collectible orb",
+        'orbent',
+        {'nocollide': True},
+        {
+            'orbtype': 'health',
+        },
+    ),
+    (
+        'laser_beam', "Laser Beam", "MUA laser beam hazard",
+        'laserent',
+        {'nocollide': True},
+        {
+            'dmg': '10',
+        },
+    ),
+    (
+        'hold_point', "Hold Point", "MUA hold position for AI",
+        'holdent',
+        {'nocollide': False},
+        {},
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Preset category groupings for Quick Add panel
+# ---------------------------------------------------------------------------
+# Each entry: (label, icon, game_filter, [preset_ids])
+# game_filter: 'BOTH' = XML2 & MUA, 'MUA' = MUA only
+PRESET_CATEGORIES = [
+    ("Hub & Terminals", 'PROP_OFF', 'BOTH', [
+        'extraction_point', 'extraction_trigger', 'stash',
+        'mission_briefing', 'holo_globe', 'console',
+        'trivia_terminal', 'blink_portal',
+    ]),
+    ("Triggers & Zones", 'PLAY', 'BOTH', [
+        'touch_trigger', 'use_trigger', 'script_trigger',
+        'kill_trigger', 'power_trigger_preset', 'camera_zone',
+    ]),
+    ("Enemies & NPCs", 'GHOST_ENABLED', 'BOTH', [
+        'enemy_basic', 'enemy_ranged', 'enemy_boss',
+        'npc_talker', 'npc_passive',
+    ]),
+    ("Environment & FX", 'SHADERFX', 'BOTH', [
+        'fire_small', 'fire_medium', 'fire_large',
+        'water_volume', 'hazard_electric',
+    ]),
+    ("Doors & Movers", 'MESH_CUBE', 'BOTH', [
+        'door_basic', 'door_breakable', 'mover_platform',
+        'mover_elevator',
+    ]),
+    ("Pickups & Items", 'FUND', 'BOTH', [
+        'pickup_health', 'pickup_energy', 'pickup_xtreme',
+        'treasure_comic', 'treasure_gear',
+    ]),
+    ("Camera & Lights", 'VIEW_CAMERA', 'BOTH', [
+        'camera_magnet', 'light_point', 'light_spot',
+    ]),
+    ("MUA Only", 'COLORSET_13_VEC', 'MUA', [
+        'interact_object', 'pressure_plate', 'rope_swing',
+        'orb_collect', 'laser_beam', 'hold_point',
+    ]),
 ]
 
 # Build enum items for the preset selector

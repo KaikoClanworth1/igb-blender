@@ -561,22 +561,32 @@ class MM_PT_Place_QuickAdd(Panel):
     def draw(self, context):
         layout = self.layout
 
-        from .entity_defs import ENTITY_PRESETS
+        from .entity_defs import ENTITY_PRESETS, PRESET_CATEGORIES
 
-        # Group presets by visual category
-        # Terminals & Points
-        box = layout.box()
-        box.label(text="Terminals & Points", icon='PROP_OFF')
-        col = box.column(align=True)
-        for i in range(0, len(ENTITY_PRESETS), 2):
-            row = col.row(align=True)
-            pid, label, desc, *_ = ENTITY_PRESETS[i]
-            op = row.operator("mm.place_preset", text=label)
-            op.preset_id = pid
-            if i + 1 < len(ENTITY_PRESETS):
-                pid2, label2, desc2, *_ = ENTITY_PRESETS[i + 1]
-                op2 = row.operator("mm.place_preset", text=label2)
-                op2.preset_id = pid2
+        # Build lookup: preset_id -> preset tuple
+        preset_map = {p[0]: p for p in ENTITY_PRESETS}
+
+        for cat_label, cat_icon, cat_game, preset_ids in PRESET_CATEGORIES:
+            valid = [pid for pid in preset_ids if pid in preset_map]
+            if not valid:
+                continue
+
+            box = layout.box()
+            header = box.row()
+            header.label(text=cat_label, icon=cat_icon)
+            if cat_game == 'MUA':
+                header.label(text="MUA", icon='COLORSET_13_VEC')
+
+            col = box.column(align=True)
+            for i in range(0, len(valid), 2):
+                row = col.row(align=True)
+                p = preset_map[valid[i]]
+                op = row.operator("mm.place_preset", text=p[1])
+                op.preset_id = valid[i]
+                if i + 1 < len(valid):
+                    p2 = preset_map[valid[i + 1]]
+                    op2 = row.operator("mm.place_preset", text=p2[1])
+                    op2.preset_id = valid[i + 1]
 
 
 class MM_PT_Place_Entities(Panel):
