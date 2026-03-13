@@ -8,9 +8,22 @@ bl_info = {
     "category": "Import-Export",
 }
 
+import os
 import bpy
+import bpy.utils.previews
 from bpy.props import StringProperty, BoolProperty, EnumProperty, FloatProperty, IntProperty
 from bpy_extras.io_utils import ImportHelper, ExportHelper
+
+# Custom icon collection
+_preview_collections = {}
+
+
+def _get_icon_id():
+    """Return the custom IGB icon ID, or 0 if not loaded."""
+    pcoll = _preview_collections.get("igb_icons")
+    if pcoll and "igb_icon" in pcoll:
+        return pcoll["igb_icon"].icon_id
+    return 0
 
 
 def _game_preset_items(self, context):
@@ -288,15 +301,21 @@ class ExportIGB(bpy.types.Operator, ExportHelper):
 
 
 def menu_func_import(self, context):
-    self.layout.operator(ImportIGB.bl_idname, text="Alchemy IGB (.igb)")
+    icon_id = _get_icon_id()
+    self.layout.operator(ImportIGB.bl_idname, text="Alchemy IGB (.igb)",
+                         icon_value=icon_id)
 
 
 def menu_func_import_igz(self, context):
-    self.layout.operator(ImportIGZ.bl_idname, text="Alchemy IGZ (.igz)")
+    icon_id = _get_icon_id()
+    self.layout.operator(ImportIGZ.bl_idname, text="Alchemy IGZ (.igz)",
+                         icon_value=icon_id)
 
 
 def menu_func_export(self, context):
-    self.layout.operator(ExportIGB.bl_idname, text="Alchemy IGB (.igb)")
+    icon_id = _get_icon_id()
+    self.layout.operator(ExportIGB.bl_idname, text="Alchemy IGB (.igb)",
+                         icon_value=icon_id)
 
 
 class ImportZAM(bpy.types.Operator, ImportHelper):
@@ -379,6 +398,13 @@ def menu_func_export_zam(self, context):
 
 
 def register():
+    # Load custom icon
+    pcoll = bpy.utils.previews.new()
+    icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
+    if os.path.exists(icon_path):
+        pcoll.load("igb_icon", icon_path, 'IMAGE')
+    _preview_collections["igb_icons"] = pcoll
+
     bpy.utils.register_class(ImportIGB)
     bpy.utils.register_class(ImportIGZ)
     bpy.utils.register_class(ExportIGB)
@@ -414,6 +440,11 @@ def unregister():
     bpy.utils.unregister_class(ExportIGB)
     bpy.utils.unregister_class(ImportIGZ)
     bpy.utils.unregister_class(ImportIGB)
+
+    # Remove custom icon
+    for pcoll in _preview_collections.values():
+        bpy.utils.previews.remove(pcoll)
+    _preview_collections.clear()
 
 
 if __name__ == "__main__":
