@@ -77,8 +77,20 @@ PROPERTY_SCHEMAS = {
                 'label': "Spawn Options",
                 'icon': 'PLAY',
                 'properties': [
-                    {'key': 'allinone', 'type': 'bool', 'default': 'true',
-                     'label': "All in One", 'desc': "All players spawn at this point"},
+                    {'key': 'allinone', 'type': 'bool', 'default': 'false',
+                     'label': "All in One", 'desc': "All players spawn at this point (required for co-op)"},
+                    {'key': 'default', 'type': 'bool', 'default': 'false',
+                     'label': "Default Start", 'desc': "Default spawn when no prevzone matches"},
+                ],
+            },
+            {
+                'label': "Zone Link",
+                'icon': 'LINKED',
+                'properties': [
+                    {'key': 'prevzone', 'type': 'string', 'default': '',
+                     'label': "Previous Zone", 'desc': "Spawn here when arriving from this zone"},
+                    {'key': 'prevlink', 'type': 'string', 'default': '',
+                     'label': "Previous Link", 'desc': "Zone link entity name in previous zone"},
                 ],
             },
         ],
