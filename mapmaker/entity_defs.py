@@ -648,26 +648,6 @@ ENTITY_PRESETS = [
             'team': 'hero',
         },
     ),
-    (
-        'light_point', "Point Light", "Omnidirectional dynamic light",
-        'lightent',
-        {'nocollide': True},
-        {
-            'lightcolor': '1 1 1',
-            'lightradius': '200',
-            'startoff': 'false',
-        },
-    ),
-    (
-        'light_spot', "Spot Light", "Directional spotlight (warm tone)",
-        'lightent',
-        {'nocollide': True},
-        {
-            'lightcolor': '1 0.9 0.7',
-            'lightradius': '300',
-            'startoff': 'false',
-        },
-    ),
     # --- MUA-only presets ---
     (
         'interact_object', "Interact Object", "MUA interactive object (use button)",
@@ -748,8 +728,8 @@ PRESET_CATEGORIES = [
         'pickup_health', 'pickup_energy', 'pickup_xtreme',
         'treasure_comic', 'treasure_gear',
     ]),
-    ("Camera & Lights", 'VIEW_CAMERA', 'BOTH', [
-        'camera_magnet', 'light_point', 'light_spot',
+    ("Camera", 'VIEW_CAMERA', 'BOTH', [
+        'camera_magnet',
     ]),
     ("MUA Only", 'COLORSET_13_VEC', 'MUA', [
         'interact_object', 'pressure_plate', 'rope_swing',
@@ -759,3 +739,35 @@ PRESET_CATEGORIES = [
 
 # Build enum items for the preset selector
 ENTITY_PRESET_ITEMS = [(pid, label, desc) for pid, label, desc, *_ in ENTITY_PRESETS]
+
+
+# ===========================================================================
+# Light presets (for the dedicated Lights panel, NOT entities)
+# ===========================================================================
+
+LIGHT_PRESETS = {
+    'warm': {
+        'color': (1.0, 0.7, 0.3),
+        'energy': 12.5,
+        'label': "Warm",
+        'description': "Warm orange/yellow (torch, fire)",
+    },
+    'cool': {
+        'color': (0.4, 0.6, 1.0),
+        'energy': 12.5,
+        'label': "Cool",
+        'description': "Cool blue (tech, ice, moonlight)",
+    },
+    'red': {
+        'color': (1.0, 0.15, 0.1),
+        'energy': 10.0,
+        'label': "Red",
+        'description': "Red (danger, alarms, lava)",
+    },
+    'green': {
+        'color': (0.2, 1.0, 0.3),
+        'energy': 10.0,
+        'label': "Green",
+        'description': "Green (toxic, alien, magic)",
+    },
+}

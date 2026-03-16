@@ -466,6 +466,7 @@ register_profile(GameProfile(
         b"igVertexData",
         b"igVertexStream",
         b"igShaderParametersAttr",
+        b"igGlobalColorStateAttr",
     ),
     notes="IGB v8, LE, igGeometryAttr2, igVertexData, DXT1/DXT5 textures",
 ))

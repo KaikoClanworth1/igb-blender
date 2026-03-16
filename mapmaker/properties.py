@@ -24,6 +24,25 @@ class MM_EntityProperty(PropertyGroup):
 # Entity definition (template)
 # ---------------------------------------------------------------------------
 
+def _on_entity_name_changed(self, context):
+    """Update all placed instances when an entity def is renamed."""
+    new_name = self.entity_name
+    old_name = self.get("_prev_entity_name", "")
+
+    if old_name and old_name != new_name:
+        # Update all placed empties that reference the old name
+        col = bpy.data.collections.get("[MapMaker] Entities")
+        if col:
+            for obj in col.objects:
+                if obj.get("mm_entity_type") == old_name:
+                    obj["mm_entity_type"] = new_name
+                    # Update Blender object name to match
+                    obj.name = new_name
+
+    # Store current name for next comparison
+    self["_prev_entity_name"] = new_name
+
+
 class MM_EntityDef(PropertyGroup):
     """An entity definition (template). Maps to one <entity> element in ENGB."""
 
@@ -31,6 +50,7 @@ class MM_EntityDef(PropertyGroup):
         name="Name",
         description="Unique entity name (e.g. 'sp_beast01', 'player_start_all')",
         default="new_entity",
+        update=_on_entity_name_changed,
     )
 
     classname: EnumProperty(
@@ -164,6 +184,22 @@ class MM_MapSettings(PropertyGroup):
         default='PLACE',
     )
 
+    quick_add_filter: EnumProperty(
+        name="Filter",
+        items=[
+            ('ALL', "All", "Show all preset categories"),
+            ('HUB', "Hub", "Hub & Terminals"),
+            ('TRIGGERS', "Triggers", "Triggers & Zones"),
+            ('ENEMIES', "Actors", "Enemies & NPCs"),
+            ('ENV', "Environ", "Environment & FX"),
+            ('DOORS', "Doors", "Doors & Movers"),
+            ('PICKUPS', "Pickups", "Pickups & Items"),
+            ('CAMERA', "Camera", "Camera control"),
+            ('MUA', "MUA", "MUA-only presets"),
+        ],
+        default='ALL',
+    )
+
     map_name: StringProperty(
         name="Map Name",
         description="Map zone name (e.g. 'sanctuary1')",
@@ -194,6 +230,19 @@ class MM_MapSettings(PropertyGroup):
         name="Party Light Radius",
         default=300.0, min=0.0,
     )
+    # --- NextGen overrides (MUA) ---
+    next_gen_partylight: FloatVectorProperty(
+        name="NG Party Light",
+        description="NextGen party light color override (PS3/X360)",
+        size=3, default=(0.0, 0.0, 0.0),
+        subtype='COLOR', min=0.0, max=1.0,
+    )
+    next_gen_partylightradius: FloatProperty(
+        name="NG Party Light Radius",
+        description="NextGen party light radius override",
+        default=0.0, min=0.0,
+    )
+
     combatlocked: BoolProperty(name="Combat Locked", default=True)
     nosave: BoolProperty(name="No Save", default=True)
     bigconvmap: BoolProperty(
@@ -233,6 +282,13 @@ class MM_MapSettings(PropertyGroup):
         description="Minimum vertical gap between elevation layers. "
                     "Surfaces closer than this are merged into one cell",
         default=10.0, min=1.0, soft_max=200.0,
+    )
+
+    # --- Lights panel ---
+    active_light_index: IntProperty(
+        name="Active Light",
+        description="Index of the selected light in the Lights panel",
+        default=0,
     )
 
     # --- Actor preview ---

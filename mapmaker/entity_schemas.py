@@ -95,22 +95,6 @@ PROPERTY_SCHEMAS = {
             },
         ],
     },
-    'lightent': {
-        'sections': [
-            {
-                'label': "Light Properties",
-                'icon': 'LIGHT',
-                'properties': [
-                    {'key': 'lightcolor', 'type': 'string', 'default': '1 1 1',
-                     'label': "Light Color", 'desc': "RGB color (0-1 space-separated)"},
-                    {'key': 'lightradius', 'type': 'int', 'default': '200',
-                     'label': "Radius", 'desc': "Light radius in game units"},
-                    {'key': 'startoff', 'type': 'bool', 'default': 'false',
-                     'label': "Start Off", 'desc': "Light starts turned off"},
-                ],
-            },
-        ],
-    },
     'gameent': {
         'sections': [
             {

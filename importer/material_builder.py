@@ -537,12 +537,14 @@ def _insert_color_multiply(mat, bsdf, color, nodes, links):
     links.new(mix_node.outputs[2], base_color_input)  # Result -> Base Color
 
 
-def build_igz_multitex_material(parsed_material, texture_role_map,
-                                extra_state=None, name="IGZ_Material"):
-    """Create a Blender material from IGZ multi-texture data.
+def build_multitex_material(parsed_material, texture_role_map,
+                            extra_state=None, name="Material",
+                            profile=None):
+    """Create a Blender material from multi-texture data.
 
     Builds a Principled BSDF node tree with separate texture slots wired
     to the correct BSDF inputs based on texture role classification.
+    Works for both IGB and IGZ formats.
 
     Args:
         parsed_material: ParsedMaterial from sg_materials
@@ -550,6 +552,7 @@ def build_igz_multitex_material(parsed_material, texture_role_map,
             Keys: 'diffuse', 'normal', 'specular', 'emissive', 'metallic'
         extra_state: dict of additional material state (blend, alpha, color)
         name: base name for the material
+        profile: GameProfile instance (optional, for future use)
 
     Returns:
         bpy.types.Material or None
@@ -655,7 +658,11 @@ def build_igz_multitex_material(parsed_material, texture_role_map,
         if parsed_image is None:
             continue
 
-        bl_image = _get_or_create_blender_image(parsed_image)
+        # Normal maps need green channel flip (DirectX → OpenGL)
+        # Profile needed for MUA PC R/B channel swap
+        nmap_flag = (role == TEX_ROLE_NORMAL)
+        bl_image = _get_or_create_blender_image(
+            parsed_image, profile=profile, is_normal_map=nmap_flag)
         if bl_image is None:
             continue
 
@@ -730,6 +737,10 @@ def build_igz_multitex_material(parsed_material, texture_role_map,
     return mat
 
 
+# Backward-compat alias for IGZ importers
+build_igz_multitex_material = build_multitex_material
+
+
 def _add_texture_to_material(mat, bsdf, parsed_texture, links, nodes,
                              blend_decision='OPAQUE', profile=None):
     """Add a texture to a material's node tree.
@@ -796,7 +807,7 @@ def _add_texture_to_material(mat, bsdf, parsed_texture, links, nodes,
     links.new(uv_node.outputs['UV'], tex_node.inputs['Vector'])
 
 
-def _get_or_create_blender_image(parsed_image, profile=None):
+def _get_or_create_blender_image(parsed_image, profile=None, is_normal_map=False):
     """Get a cached Blender image or create a new one from ParsedImage.
 
     Decompresses DXT data and creates a Blender image with pixel data.
@@ -804,6 +815,7 @@ def _get_or_create_blender_image(parsed_image, profile=None):
     Args:
         parsed_image: ParsedImage from sg_materials
         profile: GameProfile instance (used for R/B channel swap on MUA PC)
+        is_normal_map: If True, flip green channel (DirectX → OpenGL conversion)
 
     Returns:
         bpy.types.Image or None
@@ -816,9 +828,9 @@ def _get_or_create_blender_image(parsed_image, profile=None):
     if cache_key is None and parsed_image.source_obj is not None:
         cache_key = _obj_cache_key(parsed_image.source_obj)
 
-    # Include swap_rb in cache key so different profiles get correct colors
-    if cache_key is not None and swap_rb:
-        cache_key = (cache_key, 'swap_rb')
+    # Include swap_rb and normal_map in cache key so variants don't collide
+    if cache_key is not None and (swap_rb or is_normal_map):
+        cache_key = (cache_key, 'swap_rb' if swap_rb else '', 'nmap' if is_normal_map else '')
 
     if cache_key is not None and cache_key in _image_cache:
         name = _image_cache[cache_key]
@@ -875,7 +887,10 @@ def _get_or_create_blender_image(parsed_image, profile=None):
             src_idx = (src_row * w + x) * 4
             dst_idx = (dst_row * w + x) * 4
             float_pixels[dst_idx] = rgba_data[src_idx] / 255.0        # R
-            float_pixels[dst_idx + 1] = rgba_data[src_idx + 1] / 255.0  # G
+            g_val = rgba_data[src_idx + 1] / 255.0
+            if is_normal_map:
+                g_val = 1.0 - g_val  # DirectX → OpenGL: flip Y/green channel
+            float_pixels[dst_idx + 1] = g_val                          # G
             float_pixels[dst_idx + 2] = rgba_data[src_idx + 2] / 255.0  # B
             float_pixels[dst_idx + 3] = rgba_data[src_idx + 3] / 255.0  # A
 

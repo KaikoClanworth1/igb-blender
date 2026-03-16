@@ -357,7 +357,52 @@ def _create_preset_entity(context, preset, suffix_hint=""):
     empty["mm_classname"] = classname
     col.objects.link(empty)
 
+    # Auto-create light preview for lightent
+    if classname == 'lightent':
+        _create_light_preview(empty, edef, col)
+
     return edef, empty
+
+
+def _create_light_preview(parent_empty, edef, collection):
+    """Create a Blender light object parented to a lightent entity Empty.
+
+    Reads lightcolor and lightradius from the entity def properties to
+    configure the light. The light object is marked as a preview so it
+    is excluded from export.
+    """
+    # Parse light properties from entity def
+    color = (1.0, 1.0, 1.0)
+    radius = 200.0
+    for prop in edef.properties:
+        if prop.key == 'lightcolor':
+            try:
+                vals = [float(v) for v in prop.value.split()]
+                if len(vals) >= 3:
+                    color = tuple(vals[:3])
+            except ValueError:
+                pass
+        elif prop.key == 'lightradius':
+            try:
+                radius = float(prop.value)
+            except ValueError:
+                pass
+
+    # Create point light data
+    light_data = bpy.data.lights.new(
+        name=f"{parent_empty.name}_light", type='POINT')
+    light_data.color = color
+    light_data.energy = radius * 0.5  # Scale energy from game radius
+    light_data.shadow_soft_size = radius * 0.1
+
+    # Create light object
+    light_obj = bpy.data.objects.new(
+        name=f"{parent_empty.name}_light", object_data=light_data)
+    light_obj.parent = parent_empty
+    light_obj.location = (0, 0, 0)  # At parent origin
+    light_obj["mm_preview"] = True  # Mark as preview (excluded from export)
+
+    collection.objects.link(light_obj)
 
 
 class MM_OT_place_preset(Operator):
@@ -508,6 +553,10 @@ class MM_OT_place_entity(Operator):
 
         # Link to entity collection
         col.objects.link(empty)
+
+        # Auto-create light preview for lightent
+        if edef.classname == 'lightent':
+            _create_light_preview(empty, edef, col)
 
         # Select the new empty
         bpy.ops.object.select_all(action='DESELECT')
@@ -3739,6 +3788,169 @@ class MM_OT_open_convo_editor(Operator):
         MM_OT_open_convo_editor._window = None
 
 
+class MM_OT_open_script_editor(Operator):
+    """Open the external script editor with command palette (PySide6)"""
+    bl_idname = "mm.open_script_editor"
+    bl_label = "Edit Script"
+    bl_description = ("Open a script editor with game command palette for "
+                      "building entity activation/spawn scripts")
+
+    script_key: StringProperty(
+        name="Script Key",
+        description="Entity property key (actscript, spawnscript, monster_actscript)",
+        default='actscript',
+    )
+
+    _app = None
+    _window = None
+    _timer = None
+
+    @classmethod
+    def poll(cls, context):
+        if cls._window is not None:
+            return False  # Already open
+        scene = context.scene
+        if not (0 <= scene.mm_entity_defs_index < len(scene.mm_entity_defs)):
+            return False
+        return _has_pyside6()
+
+    def execute(self, context):
+        _ensure_pyside6_path()
+        try:
+            from PySide6.QtWidgets import QApplication
+        except ImportError:
+            self.report({'ERROR'},
+                        "PySide6 not installed. Use 'Install PySide6' in IGB Extras panel")
+            return {'CANCELLED'}
+
+        from .script_editor import ScriptEditorWindow
+
+        scene = context.scene
+        settings = scene.mm_settings
+        edef = scene.mm_entity_defs[scene.mm_entity_defs_index]
+
+        # Resolve game data dir — use blend file directory as fallback
+        if settings.game_data_dir:
+            game_data_dir = bpy.path.abspath(settings.game_data_dir)
+        else:
+            # Fall back to blend file dir, or temp dir
+            blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else ''
+            if blend_dir:
+                game_data_dir = blend_dir
+            else:
+                import tempfile
+                game_data_dir = os.path.join(tempfile.gettempdir(), 'mapmaker_scripts')
+            self.report({'INFO'},
+                        f"No Game Data Dir set — saving scripts to: {game_data_dir}")
+
+        # Find the script path from entity properties
+        script_path = ''
+        for prop in edef.properties:
+            if prop.key == self.script_key:
+                script_path = prop.value
+                break
+
+        # Check for inline Lua (contains parentheses) — not a file path
+        if script_path and '(' in script_path:
+            self.report({'WARNING'},
+                        f"'{script_path}' is an inline Lua call, not a file path. "
+                        "Clear it first to create a file-based script.")
+            return {'CANCELLED'}
+
+        # Auto-generate script path if empty
+        if not script_path:
+            map_path = settings.map_path or 'custom'
+            safe_name = edef.entity_name.replace(' ', '_').lower()
+            script_path = f"{map_path}/{safe_name}"
+
+            # Set the property on the entity def
+            found = False
+            for prop in edef.properties:
+                if prop.key == self.script_key:
+                    prop.value = script_path
+                    found = True
+                    break
+            if not found:
+                new_prop = edef.properties.add()
+                new_prop.key = self.script_key
+                new_prop.value = script_path
+
+        # Detect game type from game directory
+        game = self._detect_game(game_data_dir)
+
+        # Create QApplication if needed
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+        MM_OT_open_script_editor._app = app
+
+        # Create editor window
+        window = ScriptEditorWindow(
+            entity_name=edef.entity_name,
+            script_key=self.script_key,
+            script_path=script_path,
+            game_data_dir=game_data_dir,
+            game=game,
+        )
+
+        # Connect saved signal to update entity property
+        def _on_saved(path):
+            for prop in edef.properties:
+                if prop.key == self.script_key:
+                    prop.value = path
+                    break
+
+        window.saved.connect(_on_saved)
+        window.show()
+        MM_OT_open_script_editor._window = window
+
+        # Register modal timer to pump Qt events
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.05, window=context.window)
+        wm.modal_handler_add(self)
+
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            app = MM_OT_open_script_editor._app
+            if app is not None:
+                app.processEvents()
+
+            # Check if window was closed
+            window = MM_OT_open_script_editor._window
+            if window is None or not window.isVisible():
+                self._cleanup(context)
+                return {'FINISHED'}
+
+        return {'PASS_THROUGH'}
+
+    def cancel(self, context):
+        self._cleanup(context)
+
+    def _cleanup(self, context):
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        window = MM_OT_open_script_editor._window
+        if window is not None:
+            window.close()
+        MM_OT_open_script_editor._window = None
+
+    @staticmethod
+    def _detect_game(game_data_dir):
+        """Detect XML2 vs MUA from game directory contents."""
+        parent = os.path.dirname(game_data_dir.rstrip('/\\'))
+        if os.path.exists(os.path.join(parent, 'Game.exe')):
+            return 'mua'
+        if os.path.exists(os.path.join(parent, 'XMen2.exe')):
+            return 'xml2'
+        # Fallback: check for MUA-specific paths
+        if os.path.exists(os.path.join(game_data_dir, 'ui', 'models')):
+            return 'mua'
+        return 'xml2'
+
+
 class MM_OT_extract_hud_heads(Operator):
     """Extract HUD head portraits from game IGB files to PNG cache"""
     bl_idname = "mm.extract_hud_heads"
@@ -4376,6 +4588,197 @@ class MM_OT_run_validation(Operator):
         return {'FINISHED'}
 
 
+# ===========================================================================
+# Lights panel operators
+# ===========================================================================
+
+# Collection name for map maker lights
+LIGHTS_COLLECTION_NAME = "[MapMaker] Lights"
+
+
+def _get_scene_lights(context):
+    """Get all non-preview LIGHT objects in the scene, sorted by name."""
+    lights = []
+    for obj in context.scene.objects:
+        if obj.type == 'LIGHT' and not obj.get("mm_preview"):
+            lights.append(obj)
+    lights.sort(key=lambda o: o.name)
+    return lights
+
+
+def _get_or_create_lights_collection():
+    """Get or create the [MapMaker] Lights collection."""
+    col = bpy.data.collections.get(LIGHTS_COLLECTION_NAME)
+    if col is None:
+        col = bpy.data.collections.new(LIGHTS_COLLECTION_NAME)
+        bpy.context.scene.collection.children.link(col)
+    return col
+
+
+class MM_OT_add_light(Operator):
+    """Add a new light to the scene"""
+    bl_idname = "mm.add_light"
+    bl_label = "Add Light"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    light_type: EnumProperty(
+        name="Type",
+        items=[
+            ('POINT', "Point", "Omnidirectional light", 'LIGHT_POINT', 0),
+            ('SUN', "Sun", "Directional light (infinite distance)", 'LIGHT_SUN', 1),
+            ('SPOT', "Spot", "Cone-shaped directional light", 'LIGHT_SPOT', 2),
+        ],
+        default='POINT',
+    )
+
+    def execute(self, context):
+        col = _get_or_create_lights_collection()
+        light_data = bpy.data.lights.new(name="Light", type=self.light_type)
+        light_data.color = (1.0, 1.0, 1.0)
+        light_data.energy = 10.0
+        light_data.use_shadow = True
+
+        light_obj = bpy.data.objects.new("Light", light_data)
+        light_obj.location = context.scene.cursor.location
+        col.objects.link(light_obj)
+
+        # Select it
+        bpy.ops.object.select_all(action='DESELECT')
+        light_obj.select_set(True)
+        context.view_layer.objects.active = light_obj
+
+        # Update active index
+        lights = _get_scene_lights(context)
+        for i, obj in enumerate(lights):
+            if obj == light_obj:
+                context.scene.mm_settings.active_light_index = i
+                break
+
+        self.report({'INFO'}, f"Added {self.light_type} light")
+        return {'FINISHED'}
+
+
+class MM_OT_remove_light(Operator):
+    """Remove the selected light from the scene"""
+    bl_idname = "mm.remove_light"
+    bl_label = "Remove Light"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        lights = _get_scene_lights(context)
+        idx = context.scene.mm_settings.active_light_index
+        return 0 <= idx < len(lights)
+
+    def execute(self, context):
+        lights = _get_scene_lights(context)
+        idx = context.scene.mm_settings.active_light_index
+        if 0 <= idx < len(lights):
+            obj = lights[idx]
+            name = obj.name
+            light_data = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if light_data and light_data.users == 0:
+                bpy.data.lights.remove(light_data)
+            # Clamp index
+            new_count = len(_get_scene_lights(context))
+            if idx >= new_count:
+                context.scene.mm_settings.active_light_index = max(0, new_count - 1)
+            self.report({'INFO'}, f"Removed light '{name}'")
+        return {'FINISHED'}
+
+
+class MM_OT_select_light(Operator):
+    """Select the active light in the viewport"""
+    bl_idname = "mm.select_light"
+    bl_label = "Select Light"
+
+    @classmethod
+    def poll(cls, context):
+        lights = _get_scene_lights(context)
+        idx = context.scene.mm_settings.active_light_index
+        return 0 <= idx < len(lights)
+
+    def execute(self, context):
+        lights = _get_scene_lights(context)
+        idx = context.scene.mm_settings.active_light_index
+        if 0 <= idx < len(lights):
+            bpy.ops.object.select_all(action='DESELECT')
+            obj = lights[idx]
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+        return {'FINISHED'}
+
+
+class MM_OT_select_light_by_index(Operator):
+    """Select a light by its index in the lights list"""
+    bl_idname = "mm.select_light_by_index"
+    bl_label = "Select Light"
+
+    index: IntProperty()
+
+    def execute(self, context):
+        context.scene.mm_settings.active_light_index = self.index
+        lights = _get_scene_lights(context)
+        if 0 <= self.index < len(lights):
+            bpy.ops.object.select_all(action='DESELECT')
+            obj = lights[self.index]
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+        return {'FINISHED'}
+
+
+class MM_OT_add_light_preset(Operator):
+    """Add a light with preset color and energy"""
+    bl_idname = "mm.add_light_preset"
+    bl_label = "Add Light Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset: EnumProperty(
+        name="Preset",
+        items=[
+            ('WARM', "Warm", "Warm orange/yellow light"),
+            ('COOL', "Cool", "Cool blue tech light"),
+            ('RED', "Red", "Red danger/lava light"),
+            ('GREEN', "Green", "Green toxic/magic light"),
+        ],
+    )
+
+    def execute(self, context):
+        from .entity_defs import LIGHT_PRESETS
+
+        preset_data = LIGHT_PRESETS.get(self.preset.lower())
+        if preset_data is None:
+            self.report({'WARNING'}, f"Unknown preset: {self.preset}")
+            return {'CANCELLED'}
+
+        col = _get_or_create_lights_collection()
+        name = f"Light_{self.preset.capitalize()}"
+        light_data = bpy.data.lights.new(name=name, type='POINT')
+        light_data.color = preset_data['color']
+        light_data.energy = preset_data['energy']
+        light_data.use_shadow = True
+
+        light_obj = bpy.data.objects.new(name, light_data)
+        light_obj.location = context.scene.cursor.location
+        col.objects.link(light_obj)
+
+        # Select it
+        bpy.ops.object.select_all(action='DESELECT')
+        light_obj.select_set(True)
+        context.view_layer.objects.active = light_obj
+
+        # Update index
+        lights = _get_scene_lights(context)
+        for i, obj in enumerate(lights):
+            if obj == light_obj:
+                context.scene.mm_settings.active_light_index = i
+                break
+
+        self.report({'INFO'}, f"Added {self.preset} preset light")
+        return {'FINISHED'}
+
+
 _classes = (
     # Entity def CRUD
     MM_OT_add_entity_def,
@@ -4438,6 +4841,8 @@ _classes = (
     MM_OT_open_convo_editor,
     MM_OT_extract_hud_heads,
     MM_OT_install_pyside6,
+    # Script Editor
+    MM_OT_open_script_editor,
     # Menu Editor
     MM_OT_open_menu_editor,
     # NPC Stat Editor
@@ -4454,6 +4859,12 @@ _classes = (
     MM_OT_remove_entity_property_by_key,
     # Validation
     MM_OT_run_validation,
+    # Lights panel
+    MM_OT_add_light,
+    MM_OT_remove_light,
+    MM_OT_select_light,
+    MM_OT_select_light_by_index,
+    MM_OT_add_light_preset,
 )
 
 

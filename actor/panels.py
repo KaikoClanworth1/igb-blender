@@ -11,6 +11,7 @@ import os
 
 import bpy
 from bpy.types import Panel, UIList
+from .. import _get_icon_id
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,11 @@ class ACTOR_PT_Main(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "IGB Actors"
+
+    def draw_header(self, context):
+        icon_id = _get_icon_id()
+        if icon_id:
+            self.layout.label(icon_value=icon_id)
 
     def draw(self, context):
         pass  # Children handle the drawing

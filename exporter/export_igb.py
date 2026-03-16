@@ -169,8 +169,13 @@ def export_igb(context, filepath, operator=None):
             else:
                 material_props = _default_material()
 
-            # Extract and compress texture (with caching)
+            # Extract and compress texture(s) (with caching)
+            # Check for multi-texture (normal map, specular map)
+            all_tex_images = _find_all_texture_images(bl_mat)
+            has_extra_textures = len(all_tex_images) > 1
+
             if texture_mode == 'clut':
+                # CLUT mode: only supports single diffuse texture
                 clut_data, texture_name = _get_texture_clut_for_material(
                     bl_mat, texture_cache, operator
                 )
@@ -182,7 +187,30 @@ def export_igb(context, filepath, operator=None):
                     'texture_levels': None,
                     'texture_name': texture_name,
                 })
+            elif has_extra_textures:
+                # Multi-texture path: build texture_stages list
+                texture_stages = []
+                for unit_id in sorted(all_tex_images.keys()):
+                    bl_image = all_tex_images[unit_id]
+                    # Normal maps (unit_id=1): flip green channel back to DirectX
+                    is_nmap = (unit_id == 1)
+                    tex_levels, tex_name = _get_texture_for_image(
+                        bl_image, texture_cache, operator,
+                        swap_rb=swap_rb, flip_green=is_nmap,
+                    )
+                    texture_stages.append((tex_levels, tex_name, unit_id))
+                    _report(operator, 'INFO',
+                            f"      Texture stage {unit_id}: {tex_name}"
+                            f"{' (normal map)' if is_nmap else ''}")
+
+                builder_submeshes.append({
+                    'mesh': sub_mesh,
+                    'material': material_props,
+                    'material_state': material_props.get('material_state', {}),
+                    'texture_stages': texture_stages,
+                })
             else:
+                # Single-texture path (most common)
                 texture_levels, texture_name = _get_texture_for_material(
                     bl_mat, texture_cache, operator, swap_rb=swap_rb
                 )
@@ -455,6 +483,73 @@ def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False):
     return texture_levels, texture_name
 
 
+def _get_texture_for_image(bl_image, texture_cache, operator, swap_rb=False,
+                           flip_green=False):
+    """Get compressed texture levels for a specific Blender image, using cache.
+
+    Like _get_texture_for_material but takes a bl_image directly (for multi-texture).
+
+    Args:
+        bl_image: Blender image to compress
+        texture_cache: dict for caching compressed textures
+        operator: Blender operator for reporting
+        swap_rb: swap R/B channels (MUA PC)
+        flip_green: flip green channel (OpenGL → DirectX normal map conversion)
+
+    Returns:
+        (texture_levels, texture_name)
+    """
+    from ..utils.dxt_compress import compress_with_mipmaps
+
+    texture_levels = None
+    texture_name = bl_image.name if bl_image is not None else ''
+
+    # Include flip_green in cache key so normal maps get their own entry
+    cache_key = texture_name
+    if flip_green:
+        cache_key = texture_name + '_nmap'
+
+    if bl_image is not None:
+        # Check cache first
+        if cache_key in texture_cache:
+            cached_levels, cached_name = texture_cache[cache_key]
+            _report(operator, 'INFO',
+                    f"      Texture: {texture_name} (cached)")
+            return cached_levels, cached_name
+
+        # Extract RGBA pixels
+        rgba_data, img_w, img_h = _extract_image_pixels(bl_image)
+        if rgba_data is not None:
+            # Ensure power-of-2 dimensions
+            img_w, img_h, rgba_data = _ensure_power_of_2(
+                img_w, img_h, rgba_data)
+
+            # Flip green channel for normal maps (OpenGL → DirectX)
+            if flip_green:
+                for i in range(len(rgba_data) // 4):
+                    rgba_data[i * 4 + 1] = 255 - rgba_data[i * 4 + 1]
+
+            # DXT5 compress with mipmaps
+            try:
+                texture_levels = compress_with_mipmaps(
+                    rgba_data, img_w, img_h, swap_rb=swap_rb)
+                _report(operator, 'INFO',
+                        f"      Compressed: {img_w}x{img_h}, "
+                        f"{len(texture_levels)} mip levels"
+                        f"{' (normal map G-flip)' if flip_green else ''}")
+                texture_cache[cache_key] = (texture_levels, texture_name)
+            except Exception as e:
+                _report(operator, 'WARNING',
+                        f"      Texture compression failed: {e}")
+
+    # If no texture found, create a placeholder
+    if texture_levels is None:
+        texture_levels = _create_placeholder_texture(swap_rb=swap_rb)
+        texture_name = texture_name or 'placeholder'
+
+    return texture_levels, texture_name
+
+
 def _get_texture_clut_for_material(bl_mat, texture_cache, operator):
     """Get CLUT-quantized texture data for a material, using cache.
 
@@ -715,6 +810,68 @@ def _find_texture_image(bl_mat):
             return node.image
 
     return None
+
+
+def _find_all_texture_images(bl_mat):
+    """Find all texture images connected to Principled BSDF, classified by role.
+
+    Checks Base Color (diffuse, unit_id=0), Normal (normal, unit_id=1),
+    and Specular IOR Level (specular, unit_id=2) inputs.
+
+    Returns:
+        dict mapping unit_id -> bpy.types.Image, or empty dict if none found.
+        Only contains entries for textures that are actually connected.
+    """
+    if bl_mat is None or not bl_mat.use_nodes:
+        return {}
+
+    bsdf = None
+    for node in bl_mat.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            bsdf = node
+            break
+    if bsdf is None:
+        return {}
+
+    result = {}
+
+    # unit_id=0: diffuse (Base Color input)
+    base_color = bsdf.inputs.get('Base Color')
+    if base_color is not None and base_color.is_linked:
+        for link in base_color.links:
+            from_node = link.from_node
+            if from_node.type == 'TEX_IMAGE' and from_node.image is not None:
+                result[0] = from_node.image
+                break
+
+    # unit_id=1: normal (Normal input, via Normal Map node)
+    normal_input = bsdf.inputs.get('Normal')
+    if normal_input is not None and normal_input.is_linked:
+        for link in normal_input.links:
+            nmap_node = link.from_node
+            # Normal Map node -> its Color input has the texture
+            if nmap_node.type == 'NORMAL_MAP':
+                color_in = nmap_node.inputs.get('Color')
+                if color_in is not None and color_in.is_linked:
+                    for nlink in color_in.links:
+                        if (nlink.from_node.type == 'TEX_IMAGE' and
+                                nlink.from_node.image is not None):
+                            result[1] = nlink.from_node.image
+                            break
+            # Direct Image Texture -> Normal (unusual but handle it)
+            elif nmap_node.type == 'TEX_IMAGE' and nmap_node.image is not None:
+                result[1] = nmap_node.image
+
+    # unit_id=2: specular (Specular IOR Level input)
+    spec_input = bsdf.inputs.get('Specular IOR Level')
+    if spec_input is not None and spec_input.is_linked:
+        for link in spec_input.links:
+            from_node = link.from_node
+            if from_node.type == 'TEX_IMAGE' and from_node.image is not None:
+                result[2] = from_node.image
+                break
+
+    return result
 
 
 def _extract_image_pixels(bl_image):

@@ -121,6 +121,12 @@ def generate_engb_text(scene):
         w.attr("partylight", _vec_str(settings.partylight, 2))
     if settings.partylightradius > 0:
         w.attr("partylightradius", _float_str(settings.partylightradius, 0))
+    # NextGen overrides (MUA)
+    if any(v > 0 for v in settings.next_gen_partylight):
+        w.attr("next_gen_partylight", _vec_str(settings.next_gen_partylight, 2))
+    if settings.next_gen_partylightradius > 0:
+        w.attr("next_gen_partylightradius",
+               _float_str(settings.next_gen_partylightradius, 0))
     if settings.soundfile:
         w.attr("soundfile", settings.soundfile)
     zone_script = settings.zone_script
@@ -761,6 +767,14 @@ def import_engb_xml(scene, root, skip_classes=None):
                     settings.partylight = tuple(vals[:3])
             if child.get("partylightradius"):
                 settings.partylightradius = float(child.get("partylightradius"))
+            # NextGen overrides (MUA)
+            if child.get("next_gen_partylight"):
+                vals = [float(v) for v in child.get("next_gen_partylight").split()]
+                if len(vals) >= 3:
+                    settings.next_gen_partylight = tuple(vals[:3])
+            if child.get("next_gen_partylightradius"):
+                settings.next_gen_partylightradius = float(
+                    child.get("next_gen_partylightradius"))
             continue
 
         # Check if this classname should be skipped

@@ -16,7 +16,7 @@ from ..scene_graph.sg_classes import SceneGraph
 from ..scene_graph.sg_geometry import extract_geometry
 from ..scene_graph.sg_materials import extract_material, extract_texture_bind
 from .mesh_builder import build_mesh, _tuple_to_matrix
-from .material_builder import build_material, clear_caches
+from .material_builder import build_material, build_multitex_material, clear_caches
 from ..game_profiles import detect_profile, get_profile
 
 
@@ -38,7 +38,7 @@ class GeometryCollector:
         self.instances = []  # list of (attr_index, transform, state_dict)
         self.light_sets = []  # list of (light_set_obj, transform)
         self._current_material_obj = None
-        self._current_texbind_obj = None
+        self._current_texbind_map = {}  # unit_id -> igTextureBindAttr obj (multi-texture)
         self._current_blend_state_obj = None
         self._current_blend_func_obj = None
         self._current_alpha_state_obj = None
@@ -53,8 +53,19 @@ class GeometryCollector:
         self._current_material_obj = attr
 
     def visit_texture_bind_attr(self, attr, parent):
-        """Called when we encounter an igTextureBindAttr in the scene graph."""
-        self._current_texbind_obj = attr
+        """Called when we encounter an igTextureBindAttr in the scene graph.
+
+        Multiple texture binds can exist per material (diffuse, normal, specular).
+        Each has a unit_id (slot 5) that determines its role.
+        Uses a dict keyed by unit_id so child attrs correctly override parent attrs.
+        """
+        # Read unit_id from raw fields (slot 5, Int)
+        unit_id = 0
+        for slot, val, fi in attr._raw_fields:
+            if slot == 5 and fi.short_name == b"Int":
+                unit_id = val
+                break
+        self._current_texbind_map[unit_id] = attr
 
     def visit_blend_state_attr(self, attr, parent):
         """Called when we encounter an igBlendStateAttr."""
@@ -92,7 +103,9 @@ class GeometryCollector:
         """Capture current material state as a dict for geometry instances."""
         return {
             'material_obj': self._current_material_obj,
-            'texbind_obj': self._current_texbind_obj,
+            'texbind_objs': list(self._current_texbind_map.values()),
+            'texbind_obj': (self._current_texbind_map.get(0) or
+                           next(iter(self._current_texbind_map.values()), None)),
             'blend_state_obj': self._current_blend_state_obj,
             'blend_func_obj': self._current_blend_func_obj,
             'alpha_state_obj': self._current_alpha_state_obj,
@@ -316,12 +329,22 @@ def import_igb(context, filepath, operator=None):
 
             # Build and assign material (only on first instance - shared via mesh)
             mat_obj = state_dict.get('material_obj')
-            tex_obj = state_dict.get('texbind_obj')
+            texbind_objs = state_dict.get('texbind_objs', [])
+            # Backward compat fallback
+            if not texbind_objs:
+                tex_obj = state_dict.get('texbind_obj')
+                if tex_obj is not None:
+                    texbind_objs = [tex_obj]
+
             if options.get('import_materials', True) and mat_obj is not None:
                 parsed_mat = extract_material(reader, mat_obj, profile)
-                parsed_tex = None
-                if tex_obj is not None:
-                    parsed_tex = extract_texture_bind(reader, tex_obj, profile)
+
+                # Parse all texture binds and classify by unit_id
+                parsed_textures = []
+                for tb_obj in texbind_objs:
+                    pt = extract_texture_bind(reader, tb_obj, profile)
+                    if pt is not None:
+                        parsed_textures.append(pt)
 
                 # Extract additional material state attributes
                 from ..scene_graph.sg_materials import (
@@ -356,12 +379,44 @@ def import_igb(context, filepath, operator=None):
                     extra_state['cull_face'] = extract_cull_face(
                         reader, state_dict['cull_face_obj'], profile)
 
-                mat_name = _make_material_name(basename, parsed_mat, parsed_tex,
-                                               created_count)
-                bl_material = build_material(parsed_mat, parsed_tex,
-                                             extra_state=extra_state,
-                                             name=mat_name,
-                                             profile=profile)
+                # Use multi-texture path if >1 texture, else single-texture path
+                if len(parsed_textures) > 1:
+                    # Classify textures by unit_id into roles
+                    from ..igz_format.igz_materials import (
+                        TEX_ROLE_DIFFUSE, TEX_ROLE_NORMAL, TEX_ROLE_SPECULAR,
+                    )
+                    _UNIT_TO_ROLE = {
+                        0: TEX_ROLE_DIFFUSE,
+                        1: TEX_ROLE_NORMAL,
+                        2: TEX_ROLE_SPECULAR,
+                    }
+                    texture_role_map = {}
+                    diffuse_tex = None
+                    for pt in parsed_textures:
+                        uid = getattr(pt, 'unit_id', 0) or 0
+                        role = _UNIT_TO_ROLE.get(uid, TEX_ROLE_DIFFUSE)
+                        if pt.image is not None:
+                            texture_role_map[role] = pt.image
+                        if uid == 0:
+                            diffuse_tex = pt
+
+                    mat_name = _make_material_name(
+                        basename, parsed_mat, diffuse_tex, created_count)
+                    bl_material = build_multitex_material(
+                        parsed_mat, texture_role_map,
+                        extra_state=extra_state,
+                        name=mat_name,
+                        profile=profile)
+                else:
+                    # Single texture (common case) — use existing path
+                    parsed_tex = parsed_textures[0] if parsed_textures else None
+                    mat_name = _make_material_name(
+                        basename, parsed_mat, parsed_tex, created_count)
+                    bl_material = build_material(
+                        parsed_mat, parsed_tex,
+                        extra_state=extra_state,
+                        name=mat_name,
+                        profile=profile)
 
                 if bl_material is not None:
                     obj.data.materials.append(bl_material)

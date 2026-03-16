@@ -120,6 +120,12 @@ class ImportIGB(bpy.types.Operator, ImportHelper):
         default=True,
     )
 
+    def invoke(self, context, event):
+        # Always reset to auto-detect when opening the dialog so the
+        # previous import's manual selection doesn't carry over.
+        self.game_preset = "auto"
+        return super().invoke(context, event)
+
     def execute(self, context):
         from .importer.import_igb import import_igb
         return import_igb(context, self.filepath, self)
@@ -213,6 +219,10 @@ class ImportIGZ(bpy.types.Operator, ImportHelper):
         description="Import placed props/objects from companion .mua entity files (models/ directory)",
         default=True,
     )
+
+    def invoke(self, context, event):
+        self.game_preset = "auto"
+        return super().invoke(context, event)
 
     def execute(self, context):
         from .importer.import_igb import import_igb

@@ -466,18 +466,33 @@ class IGBBuilder:
             all_bbox_mins.append(mesh.bbox_min)
             all_bbox_maxs.append(mesh.bbox_max)
 
-            # --- Texture chain (DXT5 or CLUT) ---
-            clut_data = sub.get('clut_data', None)
-            if clut_data is not None:
-                palette_data, index_data, cw, ch = clut_data
-                texture_attr_idx, texture_bind_idx = self._build_clut_texture_chain(
-                    palette_data, index_data, cw, ch, tex_name
-                )
+            # --- Texture chain(s) (DXT5 or CLUT) ---
+            # Support multiple texture stages (diffuse, normal, specular)
+            texture_stages = sub.get('texture_stages', None)
+            texture_bind_indices = []
+
+            if texture_stages and len(texture_stages) > 0:
+                # Multi-texture path: each stage is (levels, name, unit_id)
+                for stage_levels, stage_name, stage_unit_id in texture_stages:
+                    t_attr_idx, t_bind_idx = self._build_texture_chain(
+                        stage_levels, stage_name, unit_id=stage_unit_id
+                    )
+                    texture_attr_indices.append(t_attr_idx)
+                    texture_bind_indices.append(t_bind_idx)
             else:
-                texture_attr_idx, texture_bind_idx = self._build_texture_chain(
-                    texture_levels, tex_name
-                )
-            texture_attr_indices.append(texture_attr_idx)
+                # Single-texture path (backward compat)
+                clut_data = sub.get('clut_data', None)
+                if clut_data is not None:
+                    palette_data, index_data, cw, ch = clut_data
+                    texture_attr_idx, texture_bind_idx = self._build_clut_texture_chain(
+                        palette_data, index_data, cw, ch, tex_name
+                    )
+                else:
+                    texture_attr_idx, texture_bind_idx = self._build_texture_chain(
+                        texture_levels, tex_name
+                    )
+                texture_attr_indices.append(texture_attr_idx)
+                texture_bind_indices.append(texture_bind_idx)
 
             # --- TextureStateAttr ---
             tex_state_idx = self._add_obj(MO_TEXTURE_STATE_ATTR, [
@@ -545,8 +560,8 @@ class IGBBuilder:
             ])
 
             # --- AttrList for AttrSet ---
-            # Base attrs: material + texture + texstate + color
-            attr_refs = [material_idx, texture_bind_idx, tex_state_idx, color_attr_idx]
+            # Base attrs: material + texture bind(s) + texstate + color
+            attr_refs = [material_idx] + texture_bind_indices + [tex_state_idx, color_attr_idx]
 
             # Conditionally add state attrs from material_state.
             # Game files omit blend/alpha attrs entirely for opaque materials.
@@ -847,7 +862,7 @@ class IGBBuilder:
     # Private helpers — building sub-components
     # =========================================================================
 
-    def _build_texture_chain(self, texture_levels, tex_name):
+    def _build_texture_chain(self, texture_levels, tex_name, unit_id=0):
         """Build images + mipmap list + texture attr + texture bind.
 
         Returns:
@@ -929,7 +944,7 @@ class IGBBuilder:
         texture_bind_idx = self._add_obj(MO_TEXTURE_BIND_ATTR, [
             (2, 0, 'Short', 2),
             (4, texture_attr_idx, 'ObjectRef', 4),
-            (5, 0, 'Int', 4),  # unit = 0
+            (5, unit_id, 'Int', 4),  # unit_id: 0=diffuse, 1=normal, 2=specular
         ])
 
         return texture_attr_idx, texture_bind_idx

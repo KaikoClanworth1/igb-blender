@@ -9,6 +9,7 @@ Panel structure (tab-based):
 
 import bpy
 from bpy.types import Panel, UIList
+from .. import _get_icon_id
 
 
 # ===========================================================================
@@ -403,6 +404,8 @@ def _draw_schema_properties(layout, edef):
 
                 else:
                     # string / int / float — use direct prop editor if property exists
+                    is_script = (prop_def['type'] == 'string'
+                                 and key.endswith('script'))
                     row = box.row(align=True)
                     row.label(text=label)
                     if prop:
@@ -412,6 +415,10 @@ def _draw_schema_properties(layout, edef):
                         op.entity_name = edef.entity_name
                         op.property_key = key
                         op.property_value = prop_def.get('default', '')
+                    if is_script:
+                        op = row.operator("mm.open_script_editor",
+                                          text="", icon='TEXT')
+                        op.script_key = key
 
     # Raw key-value editor for properties NOT covered by schema
     has_extra = False
@@ -424,12 +431,17 @@ def _draw_schema_properties(layout, edef):
         layout.separator()
         box = layout.box()
         box.label(text="Custom Properties", icon='PROPERTIES')
+        _script_keys = {'actscript', 'spawnscript', 'monster_actscript'}
         for i, prop in enumerate(edef.properties):
             if schema and prop.key in schema_keys:
                 continue
             row = box.row(align=True)
             row.prop(prop, "key", text="")
             row.prop(prop, "value", text="")
+            if prop.key in _script_keys:
+                op = row.operator("mm.open_script_editor",
+                                  text="", icon='TEXT')
+                op.script_key = prop.key
             op = row.operator("mm.remove_entity_property_by_index", text="", icon='X')
             op.index = i
 
@@ -449,6 +461,11 @@ class MM_PT_Root(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Map Maker"
+
+    def draw_header(self, context):
+        icon_id = _get_icon_id()
+        if icon_id:
+            self.layout.label(icon_value=icon_id)
 
     def draw(self, context):
         layout = self.layout
@@ -508,10 +525,118 @@ class MM_PT_Scene_Environment(Panel):
         col.prop(settings, "soundfile")
         col.prop(settings, "partylight")
         col.prop(settings, "partylightradius")
+
+        # NextGen overrides (MUA)
+        box = layout.box()
+        box.label(text="NextGen Overrides (MUA)", icon='SHADING_RENDERED')
+        col_ng = box.column(align=True)
+        col_ng.prop(settings, "next_gen_partylight")
+        col_ng.prop(settings, "next_gen_partylightradius")
+
+        col = layout.column(align=True)
         row = col.row(align=True)
         row.prop(settings, "combatlocked")
         row.prop(settings, "nosave")
         col.prop(settings, "bigconvmap")
+
+
+class MM_PT_Scene_Lights(Panel):
+    """Scene lights — IGB static lights for the map"""
+    bl_label = "Lights"
+    bl_idname = "MM_PT_Scene_Lights"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'SCENE'
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.mm_settings
+
+        # --- Collect scene lights (excluding mm_preview lights) ---
+        lights = []
+        for obj in context.scene.objects:
+            if obj.type == 'LIGHT' and not obj.get("mm_preview"):
+                lights.append(obj)
+        lights.sort(key=lambda o: o.name)
+
+        # --- Add / Remove / Select buttons ---
+        row = layout.row(align=True)
+        row.operator("mm.add_light", text="", icon='ADD')
+        row.operator("mm.remove_light", text="", icon='REMOVE')
+        row.separator()
+        row.operator("mm.select_light", text="", icon='RESTRICT_SELECT_OFF')
+        row.separator()
+        row.label(text=f"{len(lights)} light(s)")
+
+        # --- Light list (manual draw, not UIList) ---
+        if lights:
+            box = layout.box()
+            col = box.column(align=True)
+            idx = settings.active_light_index
+
+            for i, obj in enumerate(lights):
+                light = obj.data
+                # Type icon
+                type_icons = {
+                    'SUN': 'LIGHT_SUN',
+                    'POINT': 'LIGHT_POINT',
+                    'SPOT': 'LIGHT_SPOT',
+                    'AREA': 'LIGHT_AREA',
+                }
+                icon = type_icons.get(light.type, 'LIGHT')
+
+                row = col.row(align=True)
+                # Highlight active row
+                if i == idx:
+                    row.alert = True
+                op = row.operator("mm.select_light_by_index", text="",
+                                  icon=icon, emboss=(i == idx))
+                op.index = i
+                row.label(text=obj.name)
+                # Visibility toggle
+                row.prop(obj, "hide_viewport", text="", icon='HIDE_OFF',
+                         emboss=False)
+
+        # --- Details for selected light ---
+        if lights and 0 <= settings.active_light_index < len(lights):
+            obj = lights[settings.active_light_index]
+            light = obj.data
+
+            layout.separator()
+            box = layout.box()
+            box.label(text="Properties", icon='PROPERTIES')
+
+            col = box.column(align=True)
+            col.prop(light, "type", text="Type")
+            col.prop(light, "color", text="")
+            col.prop(light, "energy", text="Energy")
+            col.prop(light, "use_shadow", text="Shadows")
+
+            # Spot-specific
+            if light.type == 'SPOT':
+                col.separator()
+                col.label(text="Spot Settings:", icon='LIGHT_SPOT')
+                col.prop(light, "spot_size", text="Cone Angle")
+                col.prop(light, "spot_blend", text="Blend")
+
+            # Position
+            col = box.column(align=True)
+            col.label(text="Position:")
+            col.prop(obj, "location", text="")
+
+        # --- Preset buttons ---
+        layout.separator()
+        row = layout.row(align=True)
+        row.label(text="Presets:", icon='LIGHT')
+        row = layout.row(align=True)
+        for preset_key in ('WARM', 'COOL', 'RED', 'GREEN'):
+            op = row.operator("mm.add_light_preset", text=preset_key.capitalize())
+            op.preset = preset_key
 
 
 class MM_PT_Scene_Paths(Panel):
@@ -558,15 +683,38 @@ class MM_PT_Place_QuickAdd(Panel):
     def poll(cls, context):
         return context.scene.mm_settings.ui_tab == 'PLACE'
 
+    # Map category labels to filter enum values
+    _CAT_FILTER_MAP = {
+        "Hub & Terminals": 'HUB',
+        "Triggers & Zones": 'TRIGGERS',
+        "Enemies & NPCs": 'ENEMIES',
+        "Environment & FX": 'ENV',
+        "Doors & Movers": 'DOORS',
+        "Pickups & Items": 'PICKUPS',
+        "Camera": 'CAMERA',
+        "MUA Only": 'MUA',
+    }
+
     def draw(self, context):
         layout = self.layout
+        settings = context.scene.mm_settings
+
+        # Filter tabs
+        layout.prop(settings, "quick_add_filter", expand=True)
 
         from .entity_defs import ENTITY_PRESETS, PRESET_CATEGORIES
 
         # Build lookup: preset_id -> preset tuple
         preset_map = {p[0]: p for p in ENTITY_PRESETS}
+        active_filter = settings.quick_add_filter
 
         for cat_label, cat_icon, cat_game, preset_ids in PRESET_CATEGORIES:
+            # Skip categories that don't match the filter
+            if active_filter != 'ALL':
+                cat_key = self._CAT_FILTER_MAP.get(cat_label, '')
+                if cat_key != active_filter:
+                    continue
+
             valid = [pid for pid in preset_ids if pid in preset_map]
             if not valid:
                 continue
@@ -1570,6 +1718,7 @@ _classes = (
     # Tab: Scene
     MM_PT_Scene_Identity,
     MM_PT_Scene_Environment,
+    MM_PT_Scene_Lights,
     MM_PT_Scene_Paths,
     # Tab: Place
     MM_PT_Place_QuickAdd,

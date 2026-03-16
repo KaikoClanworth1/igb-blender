@@ -20,6 +20,7 @@ Quick-access batch tools for modifying IGB material properties:
 import os
 import bpy
 from bpy.types import Operator, Panel
+from . import _get_icon_id
 from bpy.props import (BoolProperty, FloatProperty, FloatVectorProperty,
                        IntProperty, EnumProperty)
 
@@ -1304,6 +1305,11 @@ class IGB_PT_Main(Panel):
     bl_region_type = 'UI'
     bl_category = "IGB"
 
+    def draw_header(self, context):
+        icon_id = _get_icon_id()
+        if icon_id:
+            self.layout.label(icon_value=icon_id)
+
     def draw(self, context):
         pass  # Child sub-panels provide all content
 
@@ -1434,6 +1440,10 @@ class IGB_PT_Materials(Panel):
         row.scale_y = 1.3
         row.operator("igb.convert_materials", icon='NODE_MATERIAL')
 
+        row = layout.row(align=True)
+        row.scale_y = 1.2
+        row.operator("igb.resize_textures", icon='IMAGE_DATA')
+
         # Status: count IGB vs non-IGB materials on scene meshes
         colliders_coll = bpy.data.collections.get("Colliders")
         collider_objs = (set(colliders_coll.objects)
@@ -1464,6 +1474,56 @@ class IGB_PT_Materials(Panel):
         else:
             layout.separator()
             layout.label(text="No materials on scene meshes", icon='ERROR')
+
+
+class IGB_OT_resize_textures(Operator):
+    """Resize all textures used by scene materials to 512×512"""
+    bl_idname = "igb.resize_textures"
+    bl_label = "Resize Textures to 512"
+    bl_description = "Scale all scene textures to 512×512 for game compatibility"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    target_size: IntProperty(
+        name="Size",
+        description="Target texture size (square)",
+        default=512,
+        min=32,
+        max=2048,
+    )
+
+    def execute(self, context):
+        # Collect all images used by scene materials
+        images = set()
+        for obj in context.scene.objects:
+            if obj.type != 'MESH':
+                continue
+            for slot in obj.material_slots:
+                mat = slot.material
+                if mat is None or not mat.use_nodes:
+                    continue
+                for node in mat.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image is not None:
+                        images.add(node.image)
+
+        if not images:
+            self.report({'WARNING'}, "No textures found on scene materials")
+            return {'FINISHED'}
+
+        sz = self.target_size
+        resized = 0
+        skipped = 0
+
+        for img in images:
+            if img.size[0] == sz and img.size[1] == sz:
+                skipped += 1
+                continue
+            img.scale(sz, sz)
+            resized += 1
+
+        self.report({'INFO'},
+                    f"Resized {resized} texture(s) to {sz}×{sz}"
+                    f" ({skipped} already correct)")
+        return {'FINISHED'}
 
 
 # ===========================================================================
@@ -2435,6 +2495,7 @@ classes = (
     IGB_OT_generate_decimated_colliders,
     IGB_OT_merge_colliders,
     IGB_OT_convert_materials,
+    IGB_OT_resize_textures,
     IGB_OT_set_all_lighting,
     IGB_OT_set_all_culling,
     IGB_OT_set_all_uv_anim,
