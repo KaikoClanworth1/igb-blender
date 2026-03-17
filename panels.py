@@ -2321,6 +2321,38 @@ def _draw_material_colors(layout, mat):
         box.label(text="Import an IGB file or use Quick Tools to set.")
 
 
+class IGB_OT_add_material_node(Operator):
+    """Add IGB Material Settings node group to the active material"""
+    bl_idname = "igb.add_material_node"
+    bl_label = "Add IGB Settings Node"
+    bl_description = "Add an IGB Material Settings node group to the shader editor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.material is not None
+
+    def execute(self, context):
+        mat = context.material
+        from .utils.material_nodes import find_igb_node, migrate_custom_props_to_node, add_igb_node_to_material
+
+        existing = find_igb_node(mat)
+        if existing is not None:
+            self.report({'INFO'}, "IGB Settings node already exists")
+            return {'FINISHED'}
+
+        # If material has igb_* custom props, migrate them to the node
+        has_igb = any(key.startswith("igb_") for key in mat.keys())
+        if has_igb:
+            migrate_custom_props_to_node(mat)
+            self.report({'INFO'}, "Migrated IGB properties to shader node")
+        else:
+            add_igb_node_to_material(mat)
+            self.report({'INFO'}, "Added IGB Settings node with defaults")
+
+        return {'FINISHED'}
+
+
 class IGB_PT_MaterialState(Panel):
     """IGB Material State — shows Alchemy render attributes on the material."""
     bl_label = "IGB Material State"
@@ -2338,9 +2370,20 @@ class IGB_PT_MaterialState(Panel):
         layout = self.layout
         mat = context.material
 
+        # --- IGB Node Group button ---
+        from .utils.material_nodes import find_igb_node
+        igb_node = find_igb_node(mat)
+        if igb_node is not None:
+            layout.label(text="IGB Settings node active", icon='CHECKMARK')
+            layout.label(text="Edit values in the Shader Editor")
+        else:
+            layout.operator("igb.add_material_node", icon='NODE')
+
+        layout.separator()
+
         # Check if this material has any IGB properties
         has_igb = any(key.startswith("igb_") for key in mat.keys())
-        if not has_igb:
+        if not has_igb and igb_node is None:
             layout.label(text="No IGB properties on this material.")
             layout.label(text="Import an IGB file to see state here.")
             return
@@ -2509,6 +2552,7 @@ classes = (
     IGB_OT_set_all_shininess,
     IGB_OT_set_all_shader,
     IGB_OT_merge_duplicate_materials,
+    IGB_OT_add_material_node,
     IGB_OT_update_addon,
     # IGB Tab panels (parent before children)
     IGB_PT_Main,

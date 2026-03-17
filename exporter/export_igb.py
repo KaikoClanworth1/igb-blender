@@ -279,6 +279,28 @@ def export_igb(context, filepath, operator=None):
     light_data_list = []
     if export_lights:
         light_data_list = _collect_scene_lights(context)
+
+        # Add SceneAmbient from world background color if available
+        world = context.scene.world
+        if world and world.use_nodes:
+            for node in world.node_tree.nodes:
+                if node.type == 'BACKGROUND':
+                    c = node.inputs['Color'].default_value
+                    if c[0] > 0.001 or c[1] > 0.001 or c[2] > 0.001:
+                        light_data_list.insert(0, {
+                            'name': 'SceneAmbient',
+                            'type': 0,  # DIRECTIONAL
+                            'position': (0.0, 0.0, 0.0),
+                            'direction': (0.0, 0.0, -1.0),
+                            'diffuse': (c[0], c[1], c[2], 1.0),
+                            'ambient': (c[0], c[1], c[2], 1.0),
+                            'specular': (0.0, 0.0, 0.0, 1.0),
+                            'attenuation': (1.0, 0.0, 0.0),
+                            'falloff': 0.0,
+                            'cutoff': 180.0,
+                        })
+                    break
+
         if light_data_list:
             _report(operator, 'INFO',
                     f"Exporting {len(light_data_list)} light(s)")
@@ -405,6 +427,19 @@ def _collect_scene_lights(context):
             # So: falloff = (1 - inner_ratio) / 30 = spot_blend / 30
             falloff = light.spot_blend / 30.0
 
+        # Override defaults with Alchemy-specific custom properties if present
+        # (stored on import for lossless round-trip)
+        if "ig_ambient" in obj:
+            ambient = tuple(obj["ig_ambient"])
+        if "ig_specular" in obj:
+            specular = tuple(obj["ig_specular"])
+        if "ig_attenuation" in obj:
+            attenuation = tuple(obj["ig_attenuation"])
+
+        shininess = obj.get("ig_shininess", 0.0)
+        light_id = obj.get("ig_light_id", 0)
+        cast_shadow = light.use_shadow
+
         light_name = obj.name
         lights.append({
             'name': light_name,
@@ -417,6 +452,9 @@ def _collect_scene_lights(context):
             'attenuation': attenuation,
             'falloff': falloff,
             'cutoff': cutoff,
+            'shininess': shininess,
+            'light_id': light_id,
+            'cast_shadow': cast_shadow,
         })
 
     return lights
@@ -645,7 +683,25 @@ def _extract_material_props(bl_mat):
     """
     props = _default_material()
 
-    # --- Try igb_* custom properties first (import round-trip) ---
+    # --- Try IGB node group first (shader editor) ---
+    from ..utils.material_nodes import find_igb_node, read_igb_node_values
+    igb_node = find_igb_node(bl_mat)
+    if igb_node is not None:
+        nv = read_igb_node_values(igb_node)
+        if 'diffuse' in nv:
+            props['diffuse'] = nv['diffuse']
+        if 'ambient' in nv:
+            props['ambient'] = nv['ambient']
+        if 'specular' in nv:
+            props['specular'] = nv['specular']
+        if 'emission' in nv:
+            props['emission'] = nv['emission']
+        if 'shininess' in nv:
+            props['shininess'] = nv['shininess']
+        props['material_state'] = _extract_material_state(bl_mat)
+        return props
+
+    # --- Try igb_* custom properties (legacy round-trip) ---
     igb_diffuse = bl_mat.get("igb_diffuse")
     if igb_diffuse is not None:
         props['diffuse'] = tuple(igb_diffuse)
@@ -696,15 +752,55 @@ def _extract_material_props(bl_mat):
 
 
 def _extract_material_state(bl_mat):
-    """Extract IGB material state custom properties from a Blender material.
+    """Extract IGB material state from a Blender material.
 
-    Reads back the igb_* custom properties that were set during import,
-    preserving them for round-trip export fidelity. If custom properties
-    aren't present, infers blend state from Blender material settings.
+    Priority order:
+    1. IGB Material Settings node group (shader editor)
+    2. igb_* custom properties (legacy)
+    3. Infer from Blender material settings
 
     Returns:
         dict with material state keys (only present keys are included)
     """
+    # --- Try IGB node group first ---
+    from ..utils.material_nodes import find_igb_node, read_igb_node_values
+    igb_node = find_igb_node(bl_mat)
+    if igb_node is not None:
+        nv = read_igb_node_values(igb_node)
+        state = {}
+        if nv.get('blend_enabled'):
+            state['blend_enabled'] = True
+            state['blend_src'] = nv.get('blend_src', 4)
+            state['blend_dst'] = nv.get('blend_dst', 5)
+            state['blend_eq'] = nv.get('blend_eq', 0)
+            state['blend_constant'] = nv.get('blend_constant', 0)
+            state['blend_stage'] = nv.get('blend_stage', 0)
+            state['blend_a'] = nv.get('blend_a', 0)
+            state['blend_b'] = nv.get('blend_b', 0)
+            state['blend_c'] = nv.get('blend_c', 0)
+            state['blend_d'] = nv.get('blend_d', 0)
+        if nv.get('alpha_test_enabled'):
+            state['alpha_test_enabled'] = True
+            state['alpha_func'] = nv.get('alpha_func', 6)
+            state['alpha_ref'] = nv.get('alpha_ref', 0.5)
+        color = nv.get('color')
+        if color is not None and color != (1.0, 1.0, 1.0, 1.0):
+            state['color_r'] = color[0]
+            state['color_g'] = color[1]
+            state['color_b'] = color[2]
+            state['color_a'] = color[3]
+        lighting = nv.get('lighting_enabled')
+        if lighting is not None:
+            state['lighting_enabled'] = bool(lighting)
+        if nv.get('tex_matrix_enabled'):
+            state['tex_matrix_enabled'] = True
+            state['tex_matrix_unit_id'] = nv.get('tex_matrix_unit_id', 0)
+        cull = nv.get('cull_face_enabled')
+        if cull is not None:
+            state['cull_face_enabled'] = bool(cull)
+            state['cull_face_mode'] = nv.get('cull_face_mode', 0)
+        return state
+
     state = {}
 
     # Blend state — only include if enabled (game files omit for opaque)

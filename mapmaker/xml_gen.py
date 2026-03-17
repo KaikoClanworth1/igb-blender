@@ -255,6 +255,40 @@ def generate_navb_text(scene):
     return w.build()
 
 
+def write_navb_binary(scene, output_path):
+    """Write NAVB directly as binary XMLB (bypasses xmlb-compile.exe).
+
+    Returns True if written, False if no nav cells.
+    """
+    import ast
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+    from .xmlb import write_xmlb
+
+    cellsize = scene.mm_settings.nav_cellsize
+    raw = scene.get("mm_nav_cells", "")
+    if not raw:
+        return False
+
+    try:
+        cells = ast.literal_eval(raw)
+    except Exception:
+        return False
+
+    if not cells:
+        return False
+
+    # Build ET tree matching the binary NAVB format
+    root = ET.Element("nav")
+    root.set("cellsize", str(cellsize))
+    for gx, gy, wz in cells:
+        child = ET.SubElement(root, "c")
+        child.set("p", f"{gx} {gy} {int(round(wz))}")
+
+    write_xmlb(root, Path(output_path))
+    return True
+
+
 # ===========================================================================
 # BOYB generation
 # ===========================================================================
@@ -649,12 +683,14 @@ def generate_all(scene, output_dir):
     _write_raven_text(chrb_text, chrb_path)
     written.append(chrb_path)
 
-    # NAVB
-    navb_text = generate_navb_text(scene)
-    if navb_text is not None:
-        navb_path = os.path.join(output_dir, base_name + ".navb.xml")
-        _write_raven_text(navb_text, navb_path)
-        written.append(navb_path)
+    # NAVB — write binary directly (Python write_xmlb, no exe needed)
+    navb_bin_path = os.path.join(output_dir, base_name + ".navb")
+    if write_navb_binary(scene, navb_bin_path):
+        written.append(navb_bin_path)
+        # Remove stale .navb.xml if present (from previous builds)
+        stale_navb_xml = os.path.join(output_dir, base_name + ".navb.xml")
+        if os.path.exists(stale_navb_xml):
+            os.remove(stale_navb_xml)
 
     # BOYB
     boyb_text = generate_boyb_text()

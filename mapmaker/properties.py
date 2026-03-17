@@ -298,6 +298,44 @@ class MM_MapSettings(PropertyGroup):
         default=True,
     )
 
+    # --- IGB Export (Build All) ---
+    build_export_igb: BoolProperty(
+        name="Export IGB",
+        description="Export the map .igb file when running Build All",
+        default=True,
+    )
+    build_texture_format: EnumProperty(
+        name="Texture Format",
+        description="Texture encoding format for game compatibility",
+        items=[
+            ('clut', "CLUT Universal",
+             "PS2 CLUT format — works in both XML2 and MUA"),
+            ('dxt5_xml2', "DXT5 (XML2 PC)",
+             "DXT5 with standard RGB565 endpoints for XML2 PC"),
+            ('dxt5_mua', "DXT5 (MUA PC)",
+             "DXT5 with BGR565 color endpoints for MUA PC"),
+        ],
+        default='clut',
+    )
+    build_collision_source: EnumProperty(
+        name="Collision Source",
+        description="Source geometry for collision hull export",
+        items=[
+            ('COLLIDERS', "Colliders Collection",
+             "Use objects from the 'Colliders' collection"),
+            ('VISUAL', "Visual Mesh",
+             "Auto-generate collision from the visible mesh geometry"),
+            ('NONE', "None",
+             "Do not export collision data"),
+        ],
+        default='COLLIDERS',
+    )
+    build_export_lights: BoolProperty(
+        name="Export Lights",
+        description="Export scene lights as igLightSet objects in the IGB",
+        default=True,
+    )
+
     # --- Build paths ---
     output_dir: StringProperty(
         name="Output Directory",

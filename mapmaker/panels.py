@@ -1451,7 +1451,9 @@ class MM_PT_Build_Navigation(Panel):
         col = layout.column(align=True)
         col.scale_y = 1.2
         col.operator("mm.generate_navmesh", icon='MESH_GRID')
-        col.operator("mm.visualize_navmesh", icon='SHADING_WIRE')
+        row = col.row(align=True)
+        row.operator("mm.visualize_navmesh", icon='SHADING_WIRE')
+        row.operator("mm.clear_navmesh", text="", icon='TRASH')
 
         if "mm_nav_cells" in scene:
             import ast
@@ -1462,6 +1464,32 @@ class MM_PT_Build_Navigation(Panel):
                 layout.label(text="Nav cell data invalid", icon='ERROR')
         else:
             layout.label(text="No nav cells generated yet", icon='INFO')
+
+
+class MM_PT_Build_IGB(Panel):
+    """IGB map file export settings"""
+    bl_label = "IGB Export"
+    bl_idname = "MM_PT_Build_IGB"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Map Maker"
+    bl_parent_id = "MM_PT_Root"
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene.mm_settings.ui_tab == 'BUILD'
+
+    def draw_header(self, context):
+        self.layout.prop(context.scene.mm_settings, "build_export_igb", text="")
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.mm_settings
+        layout.active = settings.build_export_igb
+
+        layout.prop(settings, "build_texture_format")
+        layout.prop(settings, "build_collision_source")
+        layout.prop(settings, "build_export_lights")
 
 
 class MM_PT_Build_Compile(Panel):
@@ -1733,6 +1761,7 @@ _classes = (
     MM_PT_Logic_Precache,
     # Tab: Build
     MM_PT_Build_Navigation,
+    MM_PT_Build_IGB,
     MM_PT_Build_Compile,
     MM_PT_Build_Validation,
     MM_PT_Build_Collision,

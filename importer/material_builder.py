@@ -177,6 +177,9 @@ def build_material(parsed_material, parsed_texture=None,
     # --- Apply extra material state attributes (custom props + visual) ---
     _apply_extra_state(mat, bsdf, extra_state, nodes, links, blend_decision)
 
+    # --- Create IGB Material Settings node group ---
+    _create_igb_settings_node(mat, parsed_material, extra_state)
+
     # --- Apply final Blender blend mode ---
     _apply_blend_decision(mat, blend_decision, extra_state)
 
@@ -537,6 +540,74 @@ def _insert_color_multiply(mat, bsdf, color, nodes, links):
     links.new(mix_node.outputs[2], base_color_input)  # Result -> Base Color
 
 
+def _create_igb_settings_node(mat, parsed_material, extra_state):
+    """Create an IGB Material Settings node group with all parsed values.
+
+    Consolidates material colors and render state into a visible,
+    editable node in the shader editor.
+    """
+    from ..utils.material_nodes import add_igb_node_to_material, set_igb_node_values
+
+    node = add_igb_node_to_material(mat)
+
+    # Build props dict from parsed material data
+    props = {}
+    if parsed_material is not None:
+        props['diffuse'] = parsed_material.diffuse
+        props['ambient'] = parsed_material.ambient
+        props['specular'] = parsed_material.specular
+        props['emission'] = parsed_material.emission
+        props['shininess'] = parsed_material.shininess
+        props['flags'] = parsed_material.flags
+
+    # Add render state from extra_state dict
+    if extra_state:
+        blend_state = extra_state.get('blend_state')
+        if blend_state is not None:
+            props['blend_enabled'] = int(blend_state.get('enabled', False))
+
+        blend_func = extra_state.get('blend_function')
+        if blend_func is not None:
+            props['blend_src'] = blend_func.get('src', 4)
+            props['blend_dst'] = blend_func.get('dst', 5)
+            props['blend_eq'] = blend_func.get('eq', 0)
+            props['blend_constant'] = blend_func.get('constant', 0)
+            props['blend_stage'] = blend_func.get('stage', 0)
+            props['blend_a'] = blend_func.get('a', 0)
+            props['blend_b'] = blend_func.get('b', 0)
+            props['blend_c'] = blend_func.get('c', 0)
+            props['blend_d'] = blend_func.get('d', 0)
+
+        alpha_state = extra_state.get('alpha_state')
+        if alpha_state is not None:
+            props['alpha_test_enabled'] = int(alpha_state.get('enabled', False))
+
+        alpha_func = extra_state.get('alpha_function')
+        if alpha_func is not None:
+            props['alpha_func'] = alpha_func.get('func', 6)
+            props['alpha_ref'] = alpha_func.get('ref', 0.5)
+
+        color = extra_state.get('color')
+        if color is not None:
+            props['color'] = color
+
+        lighting = extra_state.get('lighting_state')
+        if lighting is not None:
+            props['lighting_enabled'] = int(lighting.get('enabled', True))
+
+        tex_matrix = extra_state.get('tex_matrix_state')
+        if tex_matrix is not None:
+            props['tex_matrix_enabled'] = int(tex_matrix.get('enabled', False))
+            props['tex_matrix_unit_id'] = tex_matrix.get('unit_id', 0)
+
+        cull_face = extra_state.get('cull_face')
+        if cull_face is not None:
+            props['cull_face_enabled'] = int(cull_face.get('enabled', True))
+            props['cull_face_mode'] = cull_face.get('mode', 0)
+
+    set_igb_node_values(node, props)
+
+
 def build_multitex_material(parsed_material, texture_role_map,
                             extra_state=None, name="Material",
                             profile=None):
@@ -731,6 +802,10 @@ def build_multitex_material(parsed_material, texture_role_map,
 
     # --- Apply extra state (blend, alpha, color, cull) ---
     _apply_extra_state(mat, bsdf, extra_state, nodes, links, blend_decision)
+
+    # --- Create IGB Material Settings node group ---
+    _create_igb_settings_node(mat, parsed_material, extra_state)
+
     _apply_blend_decision(mat, blend_decision, extra_state)
 
     _material_cache[cache_key] = mat

@@ -95,6 +95,14 @@ def build_light(parsed_light, name="IGB_Light"):
             light_obj.rotation_euler = direction.to_track_quat(
                 '-Z', 'Y').to_euler()
 
+    # Store Alchemy-specific properties that Blender doesn't natively support.
+    # These are preserved as custom properties for lossless round-trip export.
+    light_obj["ig_light_id"] = parsed_light.light_id
+    light_obj["ig_ambient"] = list(parsed_light.ambient)
+    light_obj["ig_specular"] = list(parsed_light.specular)
+    light_obj["ig_attenuation"] = list(parsed_light.attenuation)
+    light_obj["ig_shininess"] = parsed_light.shininess
+
     return light_obj
 
 

@@ -1088,7 +1088,8 @@ class IGBBuilder:
         Args:
             light_data: dict with keys:
                 'name', 'type', 'position', 'direction', 'diffuse',
-                'ambient', 'specular', 'attenuation', 'falloff', 'cutoff'
+                'ambient', 'specular', 'attenuation', 'falloff', 'cutoff',
+                'shininess', 'light_id', 'cast_shadow'
 
         Returns:
             (light_set_idx, light_state_attr_idx)
@@ -1103,11 +1104,15 @@ class IGBBuilder:
         attenuation = light_data.get('attenuation', (1.0, 0.0, 0.0))
         falloff = light_data.get('falloff', 0.0)
         cutoff = light_data.get('cutoff', -0.5)
+        shininess = light_data.get('shininess', 0.0)
+        light_id = light_data.get('light_id', 0)
+        cast_shadow = light_data.get('cast_shadow', False)
 
         # --- igLightAttr ---
-        light_attr_idx = self._add_obj(MO_LIGHT_ATTR, [
+        light_attr_fields = [
             (2, 0, 'Short', 2),                     # _cachedAttrIndex
             (4, light_type, 'Enum', 4),              # _lightType
+            (5, light_id, 'Int', 4),                 # _lightId
             (6, position, 'Vec3f', 12),              # _position
             (7, ambient, 'Vec4f', 16),               # _ambient
             (8, diffuse, 'Vec4f', 16),               # _diffuse
@@ -1116,10 +1121,12 @@ class IGBBuilder:
             (11, falloff, 'Float', 4),                # _falloff
             (12, cutoff, 'Float', 4),                 # _cutoff
             (13, attenuation, 'Vec3f', 12),           # _attenuation
-            (14, 0.0, 'Float', 4),                    # _shininess
-            (15, (0.0, 0.0, 0.0), 'Vec3f', 12),      # _cachedPosition (always zero)
-            (16, (0.0, 0.0, -1.0), 'Vec3f', 12),     # _cachedDirection (always default)
-        ])
+            (14, shininess, 'Float', 4),              # _shininess
+            (15, (0.0, 0.0, 0.0), 'Vec3f', 12),      # _cachedPosition (runtime)
+            (16, (0.0, 0.0, -1.0), 'Vec3f', 12),     # _cachedDirection (runtime)
+            (17, 1 if cast_shadow else 0, 'Bool', 1), # _castShadowState
+        ]
+        light_attr_idx = self._add_obj(MO_LIGHT_ATTR, light_attr_fields)
 
         # --- igLightList (ObjectList with 1 entry) ---
         light_ref_data = struct.pack("<i", light_attr_idx)

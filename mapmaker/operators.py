@@ -1745,6 +1745,32 @@ class MM_OT_visualize_navmesh(Operator):
         return {'FINISHED'}
 
 
+class MM_OT_clear_navmesh(Operator):
+    """Remove stored nav cells and the NavMesh_Preview object"""
+    bl_idname = "mm.clear_navmesh"
+    bl_label = "Clear NavMesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return "mm_nav_cells" in context.scene
+
+    def execute(self, context):
+        scene = context.scene
+
+        # Remove stored nav cell data
+        if "mm_nav_cells" in scene:
+            del scene["mm_nav_cells"]
+
+        # Remove visualization mesh if present
+        old = bpy.data.objects.get("NavMesh_Preview")
+        if old:
+            bpy.data.objects.remove(old, do_unlink=True)
+
+        self.report({'INFO'}, "Nav mesh data cleared")
+        return {'FINISHED'}
+
+
 # ===========================================================================
 # Build & Compile
 # ===========================================================================
@@ -1869,6 +1895,27 @@ class MM_OT_build_all(Operator):
         except Exception as e:
             print(f"[MapMaker] Warning: objective generation failed: {e}")
 
+        # Step 1.5: Export IGB if enabled (main thread — needs bpy access)
+        if settings.build_export_igb:
+            from ..exporter.export_igb import export_igb
+
+            class _IGBOptions:
+                """Fake operator namespace for export_igb options."""
+                pass
+
+            opts = _IGBOptions()
+            opts.texture_format = settings.build_texture_format
+            opts.collision_source = settings.build_collision_source
+            opts.surface_type = 0
+            opts.export_lights = settings.build_export_lights
+
+            igb_path = os.path.join(output_dir, map_name + ".igb")
+            igb_result = export_igb(context, igb_path, opts)
+            if igb_result == {'CANCELLED'}:
+                self.report({'ERROR'}, "IGB export failed")
+                return {'CANCELLED'}
+            self.report({'INFO'}, f"IGB exported: {map_name}.igb")
+
         # Step 2+3: Compile XMLB + copy files in background thread
         MM_OT_build_all._building = True
         MM_OT_build_all._result = None
@@ -1958,7 +2005,7 @@ def _build_all_background(output_dir, game_dir, map_name, map_path,
         os.makedirs(pkgb_target, exist_ok=True)
 
         count = 0
-        for ext in ('.engb', '.chrb', '.navb', '.boyb'):
+        for ext in ('.igb', '.engb', '.chrb', '.navb', '.boyb'):
             src = os.path.join(output_dir, map_name + ext)
             if os.path.exists(src):
                 dst = os.path.join(maps_target, os.path.basename(src))
@@ -4592,8 +4639,9 @@ class MM_OT_run_validation(Operator):
 # Lights panel operators
 # ===========================================================================
 
-# Collection name for map maker lights
-LIGHTS_COLLECTION_NAME = "[MapMaker] Lights"
+# Collection name for scene lights (NOT [MapMaker] prefixed — lights must
+# be in a regular collection so they are included in IGB export)
+LIGHTS_COLLECTION_NAME = "Lights"
 
 
 def _get_scene_lights(context):
@@ -4607,7 +4655,7 @@ def _get_scene_lights(context):
 
 
 def _get_or_create_lights_collection():
-    """Get or create the [MapMaker] Lights collection."""
+    """Get or create the Lights collection."""
     col = bpy.data.collections.get(LIGHTS_COLLECTION_NAME)
     if col is None:
         col = bpy.data.collections.new(LIGHTS_COLLECTION_NAME)
@@ -4818,6 +4866,7 @@ _classes = (
     # NavMesh
     MM_OT_generate_navmesh,
     MM_OT_visualize_navmesh,
+    MM_OT_clear_navmesh,
     # Build
     MM_OT_generate_xml,
     MM_OT_compile_xmlb,
