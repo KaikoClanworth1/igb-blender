@@ -127,6 +127,12 @@ Last updated: 2026-03-17
 | Rig converter | ✅ partial | VRChat/Unity → XML2 bone mapping |
 | VMC motion capture | ✅ | VR → XML2 via proxy armature |
 
+## Other Alchemy Engine Games (Community Tested)
+
+| Game | Platform | Import | Textures | Skeleton | Notes |
+|------|----------|--------|----------|----------|-------|
+| Digimon World 4 | PS2 | ✅ | ✅ | ✅ | v6 LE, igGeometryAttr1_5, PSMT8 CLUT (77%) + DXT1 (23%), 89/89 files parse, auto-detects as xml1_ps2. 105 game-specific `be*` types safely ignored. |
+
 ## Game Profile Auto-Detection
 
 | Profile | Version | Endian | Signature Classes |
