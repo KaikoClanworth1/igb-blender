@@ -615,6 +615,23 @@ class ACTOR_OT_export_animations(Operator, ExportHelper):
         return {'RUNNING_MODAL'}
 
 
+def _obj_alive(obj):
+    """True if obj is a still-valid Blender object.
+
+    After bpy.ops.object.join()/delete() the joined-away / removed objects are
+    purged from bpy.data, and any Python reference to them raises
+    "StructRNA of type Object has been removed" on attribute access. This lets
+    callers filter such dangling references out of a captured list.
+    """
+    if obj is None:
+        return False
+    try:
+        obj.name  # touches the underlying StructRNA; raises if removed
+        return True
+    except (ReferenceError, RuntimeError):
+        return False
+
+
 def _round_trip_skin(context, armature_obj, props, operator=None):
     """Full round-trip: export to game-scale IGB, delete original, reimport fresh.
 
@@ -738,9 +755,19 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
         # mesh going in, join the reimported pieces back together.
         if source_mesh_count == 1 and len(skin_objects) > 1:
             try:
+                # Classify EVERYTHING up front. join() purges the joined-away
+                # objects from bpy.data, so any skin_objects entry touched
+                # AFTER the join raises "StructRNA ... has been removed" — that
+                # is the bug that broke multi-part models (e.g. 15-part skins
+                # with no outline meshes). Capture outlines + first variant now,
+                # while every reference is still valid.
                 main_meshes = [mo for _, mo in skin_objects
                                if mo is not None and mo.type == 'MESH'
                                and not mo.get('igb_is_outline', False)]
+                outlines = [(v, mo) for v, mo in skin_objects
+                            if mo is not None
+                            and mo.get('igb_is_outline', False)]
+                first_variant = skin_objects[0][0]
                 if len(main_meshes) > 1:
                     if context.mode != 'OBJECT':
                         bpy.ops.object.mode_set(mode='OBJECT')
@@ -749,15 +776,12 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
                         mo.select_set(True)
                     context.view_layer.objects.active = main_meshes[0]
                     bpy.ops.object.join()
-                    joined = main_meshes[0]
+                    joined = main_meshes[0]  # active survives the join
                     if source_mesh_name:
                         joined.name = source_mesh_name
+                    # Rebuild skin_objects from pre-join captures only (no
+                    # access to the now-removed joined-away objects).
                     # (weight diagnostic stamped for all parts at 5e below)
-                    # Rebuild skin_objects: joined main + any outline meshes
-                    outlines = [(v, mo) for v, mo in skin_objects
-                                if mo is not None
-                                and mo.get('igb_is_outline', False)]
-                    first_variant = skin_objects[0][0]
                     skin_objects = [(first_variant, joined)] + outlines
                     _report({'INFO'},
                             f"Re-joined {len(main_meshes)} imported parts "
@@ -765,6 +789,12 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
             except Exception as join_err:
                 _report({'WARNING'},
                         f"Could not re-join imported meshes: {join_err}")
+                import traceback
+                traceback.print_exc()
+                # join() may have removed objects before raising; drop any
+                # dangling references so the steps below don't crash on them.
+                skin_objects = [(v, mo) for v, mo in skin_objects
+                                if _obj_alive(mo)]
 
         # 5e. Stamp the weight diagnostic on EVERY reimported part from the
         # settled source ratio. The round-trip is lossless, so each part's
@@ -773,7 +803,7 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
         # until this operator returns). Covers both the joined-single-mesh
         # case and multi-part models (which are never joined).
         for _v, mo in skin_objects:
-            if mo is not None and mo.type == 'MESH':
+            if _obj_alive(mo) and mo.type == 'MESH':
                 mo["igb_weighted_vert_count"] = int(round(
                     len(mo.data.vertices) * _src_ratio))
 
