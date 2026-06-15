@@ -1,7 +1,7 @@
 bl_info = {
     "name": "IGB Format (Alchemy Engine)",
     "author": "Kaiko",
-    "version": (0, 3, 0),
+    "version": (0, 4, 0),
     "blender": (4, 4, 0),
     "location": "File > Import/Export, 3D Viewport > Sidebar > IGB",
     "description": "Import/Export Alchemy Engine IGB/IGZ files for X-Men Legends, XML2, MUA. By Kaiko.",
@@ -49,6 +49,20 @@ def _export_texture_format_items(self, context):
          "DXT5 compressed for X-Men Legends 2 (standard RGB565)"),
         ('dxt5_mua', "DXT5 (MUA Only)",
          "DXT5 compressed for Marvel Ultimate Alliance (BGR565)"),
+    ]
+
+
+def _export_texture_resolution_items(self, context):
+    """Enum items for export texture resolution cap (max longest edge)."""
+    return [
+        ('original', "Original",
+         "Keep each texture's source size (rounded up to power-of-2)"),
+        ('1024', "1024",
+         "Cap each texture to 1024px on the longest edge"),
+        ('512', "512",
+         "Cap each texture to 512px on the longest edge"),
+        ('256', "256",
+         "Cap each texture to 256px on the longest edge"),
     ]
 
 
@@ -247,9 +261,9 @@ class ImportIGZ(bpy.types.Operator, ImportHelper):
 
 
 class ExportIGB(bpy.types.Operator, ExportHelper):
-    """Export to Alchemy Engine IGB format"""
+    """Export the current scene as an Alchemy Engine IGB file (maps / environments)"""
     bl_idname = "export_scene.igb"
-    bl_label = "Export IGB"
+    bl_label = "Export Scene IGB"
     bl_options = {'REGISTER', 'UNDO'}
 
     filename_ext = ".igb"
@@ -263,6 +277,13 @@ class ExportIGB(bpy.types.Operator, ExportHelper):
         name="Texture Format",
         description="Texture encoding format for game compatibility",
         items=_export_texture_format_items,
+    )
+
+    texture_resolution: EnumProperty(
+        name="Texture Resolution",
+        description="Optional cap on texture size (longest edge). "
+                    "Use lower values to shrink IGB file size",
+        items=_export_texture_resolution_items,
     )
 
     collision_source: EnumProperty(
@@ -299,13 +320,20 @@ class ExportIGB(bpy.types.Operator, ExportHelper):
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "texture_format")
+        layout.label(text="Textures", icon='TEXTURE')
+        box = layout.box()
+        box.prop(self, "texture_format")
+        box.prop(self, "texture_resolution")
         layout.separator()
-        layout.prop(self, "collision_source")
+        layout.label(text="Collision", icon='MOD_PHYSICS')
+        box = layout.box()
+        box.prop(self, "collision_source")
         if self.collision_source != 'NONE':
-            layout.prop(self, "surface_type")
+            box.prop(self, "surface_type")
         layout.separator()
-        layout.prop(self, "export_lights")
+        layout.label(text="Lighting", icon='LIGHT')
+        box = layout.box()
+        box.prop(self, "export_lights")
         layout.separator()
         layout.label(text="Exports all scene meshes with materials & textures")
 
@@ -322,9 +350,33 @@ def menu_func_import_igz(self, context):
                          icon_value=icon_id)
 
 
-def menu_func_export(self, context):
+def menu_func_import_actor(self, context):
+    """File > Import entry that mirrors the IGB Actors > Import Actor button.
+
+    Loads a character's skeleton + skins + animations from a chosen .igb file
+    (uses the same operator the N-panel uses; settings come from the actor
+    scene properties so the user can pre-configure them in the panel)."""
     icon_id = _get_icon_id()
-    self.layout.operator(ExportIGB.bl_idname, text="Alchemy IGB (.igb)",
+    self.layout.operator("actor.import_actor",
+                         text="Alchemy Actor (.igb)",
+                         icon_value=icon_id)
+
+
+def menu_func_export_scene(self, context):
+    icon_id = _get_icon_id()
+    self.layout.operator(ExportIGB.bl_idname,
+                         text="Alchemy Scene IGB (.igb)",
+                         icon_value=icon_id)
+
+
+def menu_func_export_skin(self, context):
+    """File > Export entry that mirrors the IGB Actors > Export Skin button.
+
+    Operator's poll() greys it out unless an armature with skeleton metadata
+    is set up and a skin is selected in the IGB Actors panel."""
+    icon_id = _get_icon_id()
+    self.layout.operator("actor.export_skin",
+                         text="Alchemy Skin IGB (.igb)",
                          icon_value=icon_id)
 
 
@@ -420,11 +472,8 @@ def register():
     bpy.utils.register_class(ExportIGB)
     bpy.utils.register_class(ImportZAM)
     bpy.utils.register_class(ExportZAM)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_igz)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_zam)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_zam)
+    # Submodules register their own operators (actor.export_skin,
+    # actor.import_actor) which the File menu entries below reference.
     from . import panels
     panels.register()
     from . import mapmaker
@@ -432,19 +481,33 @@ def register():
     from . import actor
     actor.register()
 
+    # File menu: split export into Scene + Skin, add Actor import.
+    # Mirrors the N-panel tabs (IGB → scene, IGB Actors → skin/actor).
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_igz)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_actor)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_zam)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_scene)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_skin)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_zam)
+
 
 def unregister():
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_zam)
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_skin)
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_scene)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_zam)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_actor)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_igz)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+
     from . import actor
     actor.unregister()
     from . import mapmaker
     mapmaker.unregister()
     from . import panels
     panels.unregister()
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_zam)
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_zam)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_igz)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+
     bpy.utils.unregister_class(ExportZAM)
     bpy.utils.unregister_class(ImportZAM)
     bpy.utils.unregister_class(ExportIGB)

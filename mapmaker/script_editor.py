@@ -14,14 +14,7 @@ from pathlib import Path
 
 # Ensure bundled deps directory is on sys.path for PySide6
 def _find_deps():
-    local = Path(__file__).parent / "deps"
-    if local.exists():
-        return str(local)
-    source = Path(r"F:\Projects\XMenLegends\Alchemy Engine IGB Format"
-                  r"\igb_blender\mapmaker\deps")
-    if source.exists():
-        return str(source)
-    return str(local)
+    return str(Path(__file__).parent / "deps")
 
 _deps_dir = _find_deps()
 if _deps_dir not in sys.path:

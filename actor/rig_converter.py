@@ -672,6 +672,26 @@ for _k, _v in _UNITY_MERGE_DIRECT.items():
 for _k, _v in _DESCRIPTIVE_MERGE.items():
     MERGE_WEIGHT_TARGETS.setdefault(_k.lower(), _v)
 
+# ---- CATS-ported tables (rig_bone_tables.py) ----
+# Full bone dictionary from the CATS Blender Plugin, remapped to XML2 targets.
+# CATS_RENAME_LOOKUP carries per-alias priority: when several bones alias to
+# the same XML2 target, the bone matching the highest-priority (lowest value)
+# alias wins the rename; the losers become weight-merge sources.
+from . import rig_bone_tables as _bone_tables
+
+CATS_RENAME_LOOKUP = _bone_tables.build_rename_lookup()
+SPINE_ALIAS_SET = _bone_tables.build_spine_alias_set()
+
+for _k, _v in _bone_tables.build_merge_lookup().items():
+    MERGE_WEIGHT_TARGETS.setdefault(_k, _v)
+
+# Make CATS aliases visible to legacy _lookup_bone callers (profile detection)
+for _k, (_v, _p) in CATS_RENAME_LOOKUP.items():
+    ALIAS_TO_XML2.setdefault(_k, _v)
+
+# Bones the weight-merge ancestor fallback must never target (non-deforming)
+_NON_DEFORM_TARGETS = {"", "Bone_000", "Bip01", "Motion"} | MUA_FX_BONE_NAMES
+
 # Mixamo prefix (kept for legacy detection)
 MIXAMO_PREFIX = "mixamorig:"
 
@@ -837,10 +857,8 @@ def _rename_bip_prefix(armature_obj, old_prefix, new_prefix):
             eb.name = new_name
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    # Rename vertex groups on child meshes to match
-    for child in armature_obj.children:
-        if child.type != 'MESH':
-            continue
+    # Rename vertex groups on all skinned meshes to match
+    for child in _get_skinned_meshes(armature_obj):
         for vg in child.vertex_groups:
             if vg.name in rename_map:
                 vg.name = rename_map[vg.name]
@@ -894,10 +912,15 @@ def detect_rig_profile(armature_obj):
     if is_bip01_rig(armature_obj):
         return 'bip01'
 
-    # Universal detection: try normalizing each bone and looking up
+    # Universal detection: try normalizing each bone and looking up.
+    # Counts direct aliases, finger-classified bones, and spine-chain bones.
     matched = 0
     for bone in armature_obj.data.bones:
-        if _lookup_bone(bone.name) is not None:
+        norm_low = _normalize_bone_name(bone.name).lower()
+        if (_lookup_bone(bone.name) is not None
+                or _bone_tables.classify_finger(norm_low) is not None
+                or norm_low in SPINE_ALIAS_SET
+                or bone.name.lower() in SPINE_ALIAS_SET):
             matched += 1
             if matched >= 3:
                 return 'universal'
@@ -909,47 +932,428 @@ def detect_rig_profile(armature_obj):
 # Bone Rename Map Builder
 # ============================================================================
 
-def _lookup_bone(name, target_game='XML2'):
-    """Try to match a bone name to a target skeleton bone using normalization.
+_DUP_SUFFIX_RE = None  # compiled lazily (module import order)
 
-    Tries: exact match → lowercase match → normalized match.
-    When target_game='MUA', also checks FX bone aliases.
-    Returns target bone name or None.
+
+def _strip_dup_suffix(name_lower):
+    """Strip a Blender duplicate suffix ('.001' / normalized '_001').
+
+    FBX files can contain a second skeleton with duplicate bone names
+    (e.g. TotK armor rigs: 'Waist.001', 'Leg_1_L.001') — these must still
+    alias so their weights merge into the real bone's target.
+    """
+    global _DUP_SUFFIX_RE
+    if _DUP_SUFFIX_RE is None:
+        import re
+        _DUP_SUFFIX_RE = re.compile(r'[._]\d{3}$')
+    return _DUP_SUFFIX_RE.sub('', name_lower)
+
+
+def _lookup_bone_priority(name, target_game='XML2'):
+    """Match a bone name to a target skeleton bone, with alias priority.
+
+    Tries: raw lowercase match → normalized match, against the CATS-ported
+    priority table first, then the legacy alias table (default priority 500).
+    Duplicate-suffixed names ('Waist.001') match with a +1000 penalty so the
+    unsuffixed original always wins the rename claim.
+    When target_game='MUA', FX bone aliases match first.
+
+    Returns:
+        (target_name, priority) or None. Lower priority = stronger claim.
     """
     low = name.lower()
-
-    # 1. Check MUA FX aliases first (if targeting MUA)
-    if target_game == 'MUA':
-        fx = ALIAS_TO_MUA_FX.get(low)
-        if fx:
-            return fx
-
-    # 2. Exact lowercase match (handles Unity/VRChat names directly)
-    xml2 = ALIAS_TO_XML2.get(low)
-    if xml2:
-        return xml2
-
-    # 3. Normalize and try again (handles Bip001_, ValveBiped_, etc.)
     normalized = _normalize_bone_name(name)
     norm_low = normalized.lower()
 
-    if target_game == 'MUA':
-        fx = ALIAS_TO_MUA_FX.get(norm_low)
-        if fx:
-            return fx
+    keys = [(low, 0), (norm_low, 0)]
+    for base, _pen in list(keys):
+        stripped = _strip_dup_suffix(base)
+        if stripped != base:
+            keys.append((stripped, 1000))
 
-    xml2 = ALIAS_TO_XML2.get(norm_low)
-    if xml2:
-        return xml2
+    for key, penalty in keys:
+        if target_game == 'MUA':
+            fx = ALIAS_TO_MUA_FX.get(key)
+            if fx:
+                return fx, 0 + penalty
+        hit = CATS_RENAME_LOOKUP.get(key)
+        if hit:
+            return hit[0], hit[1] + penalty
+        legacy = ALIAS_TO_XML2.get(key)
+        if legacy:
+            return legacy, 500 + penalty
 
     return None
+
+
+def _lookup_bone(name, target_game='XML2'):
+    """Legacy wrapper: match a bone name to a target skeleton bone name."""
+    hit = _lookup_bone_priority(name, target_game=target_game)
+    return hit[0] if hit else None
+
+
+def _bone_depth(bone):
+    """Number of ancestors above a bone (hierarchy depth)."""
+    depth = 0
+    parent = bone.parent
+    while parent is not None:
+        depth += 1
+        parent = parent.parent
+    return depth
+
+
+_CONFLICT_RULES = _bone_tables.build_conflict_rules()
+
+
+def _conflict_demotions(armature_obj):
+    """Resolve context-dependent alias conflicts (CATS-style).
+
+    Some names mean different things depending on what else exists in the
+    rig — e.g. Nintendo's Knee_L is a kneecap helper when Leg_1_L/Leg_2_L
+    are both present, but IS the calf on rigs without Leg_2.
+
+    Returns:
+        Dict of bone_name -> merge_target for bones demoted from rename
+        eligibility to weight-merge sources.
+    """
+    # Map both raw and normalized lowercase names to actual bone names
+    name_lookup = {}
+    for bone in armature_obj.data.bones:
+        name_lookup.setdefault(bone.name.lower(), bone.name)
+        name_lookup.setdefault(_normalize_bone_name(bone.name).lower(),
+                               bone.name)
+
+    demotions = {}
+    for required_set, demoted, merge_target in _CONFLICT_RULES:
+        if all(req in name_lookup for req in required_set):
+            # Demote the named bone AND any duplicate-suffixed variant
+            # ('Knee_L' + 'Knee_L.001' from a second armor skeleton)
+            for key, bone_name in name_lookup.items():
+                if key == demoted or _strip_dup_suffix(key) == demoted:
+                    demotions[bone_name] = merge_target
+    return demotions
+
+
+def _assign_spine_chain(armature_obj):
+    """Assign spine-class bones to the XML2 spine chain by hierarchy depth.
+
+    All bones matching the (huge, CATS-derived) spine/chest alias set are
+    sorted root-to-tip and distributed across Bip01 Spine / Spine1 / Spine2.
+    Rigs with more than three spine bones keep the first, second, and LAST
+    (the one that connects to the neck) and merge the middles into Spine1.
+
+    Returns:
+        (rename, extras): dicts of bone_name -> xml2 target. 'extras' are
+        weight-merge sources, not renames.
+    """
+    matches = []
+    dup_bones = []  # '.001'-suffixed duplicates (second skeleton in file)
+    seen_stripped = set()
+    for bone in armature_obj.data.bones:
+        low = bone.name.lower()
+        norm_low = _normalize_bone_name(bone.name).lower()
+        stripped_low = _strip_dup_suffix(low)
+        stripped_norm = _strip_dup_suffix(norm_low)
+        if low in SPINE_ALIAS_SET or norm_low in SPINE_ALIAS_SET:
+            matches.append(bone)
+            seen_stripped.add(stripped_norm)
+        elif (stripped_low in SPINE_ALIAS_SET
+              or stripped_norm in SPINE_ALIAS_SET):
+            dup_bones.append(bone)
+
+    matches.sort(key=lambda b: (_bone_depth(b), b.name))
+
+    rename = {}
+    extras = {}
+    n = len(matches)
+    if n == 0:
+        return rename, extras
+
+    if n <= 3:
+        targets = ['Bip01 Spine', 'Bip01 Spine1', 'Bip01 Spine2'][:n]
+        for bone, target in zip(matches, targets):
+            rename[bone.name] = target
+    else:
+        rename[matches[0].name] = 'Bip01 Spine'
+        rename[matches[1].name] = 'Bip01 Spine1'
+        rename[matches[-1].name] = 'Bip01 Spine2'
+        for bone in matches[2:-1]:
+            extras[bone.name] = 'Bip01 Spine1'
+
+    # Duplicate-suffixed spine bones merge into their primary's target
+    # (or Spine1 when the primary wasn't found)
+    primary_target = {}
+    for bone in matches:
+        key = _strip_dup_suffix(_normalize_bone_name(bone.name).lower())
+        primary_target.setdefault(
+            key, rename.get(bone.name) or extras.get(bone.name))
+    for bone in dup_bones:
+        key = _strip_dup_suffix(_normalize_bone_name(bone.name).lower())
+        extras[bone.name] = primary_target.get(key) or 'Bip01 Spine1'
+
+    return rename, extras
+
+
+def _dist3(a, b):
+    """Euclidean distance between two indexable 3-vectors."""
+    dx = a[0] - b[0]
+    dy = a[1] - b[1]
+    dz = a[2] - b[2]
+    return (dx * dx + dy * dy + dz * dz) ** 0.5
+
+
+def _reanchor_letter_chains(armature_obj, chains, dup_members,
+                            chain_letters, side):
+    """Correct letter-scheme finger labels using geometry.
+
+    The thumb's base joint is anatomically closest to the wrist — measure
+    each letter chain's base-bone distance to the hand bone and relabel the
+    chains so the closest is the thumb, with the remaining letters keeping
+    their order walking away from it (index, middle, ring, little).
+
+    Mutates chains / dup_members / chain_letters in place. No-op when:
+    - fewer than 2 letter chains on this side
+    - a word-named thumb chain exists (unambiguous, trust it)
+    - the hand bone or bone positions can't be found
+    - the closest chain isn't decisively closer (< 80% of second place)
+    """
+    fingers_order = ['thumb', 'index', 'middle', 'ring', 'little']
+
+    letter_fingers = {f: chain_letters[(side, f)] for f in fingers_order
+                      if (side, f) in chain_letters and (side, f) in chains}
+    if len(letter_fingers) < 2:
+        return
+
+    # A word-named thumb chain (Thumb_L, Oya...) is unambiguous — letters
+    # then never include the thumb, and the existing labels stand.
+    if ('thumb' in chains_keys_for_side(chains, side)
+            and 'thumb' not in letter_fingers):
+        return
+
+    # Find the hand bone (pre-rename name) on this side
+    hand_bone = None
+    for bone in armature_obj.data.bones:
+        hit = _lookup_bone_priority(bone.name)
+        if hit is not None and hit[0] == f'Bip01 {side} Hand':
+            hand_bone = bone
+            break
+    if hand_bone is None or getattr(hand_bone, 'head_local', None) is None:
+        return
+
+    # Distance from each letter chain's base bone to the hand
+    dists = {}
+    for finger in letter_fingers:
+        entries = chains.get((side, finger))
+        if not entries:
+            continue
+        base = min(entries, key=lambda e: _bone_depth(e[0]))[0]
+        head = getattr(base, 'head_local', None)
+        if head is None:
+            return
+        dists[finger] = _dist3(head, hand_bone.head_local)
+    if len(dists) < 2:
+        return
+
+    ranked = sorted(dists, key=dists.get)
+    closest, second = ranked[0], ranked[1]
+    if dists[closest] > 0.8 * dists[second]:
+        return  # not decisively closer — trust the naming convention
+
+    if closest == 'thumb':
+        return  # naming already correct
+
+    # Relabel: sort letter chains by their letter; the geometric thumb's
+    # letter anchors which end of the sequence is the thumb.
+    by_letter = sorted(letter_fingers.items(), key=lambda kv: kv[1])
+    ordered = [f for f, _l in by_letter]  # finger labels in letter order
+    thumb_pos = ordered.index(closest)
+    if thumb_pos == 0:
+        new_order = ordered  # ascending: first letter = thumb
+    elif thumb_pos == len(ordered) - 1:
+        new_order = list(reversed(ordered))  # descending
+    else:
+        return  # thumb in the middle of the letter sequence — bail
+
+    relabel = {}  # old finger label -> new finger label
+    for new_finger, old_finger in zip(fingers_order, new_order):
+        if old_finger != new_finger:
+            relabel[old_finger] = new_finger
+    if not relabel:
+        return
+
+    # Apply relabel to all three dicts (two-phase to avoid key collisions)
+    def remap(d):
+        moved = {}
+        for old_f, new_f in relabel.items():
+            if (side, old_f) in d:
+                moved[(side, new_f)] = d.pop((side, old_f))
+        d.update(moved)
+
+    remap(chains)
+    remap(dup_members)
+    remap(chain_letters)
+    print(f"[IGB Rig Converter] {side} letter fingers re-anchored "
+          f"geometrically: {relabel}")
+
+
+def chains_keys_for_side(chains, side):
+    """Finger labels present in chains for one side."""
+    return {f for (s, f) in chains if s == side}
+
+
+def _build_finger_maps(armature_obj):
+    """Classify finger bones and map them to XML2's reduced finger rig.
+
+    XML2 has two chains per hand: Finger0/Finger01 (thumb) and
+    Finger1/Finger11 (fingers). Mapping rules:
+      - thumb proximal/intermediate  -> rename to Finger0 / Finger01
+      - "main" finger prox/interm    -> rename to Finger1 / Finger11
+        (middle preferred; falls back to index, ring, then little when the
+        model lacks a middle finger — this keeps a real bone with correct
+        position instead of a guessed dummy)
+      - every other finger bone      -> weight-merge: proximal -> Finger1,
+        deeper segments -> Finger11, distals -> the chain's deepest target,
+        metacarpals -> Hand
+    Segment identity comes from hierarchy depth within each chain, NOT from
+    the digits in the name — numbering schemes (MMD 0-based, VRoid 1-based,
+    Max two-digit) disagree, but depth order never lies.
+
+    Returns:
+        (rename, merge): dicts of bone_name -> xml2 target.
+    """
+    from collections import defaultdict
+
+    chains = defaultdict(list)  # (side, finger) -> [(bone, sort_hint)]
+    dup_members = defaultdict(list)  # (side, finger) -> [(bone, stripped_key)]
+    chain_letters = {}  # (side, finger) -> scheme letter ('a'-'e') or absent
+    for bone in armature_obj.data.bones:
+        norm_low = _normalize_bone_name(bone.name).lower()
+        hit = _bone_tables.classify_finger(norm_low)
+        if hit is None:
+            # Also try a lightly-cleaned raw name (normalization can strip
+            # leading segments that the classifier wants to see)
+            raw = bone.name.lower().replace(' ', '_').replace('.', '_')
+            raw = raw.replace('-', '_').replace(':', '_')
+            hit = _bone_tables.classify_finger(raw)
+        if hit is None:
+            continue
+        side, finger, sort_hint, letter = hit
+        # Duplicate-suffixed bones ('Finger_A_1_L.001' from a second
+        # skeleton) must not join the chain — they'd corrupt segment
+        # ordering. Route them to merge into the primary's target below.
+        stripped = _strip_dup_suffix(norm_low)
+        if stripped != norm_low:
+            dup_members[(side, finger)].append((bone, stripped))
+        else:
+            chains[(side, finger)].append((bone, sort_hint))
+            if letter is not None:
+                chain_letters.setdefault((side, finger), letter)
+
+    # Letter schemes are ambiguous across games (Pokemon Masters: A=thumb,
+    # VRoid fused: A=little). Re-anchor letter chains geometrically: the
+    # chain whose base bone is closest to the hand is the thumb.
+    for side in ('L', 'R'):
+        _reanchor_letter_chains(armature_obj, chains, dup_members,
+                                chain_letters, side)
+
+    rename = {}
+    merge = {}
+
+    for side in ('L', 'R'):
+        # Promotion: pick the chain that becomes XML2's Finger1/Finger11
+        main = next((f for f in ('middle', 'index', 'ring', 'little')
+                     if (side, f) in chains), None)
+
+        for finger in ('thumb', 'middle', 'index', 'ring', 'little'):
+            entries = chains.get((side, finger))
+            if not entries:
+                continue
+
+            # Order chain root-to-tip: hierarchy depth first, name segment
+            # number as tiebreaker (hint -1 = no segment in name)
+            entries.sort(key=lambda e: (_bone_depth(e[0]),
+                                        e[1] if e[1] >= 0 else 99,
+                                        e[0].name))
+
+            # Assign anatomical segments from chain order:
+            # 0=metacarpal, 1=proximal, 2=intermediate, 3=distal, 4+=tip
+            n = len(entries)
+            if n <= 3:
+                segs = list(range(1, n + 1))
+            elif entries[0][1] == 0:
+                # Explicit metacarpal marker on the first bone (MMD Finger0_)
+                segs = [0, 1, 2, 3] + [4] * (n - 4)
+            else:
+                segs = [1, 2, 3] + [4] * (n - 3)
+
+            kind = ('thumb' if finger == 'thumb'
+                    else 'main' if finger == main
+                    else 'other')
+
+            f0 = f'Bip01 {side} Finger0'
+            f01 = f'Bip01 {side} Finger01'
+            f1 = f'Bip01 {side} Finger1'
+            f11 = f'Bip01 {side} Finger11'
+            hand = f'Bip01 {side} Hand'
+
+            for (bone, _hint), seg in zip(entries, segs):
+                if seg == 0:
+                    merge[bone.name] = hand
+                elif kind == 'thumb':
+                    if seg == 1:
+                        rename[bone.name] = f0
+                    elif seg == 2:
+                        rename[bone.name] = f01
+                    else:
+                        merge[bone.name] = f01
+                elif kind == 'main':
+                    if seg == 1:
+                        rename[bone.name] = f1
+                    elif seg == 2:
+                        rename[bone.name] = f11
+                    else:
+                        merge[bone.name] = f11
+                else:
+                    if seg == 1:
+                        merge[bone.name] = f1
+                    else:
+                        merge[bone.name] = f11
+
+            # Duplicate-suffixed chain members merge into their primary's
+            # target (the duplicate skeleton's weights follow the original)
+            for dup_bone, stripped in dup_members.get((side, finger), ()):
+                target = None
+                for primary, _h in entries:
+                    pkey = _normalize_bone_name(primary.name).lower()
+                    if pkey == stripped:
+                        target = (rename.get(primary.name)
+                                  or merge.get(primary.name))
+                        break
+                if target is None:
+                    # No matching primary — default to the chain's base
+                    target = f0 if kind == 'thumb' else f1
+                merge[dup_bone.name] = target
+
+    # Duplicate members whose entire primary chain is absent
+    for (side, finger), dups in dup_members.items():
+        base = (f'Bip01 {side} Finger0' if finger == 'thumb'
+                else f'Bip01 {side} Finger1')
+        for dup_bone, _stripped in dups:
+            if dup_bone.name not in merge and dup_bone.name not in rename:
+                merge[dup_bone.name] = base
+
+    return rename, merge
 
 
 def build_rename_map(armature_obj, profile=None, target_game='XML2'):
     """Build a mapping from current bone names to target skeleton bone names.
 
-    Uses CATS-style normalization to match bones from ANY rig format.
-    When target_game='MUA', also matches FX bone aliases.
+    Three passes:
+      1. Spine chain assignment (depth-ordered, handles any spine count)
+      2. Finger chain assignment (scheme-independent, with promotion)
+      3. General alias matching with per-alias priority — when several bones
+         alias to the same target (e.g. both 'Root' and 'Pelvis' present),
+         the canonical name wins and the others become merge sources.
 
     Args:
         armature_obj: Blender armature object.
@@ -960,85 +1364,403 @@ def build_rename_map(armature_obj, profile=None, target_game='XML2'):
         Dict mapping old_name -> new_name for bones that can be mapped.
     """
     rename_map = {}
-    # Track which target bones are already claimed (prevent duplicates)
-    claimed = set()
     valid_names = get_bone_names_for_game(target_game)
 
+    spine_rename, spine_extras = _assign_spine_chain(armature_obj)
+    finger_rename, finger_merge = _build_finger_maps(armature_obj)
+    demotions = _conflict_demotions(armature_obj)
+
+    # Spine/finger-classified and conflict-demoted bones are settled —
+    # exclude from the general alias pass
+    handled = (set(spine_rename) | set(spine_extras)
+               | set(finger_rename) | set(finger_merge)
+               | set(demotions))
+
+    for chain_map in (spine_rename, finger_rename):
+        for old_name, target in chain_map.items():
+            if target in valid_names:
+                rename_map[old_name] = target
+
+    claimed = set(rename_map.values())
+
+    # General pass: best-priority candidate per target wins
+    candidates = {}  # target -> (priority, bone_name)
     for bone in armature_obj.data.bones:
-        target_name = _lookup_bone(bone.name, target_game=target_game)
-        if target_name and target_name in valid_names and target_name not in claimed:
-            rename_map[bone.name] = target_name
-            claimed.add(target_name)
+        if bone.name in handled:
+            continue
+        hit = _lookup_bone_priority(bone.name, target_game=target_game)
+        if hit is None:
+            continue
+        target, priority = hit
+        if target not in valid_names or target in claimed:
+            continue
+        best = candidates.get(target)
+        if best is None or priority < best[0]:
+            candidates[target] = (priority, bone.name)
+
+    for target, (_priority, bone_name) in candidates.items():
+        rename_map[bone_name] = target
 
     return rename_map
 
 
-def build_merge_map(armature_obj, profile=None, rename_map=None):
+def build_merge_map(armature_obj, profile=None, rename_map=None,
+                    target_game='XML2'):
     """Build a mapping for bones whose weights should merge into a target.
 
-    Uses CATS-style normalization for universal matching.
+    Resolution order per bone:
+      1. Spine-chain extras and non-promoted finger bones
+      2. Explicit merge tables (CATS bone_reweight + legacy entries)
+      3. Face bone detection -> Bip01 Head
+      4. Keyword heuristics (breast/hair/weapon/tail)
+      5. Nearest-mapped-ancestor fallback — NO weighted bone is ever simply
+         deleted; weights always flow to the closest surviving relative.
 
     Args:
         armature_obj: Blender armature object.
         profile: Ignored (kept for API compatibility).
         rename_map: Already-built rename map (to exclude already-mapped bones).
+        target_game: 'XML2' or 'MUA'.
 
     Returns:
         Dict mapping old_bone_name -> xml2_target_name for weight merging.
     """
     if rename_map is None:
-        rename_map = {}
+        rename_map = build_rename_map(armature_obj, target_game=target_game)
 
     merge_map = {}
 
+    # 1. Chain-derived merges (spine extras + non-promoted fingers +
+    # conflict-demoted helper bones like Nintendo's Knee_L)
+    spine_rename, spine_extras = _assign_spine_chain(armature_obj)
+    finger_rename, finger_merge = _build_finger_maps(armature_obj)
+    demotions = _conflict_demotions(armature_obj)
+    for source, target in (list(spine_extras.items())
+                           + list(finger_merge.items())
+                           + list(demotions.items())):
+        if source not in rename_map:
+            merge_map[source] = target
+
     for bone in armature_obj.data.bones:
-        if bone.name in rename_map:
-            continue  # Already directly mapped
+        name = bone.name
+        if name in rename_map or name in merge_map:
+            continue
 
-        # Try normalized lookup in merge targets
-        lower = bone.name.lower()
-        target = MERGE_WEIGHT_TARGETS.get(lower)
-        if not target:
-            normalized = _normalize_bone_name(bone.name)
-            target = MERGE_WEIGHT_TARGETS.get(normalized.lower())
+        low = name.lower()
+        norm_low = _normalize_bone_name(name).lower()
 
+        # 2. Explicit merge tables (also matched with '.001' suffix stripped)
+        target = (MERGE_WEIGHT_TARGETS.get(low)
+                  or MERGE_WEIGHT_TARGETS.get(norm_low)
+                  or MERGE_WEIGHT_TARGETS.get(_strip_dup_suffix(low))
+                  or MERGE_WEIGHT_TARGETS.get(_strip_dup_suffix(norm_low)))
         if target:
-            merge_map[bone.name] = target
+            merge_map[name] = target
             continue
 
-        # Pattern-based merging for dynamic/physics bones
-        lower_name = bone.name.lower()
-        if ('hair' in lower_name or 'j_sec_' in lower_name
-                or 'j_bip_' in lower_name or 'j_adj_' in lower_name):
-            merge_map[bone.name] = "Bip01 Head"
+        # 2b. Alias losers: this bone aliases a target another bone claimed
+        # (e.g. 'Root' lost Pelvis to 'Waist', or 'Leg_1_L.001' from a
+        # duplicate armor skeleton) — merge its weights into that target.
+        hit = _lookup_bone_priority(name, target_game=target_game)
+        if hit is not None and hit[0] not in _NON_DEFORM_TARGETS:
+            merge_map[name] = hit[0]
             continue
 
-        if 'breast' in lower_name or 'bust' in lower_name:
-            merge_map[bone.name] = "Bip01 Spine2"
+        # 3. Face bones -> Head (cheeks, brows, lids, mouth, jaw, ears...)
+        if (_bone_tables.is_face_bone(norm_low)
+                or _bone_tables.is_face_bone(low)):
+            merge_map[name] = "Bip01 Head"
             continue
 
-        # Tentacle / tail / cape chains → merge to Pelvis (root of body)
-        if ('tentacle' in lower_name or 'tail' in lower_name
-                or 'cape' in lower_name):
-            merge_map[bone.name] = "Bip01 Pelvis"
+        # 4. Keyword heuristics (checked before the ancestor fallback so
+        # oddly-parented accessory bones still land sensibly)
+        if 'breast' in low or 'bust' in low or 'pectoral' in low:
+            merge_map[name] = "Bip01 Spine2"
+            continue
+        if ('hair' in low or 'ahoge' in low or 'bangs' in low
+                or 'ponytail' in low or 'twintail' in low or 'kami' in low):
+            merge_map[name] = "Bip01 Head"
+            continue
+        if 'weapon' in low:
+            right = ('right' in low or low.endswith('_r')
+                     or '_r_' in low or low.endswith('.r'))
+            merge_map[name] = f"Bip01 {'R' if right else 'L'} Hand"
+            continue
+        # 'humerus' is the upper-arm bone — some rigs (e.g. MSW models)
+        # parent these shoulder helpers under the HEAD, which would
+        # otherwise send their weights to Bip01 Head via the ancestor
+        # fallback. Route by anatomy instead.
+        if 'humerus' in low or 'deltoid' in low:
+            right = ('right' in low or low.endswith('_r')
+                     or low.endswith(' r') or '_r_' in low
+                     or low.endswith('.r'))
+            merge_map[name] = f"Bip01 {'R' if right else 'L'} UpperArm"
+            continue
+        if 'tentacle' in low or 'cape' in low or 'tail' in low:
+            merge_map[name] = "Bip01 Pelvis"
             continue
 
-        # Weapon attachment bones → merge to nearest hand
-        if 'weapon' in lower_name:
-            if 'right' in lower_name or '_r' in lower_name:
-                merge_map[bone.name] = "Bip01 R Hand"
-            else:
-                merge_map[bone.name] = "Bip01 L Hand"
+    # 5. Nearest-mapped-ancestor fallback for everything still unresolved.
+    # Walk up the hierarchy to the closest bone that survives conversion
+    # (renamed or merged) and route weights there. Skips non-deforming
+    # targets (Bip01 root, Motion, MUA FX bones) — weights merged into
+    # those would be silently dropped at export.
+    resolved = dict(rename_map)
+    resolved.update(merge_map)
+
+    for bone in armature_obj.data.bones:
+        name = bone.name
+        if name in resolved:
             continue
+
+        target = None
+        parent = bone.parent
+        while parent is not None:
+            candidate = resolved.get(parent.name)
+            if candidate and candidate not in _NON_DEFORM_TARGETS:
+                target = candidate
+                break
+            parent = parent.parent
+
+        merge_map[name] = target or "Bip01 Pelvis"
+        resolved[name] = merge_map[name]
 
     return merge_map
+
+
+# ============================================================================
+# Native-Skeleton Fit (Max-modder style)
+# ============================================================================
+# Every native XML2 character uses the bit-identical skeleton (verified by
+# parsing 20+ game skins: same Bip01 41.82, same thigh/calf/spine lengths).
+# 3ds Max modder skins work flawlessly with all animations because they're
+# rigged onto this exact shared biped. This mode reproduces that: the MESH
+# is warped (weight-blended, translation-only — smooth) so its joints land
+# exactly on the native skeleton, then the bones are moved to native
+# positions. The exported skeleton is then identical to official skins.
+
+def _native_game_positions(target_game='XML2'):
+    """Native joint world positions (game space) for every skeleton bone.
+
+    Deforming bones come from NATIVE_INV_JOINT_MATRICES (row-major inverse
+    bind: joint position p satisfies [p,1] @ M = 0 -> p_i = -(t . R_row_i)).
+    Non-deforming roots use NATIVE_TRANSLATIONS.
+    """
+    positions = {}
+    for name, m in NATIVE_INV_JOINT_MATRICES.items():
+        r0 = (m[0], m[1], m[2])
+        r1 = (m[4], m[5], m[6])
+        r2 = (m[8], m[9], m[10])
+        t = (m[12], m[13], m[14])
+        positions[name] = tuple(
+            -(t[0] * row[0] + t[1] * row[1] + t[2] * row[2])
+            for row in (r0, r1, r2)
+        )
+
+    bip01 = tuple(NATIVE_TRANSLATIONS[1])
+    positions['Bip01'] = bip01
+    positions['Motion'] = tuple(NATIVE_TRANSLATIONS[34])
+    positions['Bone_000'] = (0.0, 0.0, 0.0)
+    if target_game == 'MUA':
+        for fx_name in MUA_FX_BONE_NAMES:
+            positions[fx_name] = bip01
+    return positions
+
+
+def _fit_skeleton_to_native(armature_obj, target_game='XML2', operator=None):
+    """Warp the mesh and skeleton onto the exact native XML2 biped.
+
+    Per-vertex offsets are the weight-blended bone position deltas
+    (translation-only, so shape keys shift rigidly and stay intact).
+    Must run AFTER rename/merge/repose and AFTER the export scale is
+    stored, but BEFORE inv_bind/translation computation.
+    """
+    import bpy
+    import math
+    from mathutils import Quaternion, Vector
+
+    # Total export scale (matches the exporter's composition)
+    custom_scale = armature_obj.get("igb_export_scale", 1.0)
+    if isinstance(custom_scale, (list, tuple)):
+        custom_scale = 1.0
+    obj_scale = armature_obj.matrix_world.to_scale()
+    total_scale = custom_scale * ((abs(obj_scale.x) + abs(obj_scale.y)
+                                   + abs(obj_scale.z)) / 3.0)
+    if total_scale < 1e-9:
+        return
+
+    # game space = Rz90 @ arm_world_rot @ armature space * total_scale
+    # -> armature space = (Rz90 @ arm_rot)^-1 @ game / total_scale
+    arm_rot = armature_obj.matrix_world.to_quaternion().to_matrix()
+    rz90 = Quaternion((0, 0, 1), math.radians(90)).to_matrix()
+    game_to_arm = (rz90 @ arm_rot).inverted()
+
+    targets = {}
+    for name, p_game in _native_game_positions(target_game).items():
+        targets[name] = (game_to_arm @ Vector(p_game)) / total_scale
+
+    # Bone deltas in armature space
+    deltas = {}
+    for name, target in targets.items():
+        bone = armature_obj.data.bones.get(name)
+        if bone is not None:
+            deltas[name] = target - bone.head_local
+
+    if not deltas:
+        return
+
+    # ---- Warp mesh vertices (and shape keys) ----
+    for mesh_obj in _get_skinned_meshes(armature_obj):
+        mesh = mesh_obj.data
+        try:
+            rel3 = (mesh_obj.matrix_world.inverted()
+                    @ armature_obj.matrix_world).to_3x3()
+        except ValueError:
+            continue
+
+        # vertex group index -> delta in MESH space (zero-delta bones must
+        # still appear so they count toward the blend normalization)
+        vg_delta = {}
+        any_nonzero = False
+        for vg in mesh_obj.vertex_groups:
+            d = deltas.get(vg.name)
+            if d is not None:
+                md = rel3 @ d
+                vg_delta[vg.index] = md
+                if md.length > 1e-7:
+                    any_nonzero = True
+        if not any_nonzero:
+            continue
+
+        n_verts = len(mesh.vertices)
+        offsets = [None] * n_verts
+        for vert in mesh.vertices:
+            acc = Vector((0.0, 0.0, 0.0))
+            total_w = 0.0
+            for g in vert.groups:
+                if g.weight <= 0.0:
+                    continue
+                d = vg_delta.get(g.group)
+                if d is not None:
+                    acc += d * g.weight
+                    total_w += g.weight
+            if total_w > 1e-6:
+                offsets[vert.index] = acc / total_w
+
+        for vi, off in enumerate(offsets):
+            if off is not None:
+                mesh.vertices[vi].co += off
+
+        # Shape keys: translation-only warp -> shift every key rigidly
+        if mesh.shape_keys and mesh.shape_keys.key_blocks:
+            for kb in mesh.shape_keys.key_blocks:
+                for vi, off in enumerate(offsets):
+                    if off is not None:
+                        kb.data[vi].co += off
+
+        mesh.update()
+
+    # ---- Move bones to native positions ----
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    edit_bones = armature_obj.data.edit_bones
+    for name, target in targets.items():
+        eb = edit_bones.get(name)
+        if eb is None:
+            continue
+        direction = eb.tail - eb.head
+        eb.head = target
+        eb.tail = target + direction
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    if operator is not None:
+        operator.report({'INFO'},
+                        "Fitted mesh to the native XML2 skeleton "
+                        "(Max-style, exact animation compatibility)")
+    print("[IGB Rig Converter] Native-skeleton fit applied "
+          f"({len(deltas)} bones aligned)")
+
+
+# ============================================================================
+# Missing-Finger Placement
+# ============================================================================
+# When a model has no usable finger bones, the converter creates dummies.
+# Placing them at the hand's TAIL (the old behavior) scatters them wherever
+# the importer happened to point the hand bone. Instead, anchor them to the
+# hand using the native XML2 skeleton's proportions: offsets below are the
+# native finger positions relative to the Hand head, expressed as fractions
+# of the native hand length (hand head -> Finger1 knuckle = 3.596 units),
+# in a (along-hand, character-front, up) frame.
+
+_FINGER_PLACEMENT_FRACTIONS = {
+    # name suffix: (along, front, up) — thumb spreads forward, fingers
+    # continue past the knuckles
+    'Finger0':  (0.31, 0.61, 0.27),
+    'Finger01': (0.70, 1.00, 0.27),
+    'Finger1':  (1.00, 0.09, 0.00),
+    'Finger11': (1.51, 0.09, 0.00),
+}
+
+
+def _place_missing_finger(eb, bone_name, edit_bones):
+    """Place a newly-created finger bone relative to its side's Hand bone.
+
+    Args:
+        eb: The new edit bone.
+        bone_name: Full XML2 name, e.g. 'Bip01 L Finger0'.
+        edit_bones: armature.data.edit_bones.
+
+    Returns:
+        True if placed (head set), False if the hand bone is unusable.
+    """
+    from mathutils import Vector
+
+    parts = bone_name.split(' ')  # ['Bip01', 'L', 'Finger0']
+    if len(parts) != 3:
+        return False
+    side, suffix = parts[1], parts[2]
+    fractions = _FINGER_PLACEMENT_FRACTIONS.get(suffix)
+    if fractions is None:
+        return False
+
+    hand = edit_bones.get(f'Bip01 {side} Hand')
+    if hand is None:
+        return False
+    along = hand.tail - hand.head
+    hand_len = along.length
+    if hand_len < 1e-5:
+        return False
+    along = along / hand_len
+
+    # Character-front approximation: imported humanoids face -Y in Blender.
+    # Only used for dummy bones (the model had no real finger to convert),
+    # so a wrong facing is cosmetic, not a skinning error.
+    front = Vector((0.0, -1.0, 0.0))
+    up = Vector((0.0, 0.0, 1.0))
+
+    a, f, u = fractions
+    eb.head = (hand.head + along * (a * hand_len)
+               + front * (f * hand_len) + up * (u * hand_len))
+    eb.tail = eb.head + along * max(0.25 * hand_len, 0.001)
+    return True
 
 
 # ============================================================================
 # Transform Application & Auto-Scale
 # ============================================================================
 
-def _apply_transforms_and_scale(armature_obj, target_height=68.0, auto_scale=True):
+# The game's animations drive the Pelvis/Bip01 with ABSOLUTE translations
+# authored for the native skeleton (pelvis at ~41.82 game units). A model
+# whose scaled pelvis sits anywhere else shifts by the difference whenever
+# an animation plays: floating in the character select, sinking into the
+# ground on jumps. Matching the PELVIS height (not the total height) to
+# native is what keeps feet on the ground.
+_NATIVE_PELVIS_Z = NATIVE_TRANSLATIONS[1][2]  # 41.8195 game units
+
+
+def _apply_transforms_and_scale(armature_obj, target_height=68.0,
+                                auto_scale=True, pelvis_bone='Bip01 Pelvis'):
     """Compute and store an export scale factor for XML2 proportions.
 
     Instead of modifying Blender data (which can break parent-child
@@ -1046,29 +1768,62 @@ def _apply_transforms_and_scale(armature_obj, target_height=68.0, auto_scale=Tru
     as a custom property on the armature. The skin exporter applies
     it at export time so the IGB file is at the correct scale.
 
+    Scaling anchors the PELVIS at EXACTLY the native game height (~41.82
+    units). This is not negotiable for animation compatibility: decoding
+    the game's own animations shows they drive Bip01 with ABSOLUTE Z values
+    (idle: 38.0-39.3, jump_land: 24.3-36.4) authored for the native
+    skeleton — any other pelvis height makes the body float or sink
+    whenever those animations play. To make a character bigger/smaller
+    in-game, use the herostat 'scale_factor' attribute (the engine scales
+    animation translations along with it, preserving ground contact).
+
+    target_height is only used by the no-pelvis fallback (total height).
+
     Args:
         armature_obj: Blender armature object.
-        target_height: Target character height in game units (default ~80).
+        target_height: Fallback total height when no pelvis bone exists.
         auto_scale: If True, compute and store scale factor.
+        pelvis_bone: Name of the pelvis bone (call AFTER rename).
     """
     if not auto_scale or target_height <= 0:
         return
 
-    # Measure current armature height (bone Z range in armature-local space,
-    # accounting for object-level scale so we measure the VISUAL height)
-    obj_scale_z = abs(armature_obj.scale.z) if armature_obj.scale.z != 0 else 1.0
-    min_z = float('inf')
-    max_z = float('-inf')
-    for bone in armature_obj.data.bones:
-        for vec in (bone.head_local, bone.tail_local):
-            min_z = min(min_z, vec.z)
-            max_z = max(max_z, vec.z)
+    from mathutils import Vector
 
-    if min_z >= max_z:
-        return
+    scale_factor = None
 
-    current_height = (max_z - min_z) * obj_scale_z
-    scale_factor = target_height / current_height
+    # --- Primary: anchor pelvis to exact native game height ---
+    pelvis = armature_obj.data.bones.get(pelvis_bone)
+    if pelvis is not None:
+        pelvis_world_z = (armature_obj.matrix_world
+                          @ pelvis.head_local).z
+        if pelvis_world_z > 1e-5:
+            scale_factor = _NATIVE_PELVIS_Z / pelvis_world_z
+
+    # --- Fallback: total visual height from mesh world bounding boxes ---
+    if scale_factor is None:
+        min_z = float('inf')
+        max_z = float('-inf')
+        for mesh_obj in _get_skinned_meshes(armature_obj):
+            mw = mesh_obj.matrix_world
+            for corner in mesh_obj.bound_box:
+                world_z = (mw @ Vector(corner)).z
+                min_z = min(min_z, world_z)
+                max_z = max(max_z, world_z)
+
+        if min_z < max_z:
+            scale_factor = target_height / (max_z - min_z)
+        else:
+            # Last resort: bone Z range x object scale
+            obj_scale_z = (abs(armature_obj.scale.z)
+                           if armature_obj.scale.z != 0 else 1.0)
+            for bone in armature_obj.data.bones:
+                for vec in (bone.head_local, bone.tail_local):
+                    min_z = min(min_z, vec.z)
+                    max_z = max(max_z, vec.z)
+            if min_z >= max_z:
+                return
+            scale_factor = target_height / ((max_z - min_z) * obj_scale_z)
 
     # Only store if significantly different (>10 % off)
     if abs(scale_factor - 1.0) <= 0.1:
@@ -1289,14 +2044,27 @@ def _repose_meshes(armature_obj, source_pose, target_pose):
         delta_q = Quaternion(local_axis, delta_angle)
         pb.rotation_quaternion = delta_q
 
+    # --- 4. Bake the pose into the meshes, then apply as rest pose ---
+    _apply_current_pose_to_meshes(armature_obj)
+    bpy.ops.pose.armature_apply()
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+
+def _apply_current_pose_to_meshes(armature_obj):
+    """Bake the armature's CURRENT pose into all skinned meshes' vertices.
+
+    Computes per-vertex weighted bone transforms manually (VRChat models
+    carry 100-200 shape keys, which rules out modifier_apply) and writes
+    the deformed positions back, rotating shape key offsets to match.
+    Leaves the pose itself untouched — callers follow with armature_apply.
+    """
+    import bpy
+    from mathutils import Matrix, Vector
+
     # Force dependency graph update so pose matrices are current
     bpy.context.view_layer.update()
 
-    # --- 4. Deform mesh vertices manually ---
-    for child in armature_obj.children:
-        if child.type != 'MESH':
-            continue
-
+    for child in _get_skinned_meshes(armature_obj):
         mesh = child.data
         n_verts = len(mesh.vertices)
 
@@ -1388,9 +2156,261 @@ def _repose_meshes(armature_obj, source_pose, target_pose):
 
         mesh.update()
 
-    # --- 5. Apply pose as rest pose ---
+
+# ============================================================================
+# Universal T-Pose (pose-match the native bind)
+# ============================================================================
+# Each bone's "direction" is defined by the chain: bone head -> child head.
+# Rotating the LIMB chains to the native bind directions puts arms, legs,
+# hands, thumb, and fingers into the exact pose the game's animations were
+# authored against. Subsumes the old arm-only A->T repose and fixes
+# finger/thumb misalignment from models with curled or spread bind poses.
+#
+# Torso chains (Pelvis->Spine->...->Head) are deliberately EXCLUDED: the
+# native spine offsets are tiny diagonal vectors (Pelvis->Spine is 0.31
+# units with a forward lean), so aligning a normal upright rig to them
+# tilts the whole body and bakes the distortion into the mesh.
+
+_NATIVE_CHAIN_CHILD = {}
+for _s in ('L', 'R'):
+    # Clavicles also excluded — shoulder roots vary too much across rigs;
+    # the arm's T-pose level comes from the UpperArm chain.
+    _NATIVE_CHAIN_CHILD.update({
+        f'Bip01 {_s} UpperArm': f'Bip01 {_s} Forearm',
+        f'Bip01 {_s} Forearm': f'Bip01 {_s} Hand',
+        f'Bip01 {_s} Hand': f'Bip01 {_s} Finger1',
+        f'Bip01 {_s} Finger0': f'Bip01 {_s} Finger01',
+        f'Bip01 {_s} Finger1': f'Bip01 {_s} Finger11',
+        f'Bip01 {_s} Thigh': f'Bip01 {_s} Calf',
+        f'Bip01 {_s} Calf': f'Bip01 {_s} Foot',
+        f'Bip01 {_s} Foot': f'Bip01 {_s} Toe0',
+    })
+
+
+def _pose_match_native_bind(armature_obj, target_game='XML2'):
+    """Rotate every bone chain to the native bind direction (universal T-pose).
+
+    Walks the hierarchy parent-first; for each mapped bone, rotates its pose
+    (pivot at the bone head) so the direction to its chain child matches the
+    native bind direction. Leaf bones (Head, Toe0, finger tips) follow their
+    parents automatically. The pose is then baked into the meshes (weighted,
+    shape-key aware) and applied as the new rest pose.
+
+    Models already in clean T-pose see near-zero rotations (no-op).
+    """
+    import bpy
+    import math
+    from mathutils import Matrix, Quaternion, Vector
+
+    # Native joint positions in armature space (directions only — overall
+    # scale is irrelevant, but reuse the standard conversion)
+    arm_rot = armature_obj.matrix_world.to_quaternion().to_matrix()
+    rz90 = Quaternion((0, 0, 1), math.radians(90)).to_matrix()
+    game_to_arm = (rz90 @ arm_rot).inverted()
+
+    native_pos = {}
+    for name, p_game in _native_game_positions(target_game).items():
+        native_pos[name] = game_to_arm @ Vector(p_game)
+
+    target_dirs = {}
+    for bone_name, child_name in _NATIVE_CHAIN_CHILD.items():
+        a = native_pos.get(bone_name)
+        b = native_pos.get(child_name)
+        if a is None or b is None:
+            continue
+        d = b - a
+        if d.length > 1e-6:
+            target_dirs[bone_name] = d.normalized()
+
+    if not target_dirs:
+        return
+
+    # Disconnect bones so pose rotations apply freely as a new rest pose
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    for eb in armature_obj.data.edit_bones:
+        eb.use_connect = False
+    bpy.ops.object.mode_set(mode='POSE')
+
+    # Clear any existing pose
+    for pb in armature_obj.pose.bones:
+        pb.rotation_mode = 'QUATERNION'
+        pb.rotation_quaternion = Quaternion((1, 0, 0, 0))
+        pb.location = Vector((0, 0, 0))
+        pb.scale = Vector((1, 1, 1))
+    bpy.context.view_layer.update()
+
+    def pose_depth(pb):
+        d = 0
+        p = pb.parent
+        while p is not None:
+            d += 1
+            p = p.parent
+        return d
+
+    rotated = 0
+    for pb in sorted(armature_obj.pose.bones, key=pose_depth):
+        tdir = target_dirs.get(pb.name)
+        if tdir is None:
+            continue
+        child_pb = armature_obj.pose.bones.get(_NATIVE_CHAIN_CHILD[pb.name])
+        if child_pb is None:
+            continue
+
+        head = pb.matrix.translation.copy()
+        current = child_pb.matrix.translation - head
+        if current.length < 1e-6:
+            continue
+
+        delta = current.normalized().rotation_difference(tdir)
+        if delta.angle < 0.001:
+            continue
+
+        # Rotate the pose bone about its own head (world/armature space)
+        pivot = (Matrix.Translation(head)
+                 @ delta.to_matrix().to_4x4()
+                 @ Matrix.Translation(-head))
+        pb.matrix = pivot @ pb.matrix
+        rotated += 1
+        # Children read updated parent matrices on the next iteration
+        bpy.context.view_layer.update()
+
+    if rotated == 0:
+        bpy.ops.object.mode_set(mode='OBJECT')
+        return
+
+    # Bake into meshes and set as the new rest pose
+    _apply_current_pose_to_meshes(armature_obj)
     bpy.ops.pose.armature_apply()
     bpy.ops.object.mode_set(mode='OBJECT')
+    print(f"[IGB Rig Converter] Universal T-pose: aligned {rotated} "
+          f"chains to the native bind")
+
+
+def _align_thumbs_to_native(armature_obj, target_game='XML2'):
+    """Rotate each thumb chain (mesh included) into the native thumb FRAME.
+
+    The exported skeleton always uses native bind orientations, so game
+    animations curl the thumb about the NATIVE flexion axis. Direction
+    alignment alone leaves the thumb free to spin about its own axis
+    (roll) — a mis-rolled thumb curls in the wrong plane in-game. Build an
+    anatomical frame from (thumb direction, palm reference) in both the
+    model and the native biped and rotate model -> native about the thumb
+    root. Near no-op when the thumb already agrees (e.g. a clean Max-style
+    rig or a manually fixed model).
+    """
+    import bpy
+    import math
+    from mathutils import Matrix, Quaternion, Vector
+
+    arm_rot = armature_obj.matrix_world.to_quaternion().to_matrix()
+    rz90 = Quaternion((0, 0, 1), math.radians(90)).to_matrix()
+    game_to_arm_m = (rz90 @ arm_rot).inverted()
+
+    native_pos = {name: game_to_arm_m @ Vector(p)
+                  for name, p in _native_game_positions(target_game).items()}
+
+    def frame_from(thumb_dir, palm_ref):
+        t = thumb_dir.normalized()
+        n = palm_ref.cross(t)
+        if n.length < 1e-6:
+            return None
+        n.normalize()
+        b = t.cross(n)
+        m = Matrix((t, n, b))   # rows
+        m.transpose()           # columns = frame axes
+        return m
+
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    for eb in armature_obj.data.edit_bones:
+        eb.use_connect = False
+    bpy.ops.object.mode_set(mode='POSE')
+    for pb in armature_obj.pose.bones:
+        pb.rotation_mode = 'QUATERNION'
+        pb.rotation_quaternion = Quaternion((1, 0, 0, 0))
+        pb.location = Vector((0, 0, 0))
+        pb.scale = Vector((1, 1, 1))
+    bpy.context.view_layer.update()
+
+    rotated = 0
+    for s in ('L', 'R'):
+        names = {k: f'Bip01 {s} {k}'
+                 for k in ('Hand', 'Finger0', 'Finger01', 'Finger1')}
+        pbs = {k: armature_obj.pose.bones.get(v) for k, v in names.items()}
+        if (pbs['Hand'] is None or pbs['Finger0'] is None
+                or pbs['Finger01'] is None):
+            continue
+        if any(native_pos.get(names[k]) is None
+               for k in ('Hand', 'Finger0', 'Finger01', 'Finger1')):
+            continue
+
+        # ---- model anatomical frame (current pose, armature space) ----
+        t_m = (pbs['Finger01'].matrix.translation
+               - pbs['Finger0'].matrix.translation)
+        if pbs['Finger1'] is not None:
+            palm_m = (pbs['Finger1'].matrix.translation
+                      - pbs['Hand'].matrix.translation)
+        else:
+            # fallback: hand bone direction (Blender bone Y = head->tail)
+            palm_m = pbs['Hand'].y_axis.copy()
+        if t_m.length < 1e-6 or palm_m.length < 1e-6:
+            continue
+
+        # ---- native anatomical frame (same construction) ----
+        t_n = native_pos[names['Finger01']] - native_pos[names['Finger0']]
+        palm_n = native_pos[names['Finger1']] - native_pos[names['Hand']]
+
+        F_m = frame_from(t_m, palm_m.normalized())
+        F_n = frame_from(t_n, palm_n.normalized())
+        if F_m is None or F_n is None:
+            continue
+
+        R = F_n @ F_m.inverted()
+        if R.to_quaternion().angle < 0.002:
+            continue
+        head = pbs['Finger0'].matrix.translation.copy()
+        pivot = (Matrix.Translation(head) @ R.to_4x4()
+                 @ Matrix.Translation(-head))
+        pbs['Finger0'].matrix = pivot @ pbs['Finger0'].matrix
+        bpy.context.view_layer.update()
+        rotated += 1
+
+        # ---- refine the distal segment toward the native Finger01 axis ----
+        # Native bone +X (row 0 of the world rotation) points at the child;
+        # the inverse bind stores the world rotation transposed.
+        m01 = NATIVE_INV_JOINT_MATRICES.get(names['Finger01'])
+        if m01 is not None:
+            tgt = (game_to_arm_m
+                   @ Vector((m01[0], m01[4], m01[8]))).normalized()
+            child = (pbs['Finger01'].children[0]
+                     if pbs['Finger01'].children else None)
+            if child is not None:
+                cur = (child.matrix.translation
+                       - pbs['Finger01'].matrix.translation)
+            else:
+                cur = pbs['Finger01'].y_axis.copy()
+            if cur.length > 1e-6:
+                delta = cur.normalized().rotation_difference(tgt)
+                if delta.angle > 0.002:
+                    a = pbs['Finger01'].matrix.translation.copy()
+                    pivot = (Matrix.Translation(a)
+                             @ delta.to_matrix().to_4x4()
+                             @ Matrix.Translation(-a))
+                    pbs['Finger01'].matrix = pivot @ pbs['Finger01'].matrix
+                    bpy.context.view_layer.update()
+
+    if rotated == 0:
+        bpy.ops.object.mode_set(mode='OBJECT')
+        return
+
+    _apply_current_pose_to_meshes(armature_obj)
+    bpy.ops.pose.armature_apply()
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print(f"[IGB Rig Converter] Thumb alignment: rotated {rotated} "
+          f"thumb chain(s) into the native frame")
 
 
 # ============================================================================
@@ -1398,7 +2418,9 @@ def _repose_meshes(armature_obj, source_pose, target_pose):
 # ============================================================================
 
 def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.0,
-                target_pose='T_POSE', target_game='XML2'):
+                target_pose='T_POSE', target_game='XML2',
+                skeleton_mode='NATIVE', align_pose=False,
+                character_size=1.0):
     """Convert an armature from Unity/Mixamo naming to XML2/MUA Bip01 convention.
 
     This is the main entry point. It:
@@ -1409,6 +2431,9 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     4. Removes unmapped bones
     5. Creates missing XML2 bones (+ FX bones for MUA)
     6. Detects source pose and reposes if needed
+    6b. skeleton_mode='NATIVE': warps the mesh onto the exact native biped
+        (Max-modder style — every animation behaves identically to official
+        skins). 'KEEP' preserves the model's own proportions instead.
     7. Computes inverse joint matrices and bone translations
     8. Stores all required custom properties for IGB export
 
@@ -1437,8 +2462,8 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
                 'error': "Rig is already converted to XML2. Use a fresh import.",
                 'mapped': 0, 'added': 0, 'removed': 0}
 
-    # ---- 0. Apply object transforms and auto-scale ----
-    _apply_transforms_and_scale(armature_obj, target_height, auto_scale)
+    # (Auto-scale is computed AFTER the bone rename — pelvis-anchored
+    # scaling needs 'Bip01 Pelvis' to exist. See step 7c below.)
 
     # ---- 0b. Rename Bip001/Bip002 → Bip01 if needed ----
     bip_prefix = _detect_bip_prefix(armature_obj)
@@ -1460,7 +2485,31 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
 
     # ---- 2. Build rename and merge maps (universal normalization) ----
     rename_map = build_rename_map(armature_obj, target_game=target_game)
-    merge_map = build_merge_map(armature_obj, rename_map=rename_map)
+    merge_map = build_merge_map(armature_obj, rename_map=rename_map,
+                                target_game=target_game)
+
+    # ---- Console diagnostics (check the System Console for this) ----
+    skinned_meshes = _get_skinned_meshes(armature_obj)
+    print(f"[IGB Rig Converter] ===== {armature_obj.name} -> {target_game} =====")
+    print(f"[IGB Rig Converter] Skinned meshes found: "
+          f"{[m.name for m in skinned_meshes]}")
+    direct_children = {c.name for c in armature_obj.children_recursive
+                       if c.type == 'MESH'}
+    modifier_only = [m.name for m in skinned_meshes
+                     if m.name not in direct_children]
+    if modifier_only:
+        print(f"[IGB Rig Converter] NOTE: {len(modifier_only)} mesh(es) found "
+              f"via Armature modifier (not parented to armature): "
+              f"{modifier_only}")
+    print(f"[IGB Rig Converter] Renames ({len(rename_map)}):")
+    for old, new in sorted(rename_map.items(), key=lambda kv: kv[1]):
+        print(f"    {old}  ->  {new}")
+    print(f"[IGB Rig Converter] Weight merges ({len(merge_map)}):")
+    by_target = {}
+    for src, tgt in merge_map.items():
+        by_target.setdefault(tgt, []).append(src)
+    for tgt in sorted(by_target):
+        print(f"    -> {tgt}:  {', '.join(sorted(by_target[tgt]))}")
 
     if not rename_map:
         bone_names = [b.name for b in armature_obj.data.bones[:10]]
@@ -1471,6 +2520,19 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
 
     # ---- 2b. Detect source pose (before rename, using rename_map) ----
     source_pose = _detect_source_pose(armature_obj, rename_map)
+
+    # ---- 2c. Capture the source weighting NOW, before any weight op ----
+    # These meshes were skinned by the (completed) import operator, so their
+    # weight data is settled and reads accurately. Every weight op from here
+    # on (merge / repose / round-trip) runs inside the current operator,
+    # where Blender's per-vertex weight cache does not flush until the
+    # operator returns — so any later in-operator recount under-reports.
+    # The pipeline is weight-preserving, so this ratio is the true exported
+    # weighting; the round-trip stamps it onto the final meshes.
+    from .actor_import import _count_weighted_vertices
+    _src_vt = sum(len(m.data.vertices) for m in skinned_meshes)
+    _src_w = sum(_count_weighted_vertices(m) for m in skinned_meshes)
+    armature_obj["igb_src_weight_ratio"] = _src_w / max(_src_vt, 1)
 
     # ---- 3. Merge vertex weights for extra bones ----
     # Build reverse rename map: xml2_name -> current_bone_name
@@ -1573,6 +2635,7 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
                 eb.head = parent_eb.tail.copy()
 
                 # Special cases for better visual placement
+                finger_placed = False
                 if name == "Bip01 Spine2":
                     # UpperChest: place between Chest (Spine1) and Neck
                     neck_eb = edit_bones.get("Bip01 Neck")
@@ -1590,6 +2653,10 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
                             pony1 = edit_bones.get("Bip01 Ponytail1")
                             if pony1:
                                 eb.head = pony1.tail.copy()
+                elif " Finger" in name:
+                    # Fingers: anchor to the hand bone using native XML2
+                    # proportions (hand tail can point anywhere on imports)
+                    finger_placed = _place_missing_finger(eb, name, edit_bones)
                 elif name == "" or name == "Bip01":
                     # Root/Bip01: at origin
                     eb.head = Vector((0, 0, 0))
@@ -1597,12 +2664,13 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
                     # Motion: at origin
                     eb.head = Vector((0, 0, 0))
 
-                # Compute tail: extend in same direction as parent
-                parent_dir = (parent_eb.tail - parent_eb.head)
-                if parent_dir.length > 0.001:
-                    eb.tail = eb.head + parent_dir.normalized() * small_len
-                else:
-                    eb.tail = eb.head + Vector((0, small_len, 0))
+                if not finger_placed:
+                    # Compute tail: extend in same direction as parent
+                    parent_dir = (parent_eb.tail - parent_eb.head)
+                    if parent_dir.length > 0.001:
+                        eb.tail = eb.head + parent_dir.normalized() * small_len
+                    else:
+                        eb.tail = eb.head + Vector((0, small_len, 0))
             else:
                 eb.head = Vector((0, 0, 0))
                 eb.tail = Vector((0, small_len, 0))
@@ -1647,11 +2715,77 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
-    # ---- 7b. Repose if source pose != target pose ----
-    # Must happen AFTER bone rename + hierarchy setup but BEFORE computing
-    # bind matrices, so that arm bone positions reflect the target pose.
-    if source_pose != 'UNKNOWN' and source_pose != target_pose:
+    # ---- 7c. Auto-scale (pelvis-anchored, now that Bip01 Pelvis exists) ----
+    # Must happen before step 8 — _force_native_root_translations reads
+    # igb_export_scale when forcing Bip01/Motion to native heights.
+    _apply_transforms_and_scale(armature_obj, target_height, auto_scale)
+
+    # ---- 7c2. Character size ----
+    # Scales the body (mesh + deforming bones) while Bip01/Motion stay at
+    # native values (the root forcing divides by the composed scale, which
+    # now includes this factor — so anims still drive the roots natively).
+    # The Pelvis offset automatically becomes -41.82*(1-s), keeping feet
+    # planted at bind. Deep-crouch animations deviate slightly for s far
+    # from 1.0 (anim heights are offset, not multiplied — engine-side
+    # herostat scale_factor is still the exact method).
+    if character_size and abs(character_size - 1.0) > 0.001:
+        current = armature_obj.get("igb_export_scale", 1.0)
+        if isinstance(current, (list, tuple)):
+            current = 1.0
+        armature_obj["igb_export_scale"] = current * character_size
+        print(f"[IGB Rig Converter] Character size {character_size:.2f} "
+              f"(body scaled, roots stay native)")
+
+    # ---- 7b. Pose alignment ----
+    # KEEP_POSE: leave the model exactly as imported — no reposing at all.
+    # T-pose target with align_pose: pose-match the LIMB chains (arms, legs,
+    # hands, fingers, thumb) to the native bind directions. Subsumes the old
+    # arm-only A->T repose and fixes thumb/finger misalignment from models
+    # with curled or spread bind poses. Near no-op for clean T-poses.
+    # A-pose target (or align_pose off): legacy arm-elevation repose only.
+    if target_pose == 'KEEP_POSE':
+        # Don't repose — but DO disconnect bones, like every other pose
+        # path. Connected bones lock their head to the parent's tail, so
+        # the later bone-display tail update (and translation computation)
+        # would drag connected children and corrupt the skeleton. Pure
+        # connection toggle: bone positions are unchanged.
+        import bpy
+        bpy.context.view_layer.objects.active = armature_obj
+        armature_obj.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+        for eb in armature_obj.data.edit_bones:
+            eb.use_connect = False
+        bpy.ops.object.mode_set(mode='OBJECT')
+        print("[IGB Rig Converter] Keep Current Pose: no reposing, no "
+              "native-biped fit — exporting the model's imported pose as-is")
+    elif target_pose == 'T_POSE' and align_pose:
+        _pose_match_native_bind(armature_obj, target_game=target_game)
+    elif source_pose != 'UNKNOWN' and source_pose != target_pose:
         _repose_meshes(armature_obj, source_pose, target_pose)
+
+    # ---- 7c. Thumb frame alignment (always) ----
+    # Thumbs are the one chain whose ROLL matters as much as direction:
+    # native anims curl the thumb about the native flexion axis, so the
+    # mesh must sit in the native thumb frame. Direction+roll matched via
+    # the palm plane; near no-op for already-correct rigs.
+    if target_pose == 'T_POSE':
+        _align_thumbs_to_native(armature_obj, target_game=target_game)
+
+    # ---- 7d. Native-skeleton fit (Max-modder style) ----
+    # Warp mesh + bones onto the exact native biped so the exported
+    # skeleton matches official skins bit-for-bit. Runs after repose
+    # (mesh is final) and after auto-scale (needs igb_export_scale).
+    #
+    # The native biped is a T-POSE skeleton, so this fit only makes sense
+    # for T_POSE targets. For A_POSE it would warp the arms straight back to
+    # horizontal — silently undoing the A-pose (the long-standing "A-pose
+    # setup does nothing" bug). A_POSE therefore always keeps the model's
+    # own skeleton/proportions (KEEP behaviour), regardless of skeleton_mode.
+    if skeleton_mode == 'NATIVE' and target_pose == 'T_POSE':
+        _fit_skeleton_to_native(armature_obj, target_game=target_game)
+    elif skeleton_mode == 'NATIVE' and target_pose == 'A_POSE':
+        print("[IGB Rig Converter] A-pose target: skipping native-biped fit "
+              "(it is T-pose only) — keeping the model's own A-pose skeleton")
 
     # ---- 8. Compute inverse joint matrices from rest pose ----
     # T-pose target: use hardcoded NATIVE_BONE_ROTATIONS (animation compat)
@@ -1664,9 +2798,10 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
 
     # ---- 9b. Force non-deforming root bones to native translations ----
     # Bip01 Z must be exactly ~41.82 game units for correct menu placement,
-    # head tracking, and animation compatibility.
-    export_scale = armature_obj.get("igb_export_scale", 1.0)
-    _force_native_root_translations(translations, export_scale)
+    # head tracking, and animation compatibility. MUST divide by the same
+    # composed scale the exporter multiplies with (custom x object scale).
+    _force_native_root_translations(translations,
+                                    _total_export_scale(armature_obj))
 
     # ---- 10. Store all custom properties ----
     _store_skeleton_properties(armature_obj, inv_matrices, translations,
@@ -1783,6 +2918,7 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0,
                 eb.head = parent_eb.tail.copy()
 
                 # Smart placement for common bones
+                finger_placed = False
                 if name == "Bip01 Spine2":
                     neck_eb = edit_bones.get("Bip01 Neck")
                     if neck_eb:
@@ -1795,12 +2931,15 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0,
                             pony1 = edit_bones.get("Bip01 Ponytail1")
                             if pony1:
                                 eb.head = pony1.tail.copy()
+                elif " Finger" in name:
+                    finger_placed = _place_missing_finger(eb, name, edit_bones)
 
-                parent_dir = parent_eb.tail - parent_eb.head
-                if parent_dir.length > 0.001:
-                    eb.tail = eb.head + parent_dir.normalized() * small_len
-                else:
-                    eb.tail = eb.head + Vector((0, small_len, 0))
+                if not finger_placed:
+                    parent_dir = parent_eb.tail - parent_eb.head
+                    if parent_dir.length > 0.001:
+                        eb.tail = eb.head + parent_dir.normalized() * small_len
+                    else:
+                        eb.tail = eb.head + Vector((0, small_len, 0))
             else:
                 eb.head = Vector((0, 0, 0))
                 eb.tail = Vector((0, small_len, 0))
@@ -1860,8 +2999,8 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0,
     inv_matrices = _compute_inv_joint_matrices(armature_obj, use_native)
     translations = _compute_bone_translations(armature_obj, use_native)
 
-    export_scale = armature_obj.get("igb_export_scale", 1.0)
-    _force_native_root_translations(translations, export_scale)
+    _force_native_root_translations(translations,
+                                    _total_export_scale(armature_obj))
 
     _store_skeleton_properties(armature_obj, inv_matrices, translations,
                                target_game=target_game)
@@ -2001,25 +3140,49 @@ def validate_bip01_rig(armature_obj):
 # Vertex Group Operations
 # ============================================================================
 
-def _rename_vertex_groups(armature_obj, rename_map):
-    """Rename vertex groups on all child meshes according to rename_map."""
+def _get_skinned_meshes(armature_obj):
+    """Find ALL meshes skinned to an armature, not just direct children.
+
+    FBX/glTF imports often parent meshes to an empty or scene root while
+    skinning them via an Armature modifier. Walking armature_obj.children
+    alone silently misses those meshes — weights then never rename or merge.
+
+    Returns:
+        List of mesh objects (children first, then modifier-linked).
+    """
     import bpy
 
-    for child in armature_obj.children:
-        if child.type != 'MESH':
+    meshes = []
+    seen = set()
+
+    for child in armature_obj.children_recursive:
+        if child.type == 'MESH' and child.name not in seen:
+            meshes.append(child)
+            seen.add(child.name)
+
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or obj.name in seen:
             continue
+        for mod in obj.modifiers:
+            if mod.type == 'ARMATURE' and mod.object == armature_obj:
+                meshes.append(obj)
+                seen.add(obj.name)
+                break
+
+    return meshes
+
+
+def _rename_vertex_groups(armature_obj, rename_map):
+    """Rename vertex groups on all skinned meshes according to rename_map."""
+    for child in _get_skinned_meshes(armature_obj):
         for vg in child.vertex_groups:
             if vg.name in rename_map:
                 vg.name = rename_map[vg.name]
 
 
 def _remove_vertex_groups(armature_obj, bone_names_to_remove):
-    """Remove vertex groups for deleted bones on all child meshes."""
-    import bpy
-
-    for child in armature_obj.children:
-        if child.type != 'MESH':
-            continue
+    """Remove vertex groups for deleted bones on all skinned meshes."""
+    for child in _get_skinned_meshes(armature_obj):
         to_remove = [vg for vg in child.vertex_groups if vg.name in bone_names_to_remove]
         for vg in to_remove:
             child.vertex_groups.remove(vg)
@@ -2047,12 +3210,14 @@ def _merge_vertex_weights(armature_obj, merge_map, reverse_rename=None):
     if reverse_rename is None:
         reverse_rename = {}
 
-    for child in armature_obj.children:
-        if child.type != 'MESH':
-            continue
-
+    for child in _get_skinned_meshes(armature_obj):
         mesh = child.data
 
+        # Resolve all source groups -> target group NAMES up front, creating
+        # missing target groups. Names (not references/indices) are tracked
+        # because vertex_groups.new() can reallocate the collection.
+        src_index_to_target = {}   # src vg index -> target vg name
+        source_group_names = []
         for src_name, xml2_target in merge_map.items():
             src_vg = child.vertex_groups.get(src_name)
             if src_vg is None:
@@ -2062,7 +3227,6 @@ def _merge_vertex_weights(armature_obj, merge_map, reverse_rename=None):
             # e.g., "Bip01 L Finger1" -> "MiddleFinger1_L" (pre-rename name)
             current_target_name = reverse_rename.get(xml2_target, xml2_target)
 
-            # Try current name first, then XML2 name as fallback
             target_vg = child.vertex_groups.get(current_target_name)
             if target_vg is None:
                 target_vg = child.vertex_groups.get(xml2_target)
@@ -2070,22 +3234,38 @@ def _merge_vertex_weights(armature_obj, merge_map, reverse_rename=None):
                 # Create with the CURRENT name so rename step works later
                 target_vg = child.vertex_groups.new(name=current_target_name)
 
-            # Transfer weights
-            src_idx = src_vg.index
-            for vert in mesh.vertices:
-                src_weight = 0.0
-                for g in vert.groups:
-                    if g.group == src_idx:
-                        src_weight = g.weight
-                        break
-                if src_weight > 0.0:
-                    try:
-                        target_vg.add([vert.index], src_weight, 'ADD')
-                    except Exception:
-                        pass
+            src_index_to_target[child.vertex_groups[src_name].index] = target_vg.name
+            source_group_names.append(src_name)
 
-            # Remove source vertex group
-            child.vertex_groups.remove(src_vg)
+        if not src_index_to_target:
+            continue
+
+        # Single pass over all vertices: accumulate merged weight per
+        # (target, vertex). O(verts x groups) instead of O(sources x verts).
+        pending = {}  # target vg name -> {vert_index: weight}
+        for vert in mesh.vertices:
+            for g in vert.groups:
+                target_name = src_index_to_target.get(g.group)
+                if target_name is not None and g.weight > 0.0:
+                    bucket = pending.setdefault(target_name, {})
+                    bucket[vert.index] = bucket.get(vert.index, 0.0) + g.weight
+
+        for target_name, vert_weights in pending.items():
+            target_vg = child.vertex_groups.get(target_name)
+            if target_vg is None:
+                continue
+            for vert_index, weight in vert_weights.items():
+                try:
+                    target_vg.add([vert_index], weight, 'ADD')
+                except Exception:
+                    pass
+
+        # Remove source vertex groups (re-lookup by name — removal shifts
+        # collection indices)
+        for src_name in source_group_names:
+            src_vg = child.vertex_groups.get(src_name)
+            if src_vg is not None:
+                child.vertex_groups.remove(src_vg)
 
 
 # ============================================================================
@@ -2175,14 +3355,15 @@ def _update_bone_display(armature_obj):
 # Matrix / Translation Computation
 # ============================================================================
 
-def _get_game_rotation(armature_obj):
+def _get_game_rotation(armature_obj, converted=True):
     """Get the combined rotation that converts bone positions from Blender
     armature-local space to XML2 game space.
 
     Includes:
     1. Armature world rotation (handles FBX -90° X for Y-up → Z-up)
-    2. +90° Z rotation to convert Blender axis convention (X=right, -Y=forward)
-       to XML2 game convention (X=forward, Y=left)
+    2. For CONVERTED rigs only: +90° Z rotation converting Blender axis
+       convention (X=right, -Y=forward) to XML2 (X=forward, Y=left).
+       Round-tripped/native rigs are already in game convention.
 
     Returns:
         4x4 rotation Matrix.
@@ -2191,8 +3372,11 @@ def _get_game_rotation(armature_obj):
     from mathutils import Quaternion
 
     world_q = armature_obj.matrix_world.to_quaternion()
-    rz90 = Quaternion((0, 0, 1), math.radians(90))
-    game_q = rz90 @ world_q
+    if converted:
+        rz90 = Quaternion((0, 0, 1), math.radians(90))
+        game_q = rz90 @ world_q
+    else:
+        game_q = world_q
     return game_q.to_matrix().to_4x4()
 
 
@@ -2266,7 +3450,8 @@ def _build_native_bind_matrix(name, bone, game_rot, use_native_rotations=True):
             return Matrix.Translation(bone_pos_game)
 
 
-def _compute_inv_joint_matrices(armature_obj, use_native_rotations=True):
+def _compute_inv_joint_matrices(armature_obj, use_native_rotations=True,
+                                converted=True):
     """Compute inverse joint matrices from rotations + custom positions.
 
     For each deforming bone (bm_idx >= 0), builds a bind matrix from:
@@ -2293,7 +3478,7 @@ def _compute_inv_joint_matrices(armature_obj, use_native_rotations=True):
     n_bones = len(XML2_SKELETON)
     result = [None] * n_bones
 
-    game_rot = _get_game_rotation(armature_obj)
+    game_rot = _get_game_rotation(armature_obj, converted=converted)
 
     for name, idx, parent_idx, bm_idx, flags in XML2_SKELETON:
         if bm_idx < 0:
@@ -2323,7 +3508,8 @@ def _compute_inv_joint_matrices(armature_obj, use_native_rotations=True):
     return result
 
 
-def _compute_bone_translations(armature_obj, use_native_rotations=True):
+def _compute_bone_translations(armature_obj, use_native_rotations=True,
+                               converted=True):
     """Compute bone translations (parent-local offsets) from custom positions.
 
     Alchemy FK reconstructs bone world positions as:
@@ -2344,7 +3530,7 @@ def _compute_bone_translations(armature_obj, use_native_rotations=True):
     n_bones = len(XML2_SKELETON)
     result = [[0.0, 0.0, 0.0]] * n_bones
 
-    game_rot = _get_game_rotation(armature_obj)
+    game_rot = _get_game_rotation(armature_obj, converted=converted)
 
     xml2_by_idx = {}
     for entry_name, entry_idx, entry_parent, entry_bm, entry_flags in XML2_SKELETON:
@@ -2388,6 +3574,76 @@ def _compute_bone_translations(armature_obj, use_native_rotations=True):
     return result
 
 
+def _total_export_scale(armature_obj):
+    """The FULL scale the exporter applies: igb_export_scale x object scale.
+
+    _apply_scale_to_skeleton in skin_export multiplies stored translations by
+    custom_scale * armature_object_scale_uniform. Anything that pre-divides
+    values for that multiplication MUST divide by the same composition —
+    dividing by igb_export_scale alone left Bip01/Motion off by exactly the
+    armature's object scale on DAE/FBX imports (e.g. 0.0254 inch->meter),
+    which corrupted the engine's root-motion handling.
+    """
+    custom_scale = armature_obj.get("igb_export_scale", 1.0)
+    if isinstance(custom_scale, (list, tuple)):
+        custom_scale = 1.0
+    obj_scale = armature_obj.matrix_world.to_scale()
+    uniform = (abs(obj_scale.x) + abs(obj_scale.y) + abs(obj_scale.z)) / 3.0
+    if uniform < 1e-9:
+        uniform = 1.0
+    return custom_scale * uniform
+
+
+# Root-compensation anchor: the Bip01 height the offset is exact at.
+# Decoded from real anim tracks across characters: menu_idle drives Bip01
+# to ~41.5-41.9 (all characters — it's the close-camera pose where float
+# is most visible), Iron Man's idle ~40.9-41.6, Wolverine's idle 38-39.3.
+# The native bind (41.82) is the best single anchor: menus ground exactly,
+# standing idles land within ~1-2 units, and s=1 is a strict no-op.
+_ANIM_IDLE_BIP01_Z = 41.8195
+
+
+def _uniform_root_translations(translations):
+    """Normalize root translations for a non-standard-size character.
+
+    The empirical facts (from the user's three-way in-game test + decoding
+    the game's animations):
+      - The runtime uses the SKIN skeleton's translations for FK (a scaled
+        skin gives a scaled body) ...
+      - ... EXCEPT animations with Bip01 translation keys REPLACE the bind
+        value with ABSOLUTE native heights (idle drives Z to ~38). A short
+        rig with Bip01 bind at its own pelvis height gets hoisted to 38
+        and floats.
+      - The Pelvis track in anims carries no data, so the Pelvis bind
+        offset SURVIVES animation — it's the one knob that works always.
+
+    Layout chosen (exact at idle, the pose you see 95% of the time):
+      pelvis_bind  P  (feet on floor at bind)
+      s          = P / native(41.82)
+      Pelvis.z   = -IDLE * (1 - s)     -> anim-keyed pelvis = K - IDLE(1-s)
+                                          == K*s exactly when K == IDLE
+      Bip01.z    = P - Pelvis.z        -> bind/walk/run pelvis stays at P
+      Motion     = (x, y, 0)           -> vanilla non-standard-size pattern
+
+    Deep crouch transients (jump_land K~24) deviate by (IDLE-K)*(1-s) —
+    brief and small for moderate scales. For s=1 everything is native.
+
+    Args:
+        translations: list of 35 [x,y,z] — modified in place.
+    """
+    pelvis_fk = [translations[1][i] + translations[2][i] for i in range(3)]
+    native_z = NATIVE_TRANSLATIONS[1][2]  # 41.8195
+
+    s = pelvis_fk[2] / native_z if native_z > 1e-9 else 1.0
+    pelvis_offset_z = -_ANIM_IDLE_BIP01_Z * (1.0 - s)
+
+    translations[0] = [0.0, 0.0, 0.0]
+    translations[2] = [0.0, 0.0, pelvis_offset_z]
+    translations[1] = [pelvis_fk[0], pelvis_fk[1],
+                       pelvis_fk[2] - pelvis_offset_z]
+    translations[34] = [pelvis_fk[0], pelvis_fk[1], 0.0]
+
+
 def _force_native_root_translations(translations, export_scale):
     """Force non-deforming root bone translations to native game-unit values.
 
@@ -2426,6 +3682,226 @@ def _force_native_root_translations(translations, export_scale):
     translations[2] = [pelvis_unscaled[i] - translations[1][i] for i in range(3)]
 
 
+def fix_root_translations(armature_obj):
+    """Recompute the export skeleton from the armature's CURRENT state and
+    re-anchor Bip01/Motion to native game values.
+
+    Handles every way the user may have resized the rig after conversion:
+    - Object Mode scaling (object scale changes, bones unchanged)
+    - Edit Mode scaling (bone positions change, object scale unchanged)
+    - any combination / repeated tweaks (idempotent)
+
+    The full skeleton data (translations + inverse bind matrices) is
+    rebuilt from the live bone positions, then the roots are forced to
+    export at exact native heights with the Pelvis offset absorbing the
+    difference — body keeps the user's size, feet stay planted.
+
+    Returns:
+        (success, message)
+    """
+    if armature_obj is None or armature_obj.type != 'ARMATURE':
+        return False, "No armature selected"
+
+    if "igb_skin_bone_translations" not in armature_obj:
+        return False, ("No skeleton data on armature — run Setup Skin "
+                       "or import an actor first")
+
+    if armature_obj.data.bones.get("Bip01 Pelvis") is None:
+        return False, "Armature has no 'Bip01 Pelvis' bone"
+
+    total = _total_export_scale(armature_obj)
+    if total < 0.001:
+        return False, f"Export scale too small ({total:.5f})"
+
+    target_game = armature_obj.get("igb_target_game", "XML2")
+    prev_converted = armature_obj.get("igb_converted_rig", False)
+
+    # FULL REBUILD from the live bones — the Blender skeleton is the truth.
+    # Whatever the user did (object scale, edit-mode scale, pose-scale of
+    # the Pelvis + apply rest, manual bone surgery), the export data is
+    # regenerated to match it exactly: translations AND inverse binds stay
+    # consistent with each other — that consistency is what keeps the arms
+    # from breaking. Roots are then normalized to Raven's vanilla pattern
+    # for non-standard-size characters (Bip01 at the pelvis, Motion Z=0).
+    inv_matrices = _compute_inv_joint_matrices(armature_obj, True,
+                                               converted=prev_converted)
+    translations = _compute_bone_translations(armature_obj, True,
+                                              converted=prev_converted)
+    _uniform_root_translations(translations)
+    # _store_skeleton_properties unconditionally sets igb_converted_rig;
+    # preserve the original value
+    _store_skeleton_properties(armature_obj, inv_matrices, translations,
+                               target_game=target_game)
+    armature_obj["igb_converted_rig"] = prev_converted
+
+    # ---- Restore Bip01 to its ORIGINAL scale (only Bip01) ----
+    # The user scales the armature object to resize the character; Bip01
+    # shrinks with it. Restore the bone's WORLD size to what it was at
+    # setup time (stored reference), keeping its current head position and
+    # direction. Also clear any pose-scale on it.
+    import bpy
+
+    bip_pb = armature_obj.pose.bones.get("Bip01")
+    if bip_pb is not None and tuple(bip_pb.scale) != (1.0, 1.0, 1.0):
+        old_scale = tuple(bip_pb.scale)
+        bip_pb.scale = (1.0, 1.0, 1.0)
+        pelvis_pb = armature_obj.pose.bones.get("Bip01 Pelvis")
+        if pelvis_pb is not None:
+            inherit = getattr(pelvis_pb.bone, 'inherit_scale', 'FULL')
+            if inherit != 'NONE':
+                pelvis_pb.scale = (pelvis_pb.scale[0] * old_scale[0],
+                                   pelvis_pb.scale[1] * old_scale[1],
+                                   pelvis_pb.scale[2] * old_scale[2])
+
+    obj_scale = armature_obj.matrix_world.to_scale()
+    obj_uniform = (abs(obj_scale.x) + abs(obj_scale.y)
+                   + abs(obj_scale.z)) / 3.0 or 1.0
+    bip_bone = armature_obj.data.bones.get("Bip01")
+    if bip_bone is not None:
+        # Reference world length from setup; fall back to "original object
+        # scale was 1.0" (true for round-tripped rigs) when not stored
+        ref_world_len = armature_obj.get("igb_bip01_world_length")
+        if not isinstance(ref_world_len, (int, float)) or ref_world_len <= 0:
+            ref_world_len = bip_bone.length  # length at obj scale 1.0
+        target_edit_len = ref_world_len / obj_uniform
+        if abs(target_edit_len - bip_bone.length) > 1e-6:
+            try:
+                bpy.context.view_layer.objects.active = armature_obj
+                armature_obj.select_set(True)
+                bpy.ops.object.mode_set(mode='EDIT')
+                eb = armature_obj.data.edit_bones.get("Bip01")
+                if eb is not None and (eb.tail - eb.head).length > 1e-9:
+                    direction = (eb.tail - eb.head).normalized()
+                    eb.tail = eb.head + direction * target_edit_len
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass  # cosmetic only — never fail the data fix over it
+
+    bip_z = translations[1][2] * total
+    pelvis_z = (translations[1][2] + translations[2][2]) * total
+    return True, (f"Export data rebuilt from bones: Bip01 at Z={bip_z:.2f}, "
+                  f"pelvis at Z={pelvis_z:.2f} (native Bip01 = 41.82)")
+
+
+def _ground_rig(armature_obj):
+    """Translate bones AND meshes down so the lowest mesh point sits at
+    world Z=0 (feet on the floor).
+
+    Pose-scaling the Pelvis shrinks the body toward the pelvis head, which
+    leaves the feet hanging above the ground — vanilla small characters
+    (e.g. 6601.igb) have their pelvis LOWERED so feet touch zero.
+
+    Returns:
+        The world-space drop distance applied (0.0 if already grounded).
+    """
+    import bpy
+    from mathutils import Vector
+
+    min_z = float('inf')
+    meshes = _get_skinned_meshes(armature_obj)
+    for mesh_obj in meshes:
+        mw = mesh_obj.matrix_world
+        for corner in mesh_obj.bound_box:
+            z = (mw @ Vector(corner)).z
+            min_z = min(min_z, z)
+    if min_z == float('inf') or abs(min_z) < 1e-4:
+        return 0.0
+
+    drop_world = Vector((0.0, 0.0, -min_z))
+
+    # Shift all bones (armature-local direction of world -Z)
+    try:
+        d_arm = armature_obj.matrix_world.to_3x3().inverted() @ drop_world
+    except ValueError:
+        return 0.0
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    for eb in armature_obj.data.edit_bones:
+        eb.head += d_arm
+        eb.tail += d_arm
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # Shift mesh data (each mesh's local direction), shape keys included
+    for mesh_obj in meshes:
+        try:
+            d_mesh = mesh_obj.matrix_world.to_3x3().inverted() @ drop_world
+        except ValueError:
+            continue
+        mesh = mesh_obj.data
+        for vert in mesh.vertices:
+            vert.co += d_mesh
+        if mesh.shape_keys and mesh.shape_keys.key_blocks:
+            for kb in mesh.shape_keys.key_blocks:
+                for point in kb.data:
+                    point.co += d_mesh
+        mesh.update()
+
+    return -min_z
+
+
+def apply_pose_and_rebuild(armature_obj):
+    """One-click version of the proven manual resize recipe.
+
+    The user scales bones in POSE mode (e.g. just 'Bip01 Pelvis' to shrink
+    the whole body while Bip01 keeps its size). This then:
+    1. Bakes the current pose into every skinned mesh (weighted,
+       shape-key aware) — so the mesh actually matches the new skeleton
+    2. Applies the pose as the new rest pose
+    3. Rebuilds ALL export data (translations + inverse binds) from the
+       result — keeping them consistent, which is what stops the arms
+       from breaking
+
+    Returns:
+        (success, message)
+    """
+    import bpy
+
+    if armature_obj is None or armature_obj.type != 'ARMATURE':
+        return False, "No armature selected"
+    if "igb_skin_bone_translations" not in armature_obj:
+        return False, ("No skeleton data on armature — run Setup Skin "
+                       "or import an actor first")
+
+    # Anything posed at all?
+    posed = False
+    for pb in armature_obj.pose.bones:
+        if (tuple(pb.scale) != (1.0, 1.0, 1.0)
+                or tuple(pb.location) != (0.0, 0.0, 0.0)
+                or tuple(pb.rotation_quaternion) != (1.0, 0.0, 0.0, 0.0)
+                or tuple(pb.rotation_euler) != (0.0, 0.0, 0.0)):
+            posed = True
+            break
+    if not posed:
+        return False, ("No pose changes found — scale bones in Pose Mode "
+                       "first (e.g. scale 'Bip01 Pelvis' to resize the "
+                       "body while Bip01 keeps its size)")
+
+    # 1. Bake the pose into the meshes (manual weighted deform — works
+    # with the 100+ shape keys that block modifier_apply)
+    _apply_current_pose_to_meshes(armature_obj)
+
+    # 2. Pose becomes the new rest pose
+    bpy.context.view_layer.objects.active = armature_obj
+    armature_obj.select_set(True)
+    bpy.ops.object.mode_set(mode='POSE')
+    bpy.ops.pose.armature_apply()
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # 3. Ground the rig — pelvis-pivot scaling leaves the feet hanging;
+    # vanilla small characters have the whole skeleton lowered so feet
+    # touch Z=0
+    dropped = _ground_rig(armature_obj)
+
+    # 4. Rebuild the export data from the new rest skeleton
+    success, message = fix_root_translations(armature_obj)
+    if not success:
+        return False, f"Pose applied, but data rebuild failed: {message}"
+    if dropped > 1e-4:
+        message += f" (grounded: dropped {dropped:.3f})"
+    return True, f"Pose applied and export data rebuilt. {message}"
+
+
 # ============================================================================
 # Custom Property Storage
 # ============================================================================
@@ -2446,6 +3922,17 @@ def _store_skeleton_properties(armature_obj, inv_matrices, translations,
     armature_obj["igb_skin_skeleton_name"] = ""
     armature_obj["igb_skin_joint_count"] = joint_count
     armature_obj["igb_bone_count"] = len(skeleton)
+
+    # Remember Bip01's WORLD-space display length so "Fix Bip01" can
+    # restore the bone to its original size after the user rescales the
+    # armature (the bone size is cosmetic, but it's the user's visual
+    # reference for "Bip01 stayed native")
+    bip01_bone = armature_obj.data.bones.get("Bip01")
+    if bip01_bone is not None:
+        obj_scale = armature_obj.matrix_world.to_scale()
+        uniform = (abs(obj_scale.x) + abs(obj_scale.y)
+                   + abs(obj_scale.z)) / 3.0 or 1.0
+        armature_obj["igb_bip01_world_length"] = bip01_bone.length * uniform
 
     # Bone translations (indexed by bone index)
     # translations is a list from _compute_bone_translations (35 entries for XML2).

@@ -1,6 +1,6 @@
 # IGB Blender Addon
 
-**Version 0.3**
+**Version 0.4**
 
 A Blender 4.4 addon for importing and exporting Alchemy Engine IGB/IGZ files used by **X-Men Legends II** and **Marvel Ultimate Alliance** (PC).
 
@@ -12,18 +12,28 @@ Created by **Kaiko** with the aid of **Claude**.
 
 ## Installation
 
-1. Download or clone this repo.
-2. Copy the entire `igb_blender` folder into your Blender addons directory:
-   ```
-   <Blender Install>/scripts/addons/igb_blender/
-   ```
-   For portable installs this is typically:
-   ```
-   <Blender Portable>/scripts/addons/igb_blender/
-   ```
-3. Open Blender and go to **Edit > Preferences > Add-ons**.
-4. Search for **"IGB Format"** and enable it.
-5. The addon adds five sidebar tabs (press `N` in the 3D viewport): **IGB**, **IGB Actors**, **Map Maker**, **Menu Editor**, and **Texture Editor**.
+**Recommended — install the release ZIP:**
+
+1. Go to the [Releases page](https://github.com/KaikoClanworth1/igb-blender/releases)
+   and download the **`igb_blender.zip`** file listed under **Assets** for the
+   latest release.
+2. In Blender open **Edit > Preferences > Add-ons**, click the **▾** menu
+   (top-right) and choose **Install from Disk…** (on older builds: the **Install…**
+   button), then pick the downloaded `igb_blender.zip`. You can also just drag the
+   zip into the Blender window.
+3. Search for **"IGB Format"** in the add-on list and tick the checkbox to enable it.
+4. The addon adds five sidebar tabs (press `N` in the 3D viewport): **IGB**,
+   **IGB Actors**, **Map Maker**, **Menu Editor**, and **Texture Editor**.
+
+> ⚠️ **Do NOT use the green "Code → Download ZIP" button** (or the "Source code (zip)"
+> link on a release). That archive unpacks to a folder named `igb-blender-master`
+> / `igb-blender-0.4.0`, and the hyphens make it an invalid Python module name, so
+> Blender will install it but **fail to enable** it. Always use the
+> **`igb_blender.zip`** asset from the Releases page.
+
+**Manual install (advanced):** copy the inner `igb_blender` folder so it lands at
+`<Blender>/scripts/addons/igb_blender/` (the folder must be named exactly
+`igb_blender`), then enable it as in step 3.
 
 ### PySide6 (Optional)
 

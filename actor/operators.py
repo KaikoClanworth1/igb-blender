@@ -406,6 +406,20 @@ def _skin_export_texture_items(self, context):
     ]
 
 
+def _skin_export_resolution_items(self, context):
+    """Enum items for skin export texture resolution cap (longest edge)."""
+    return [
+        ('original', "Original",
+         "Keep each texture's source size (rounded up to power-of-2)"),
+        ('1024', "1024",
+         "Cap each texture to 1024px on the longest edge"),
+        ('512', "512",
+         "Cap each texture to 512px on the longest edge"),
+        ('256', "256",
+         "Cap each texture to 256px on the longest edge"),
+    ]
+
+
 class ACTOR_OT_export_skin(Operator, ExportHelper):
     """Export the active skin to an IGB file (from-scratch builder, no template)"""
     bl_idname = "actor.export_skin"
@@ -423,6 +437,39 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
         name="Texture Format",
         description="Texture encoding format",
         items=_skin_export_texture_items,
+    )
+
+    texture_resolution: EnumProperty(
+        name="Texture Resolution",
+        description="Optional cap on texture size (longest edge). "
+                    "Use lower values to shrink IGB file size",
+        items=_skin_export_resolution_items,
+    )
+
+    actor_graph: EnumProperty(
+        name="Skin Format",
+        description="IGB layout + how much of the 3ds Max-style actor graph "
+                    "to emit. The v4 Max-style formats mirror community "
+                    "skins; 'v4 + Combiner' carries the engine-side "
+                    "retargeting that grounds RESIZED characters "
+                    "everywhere incl. the character select menu",
+        items=[
+            ('OFF', "XML2 Native v6 (Stable)",
+             "Bare native-style v6 skin — proven in-game"),
+            ('ANIM', "v6 + Bind-Pose Anim",
+             "Native v6 + embedded bind-pose animation (loads in-game)"),
+            ('FULL', "v6 + Full Combiner (crashes)",
+             "Complete combiner graph in v6 — crashed XML2, kept for "
+             "bisection only"),
+            ('V4_ANIM', "3ds Max v4 (0103 mirror)",
+             "v4 Max-era layout mirroring a known-compatible community "
+             "skin: CLUT texture, tri-list geometry, bind-pose animation"),
+            ('V4_FULL', "3ds Max v4 + Combiner (MUA ONLY)",
+             "v4 layout + MUA-era combiner graph. CRASHES XML2 — the XML2 "
+             "engine cannot deserialize combiner classes (no XML2 skin, "
+             "vanilla or modded, carries them). MUA-era Max skins all do"),
+        ],
+        default='OFF',
     )
 
     @classmethod
@@ -486,6 +533,19 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             swap_rb = False
             texture_mode = 'dxt5'
 
+        try:
+            max_texture_size = int(self.texture_resolution)
+        except (TypeError, ValueError):
+            max_texture_size = 0  # 'original'
+
+        # Map the format enum to builder family + graph mode
+        if self.actor_graph.startswith('V4'):
+            igb_format = 'V4'
+            graph_mode = 'FULL' if self.actor_graph == 'V4_FULL' else 'ANIM'
+        else:
+            igb_format = 'V6'
+            graph_mode = self.actor_graph
+
         success = export_skin(
             filepath=self.filepath,
             mesh_objs=mesh_objs,
@@ -493,6 +553,9 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             operator=self,
             swap_rb=swap_rb,
             texture_mode=texture_mode,
+            max_texture_size=max_texture_size,
+            actor_graph=graph_mode,
+            igb_format=igb_format,
         )
 
         return {'FINISHED'} if success else {'CANCELLED'}
@@ -567,11 +630,27 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
         if operator:
             operator.report(level, msg)
 
-    # Collect child meshes
-    mesh_children = [c for c in armature_obj.children if c.type == 'MESH']
+    # Collect all skinned meshes (children + Armature-modifier users —
+    # FBX imports often parent meshes outside the armature)
+    from .rig_converter import _get_skinned_meshes
+    mesh_children = _get_skinned_meshes(armature_obj)
     if not mesh_children:
-        _report({'INFO'}, "No child meshes to round-trip")
+        _report({'INFO'}, "No skinned meshes to round-trip")
         return
+
+    # Remember the user's mesh layout so it can be restored after reimport
+    # (IGB import splits one object per material — users who combined their
+    # meshes expect them to STAY combined)
+    source_mesh_count = len(mesh_children)
+    source_mesh_name = mesh_children[0].name if mesh_children else ""
+
+    # Source weighting ratio: read the value convert_rig captured BEFORE any
+    # weight op (from the settled, freshly-imported meshes). Recomputing it
+    # here would under-report — these post-convert meshes carry weight writes
+    # made within this same operator, which Blender does not flush until the
+    # operator returns. The round-trip is weight-preserving, so this ratio is
+    # the true exported weighting; we stamp it on the reimported parts.
+    _src_ratio = armature_obj.get("igb_src_weight_ratio", 1.0)
 
     # Check that skeleton data exists
     if "igb_skin_bone_translations" not in armature_obj:
@@ -609,10 +688,14 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
                 old_collection = coll
                 break
 
-        # 3. Delete original armature and ALL child meshes
-        children_to_remove = list(armature_obj.children)
-        for child in children_to_remove:
-            bpy.data.objects.remove(child, do_unlink=True)
+        # 3. Delete original armature and ALL skinned meshes (children AND
+        # modifier-linked meshes that aren't parented to the armature)
+        to_remove = {c.name for c in armature_obj.children}
+        to_remove.update(m.name for m in mesh_children)
+        for obj_name in to_remove:
+            obj = bpy.data.objects.get(obj_name)
+            if obj is not None:
+                bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.objects.remove(armature_obj, do_unlink=True)
         armature_obj = None
 
@@ -650,6 +733,50 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
         for _, mesh_obj in skin_objects:
             _ensure_igb_material_properties(mesh_obj)
 
+        # 5d. Restore the user's mesh layout: IGB import splits the model
+        # into one object per material — if the user had a single combined
+        # mesh going in, join the reimported pieces back together.
+        if source_mesh_count == 1 and len(skin_objects) > 1:
+            try:
+                main_meshes = [mo for _, mo in skin_objects
+                               if mo is not None and mo.type == 'MESH'
+                               and not mo.get('igb_is_outline', False)]
+                if len(main_meshes) > 1:
+                    if context.mode != 'OBJECT':
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                    bpy.ops.object.select_all(action='DESELECT')
+                    for mo in main_meshes:
+                        mo.select_set(True)
+                    context.view_layer.objects.active = main_meshes[0]
+                    bpy.ops.object.join()
+                    joined = main_meshes[0]
+                    if source_mesh_name:
+                        joined.name = source_mesh_name
+                    # (weight diagnostic stamped for all parts at 5e below)
+                    # Rebuild skin_objects: joined main + any outline meshes
+                    outlines = [(v, mo) for v, mo in skin_objects
+                                if mo is not None
+                                and mo.get('igb_is_outline', False)]
+                    first_variant = skin_objects[0][0]
+                    skin_objects = [(first_variant, joined)] + outlines
+                    _report({'INFO'},
+                            f"Re-joined {len(main_meshes)} imported parts "
+                            f"into '{joined.name}' (source was one mesh)")
+            except Exception as join_err:
+                _report({'WARNING'},
+                        f"Could not re-join imported meshes: {join_err}")
+
+        # 5e. Stamp the weight diagnostic on EVERY reimported part from the
+        # settled source ratio. The round-trip is lossless, so each part's
+        # weighted fraction equals the source's; a live recount here would
+        # under-report (just-built/just-joined deform data isn't finalized
+        # until this operator returns). Covers both the joined-single-mesh
+        # case and multi-part models (which are never joined).
+        for _v, mo in skin_objects:
+            if mo is not None and mo.type == 'MESH':
+                mo["igb_weighted_vert_count"] = int(round(
+                    len(mo.data.vertices) * _src_ratio))
+
         # 6. Update panel state
         _populate_import_results(context, props, new_armature,
                                  skin_objects, actions)
@@ -668,109 +795,6 @@ def _round_trip_skin(context, armature_obj, props, operator=None):
         _report({'WARNING'}, f"Round-trip failed: {e}")
         import traceback
         traceback.print_exc()
-
-
-class ACTOR_OT_convert_rig(Operator):
-    """Convert a Unity Humanoid or Mixamo armature to the XML2/MUA Bip01 skeleton"""
-    bl_idname = "actor.convert_rig"
-    bl_label = "Convert Rig"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    rig_profile: EnumProperty(
-        name="Source Rig",
-        items=[
-            ('AUTO', "Auto-Detect",
-             "Auto-detect any rig (Unity, Mixamo, Source Engine, MMD, etc.)"),
-        ],
-        default='AUTO',
-    )
-
-    target_game: EnumProperty(
-        name="Target Game",
-        description="Target game determines skeleton (XML2=35 bones, MUA=35+14 FX bones)",
-        items=[
-            ('XML2', "XML2", "X-Men Legends II (35 bones, no FX)"),
-            ('MUA', "MUA", "Marvel Ultimate Alliance (35 + 14 FX bones)"),
-        ],
-        default='MUA',
-    )
-
-    auto_scale: BoolProperty(
-        name="Auto Scale",
-        description="Automatically scale the rig to match XML2 character proportions",
-        default=True,
-    )
-
-    target_height: FloatProperty(
-        name="Target Height",
-        description="Target character height in game units (XML2 characters are ~68 units tall)",
-        default=68.0,
-        min=10.0,
-        max=500.0,
-    )
-
-    target_pose: EnumProperty(
-        name="Target Pose",
-        items=[
-            ('T_POSE', "T-Pose (Recommended)",
-             "Repose arms to T-pose for XML2 animation compatibility"),
-            ('A_POSE', "A-Pose",
-             "Keep A-pose arm orientation (for custom animations or other games)"),
-        ],
-        default='T_POSE',
-    )
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return obj is not None and obj.type == 'ARMATURE'
-
-    def execute(self, context):
-        from .rig_converter import convert_rig
-
-        armature_obj = context.active_object
-        result = convert_rig(armature_obj, profile=self.rig_profile,
-                             auto_scale=self.auto_scale,
-                             target_height=self.target_height,
-                             target_pose=self.target_pose,
-                             target_game=self.target_game)
-
-        if result['success']:
-            pose_info = ""
-            src = result.get('source_pose', 'UNKNOWN')
-            if src != 'UNKNOWN':
-                pose_info = f" (detected {src} → {self.target_pose})"
-            game_info = f" [{self.target_game}]"
-            self.report(
-                {'INFO'},
-                f"Converted rig{game_info}: {result['mapped']} mapped, "
-                f"{result['added']} added, {result['removed']} removed"
-                f"{pose_info}")
-            # Set as active armature in the IGB Actors panel
-            props = context.scene.igb_actor
-            props.active_armature = armature_obj.name
-
-            # Auto-populate skins list with child meshes
-            _populate_skins_from_children(props, armature_obj)
-
-            # Ensure child meshes have IGB material properties before
-            # round-trip export.  VRChat/Unity materials won't have igb_*
-            # custom props, so fill in sensible defaults.
-            for child in armature_obj.children:
-                if child.type == 'MESH':
-                    _ensure_igb_material_properties(child)
-
-            # Round-trip: export skin to temp IGB then reimport for a clean
-            # IGB-compatible mesh that responds correctly to XML2 animations.
-            _round_trip_skin(context, armature_obj, props, operator=self)
-
-            return {'FINISHED'}
-        else:
-            self.report({'ERROR'}, result['error'])
-            return {'CANCELLED'}
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
 
 
 class ACTOR_OT_setup_skin(Operator):
@@ -812,22 +836,64 @@ class ACTOR_OT_setup_skin(Operator):
             ('T_POSE', "T-Pose (Recommended)",
              "Repose arms to T-pose for XML2 animation compatibility"),
             ('A_POSE', "A-Pose",
-             "Keep A-pose arm orientation (for custom animations)"),
+             "Repose arms to ~45 degrees down (for custom animations)"),
+            ('KEEP_POSE', "Keep Current Pose",
+             "Leave the model in its exact imported pose — no arm reposing "
+             "and no native-skeleton fit. Use for models already posed how "
+             "you want, or for custom animations authored to that pose"),
         ],
         default='T_POSE',
+    )
+
+    skeleton_mode: EnumProperty(
+        name="Skeleton",
+        description="How the skeleton relates to the game's shared biped",
+        items=[
+            ('NATIVE', "Native Skeleton (Recommended)",
+             "Warp the mesh onto the game's exact shared biped (every "
+             "official skin uses this identical skeleton). All animations "
+             "behave exactly like official characters: no floating, no "
+             "sinking, standard size. Stylized proportions get adjusted"),
+            ('KEEP', "Keep Model Proportions",
+             "Keep the model's own limb lengths (pelvis still anchored at "
+             "native height). Preserves stylized proportions but deep "
+             "crouch/jump animations may show slight foot deviation"),
+        ],
+        default='NATIVE',
+    )
+
+    align_pose: BoolProperty(
+        name="Force T-Pose (Align to Native Bind)",
+        description="Rotate limb chains (arms, legs, hands, thumb, fingers) "
+                    "to the game's exact bind directions. Fixes off-angle "
+                    "thumbs/fingers from curled or spread source poses, but "
+                    "deforms the mesh — leave off unless fingers look wrong",
+        default=False,
+    )
+
+    character_size: FloatProperty(
+        name="Character Size",
+        description="Body size relative to a standard character (1.0). "
+                    "Roots stay native so feet remain planted; sizes far "
+                    "from 1.0 show slight crouch deviation in animations "
+                    "(herostat scale_factor is the engine-exact method)",
+        default=1.0,
+        min=0.5,
+        max=1.5,
     )
 
     # --- Shared options ---
     auto_scale: BoolProperty(
         name="Auto Scale",
-        description="Automatically scale the rig to match XML2 character proportions",
+        description="Anchor the pelvis at the native game height (~41.82 units) so the game's animations keep feet on the ground. To resize a character in-game, use herostat scale_factor instead",
         default=True,
     )
 
     target_height: FloatProperty(
         name="Target Height",
-        description="Target character height in game units "
-                    "(XML2 characters are ~68 units tall)",
+        description="Fallback total height, used ONLY when no pelvis bone "
+                    "is found. With a pelvis, scale is locked to the native "
+                    "pelvis height for animation compatibility",
         default=68.0,
         min=10.0,
         max=500.0,
@@ -857,6 +923,9 @@ class ACTOR_OT_setup_skin(Operator):
         if self.target_game == 'MUA':
             layout.label(text="  +14 FX bones (Gun1, fx01-fx13)", icon='BONE_DATA')
         layout.prop(self, "target_pose")
+        layout.prop(self, "skeleton_mode")
+        layout.prop(self, "align_pose")
+        layout.prop(self, "character_size")
 
         layout.separator()
         layout.prop(self, "auto_scale")
@@ -875,7 +944,10 @@ class ACTOR_OT_setup_skin(Operator):
                              auto_scale=self.auto_scale,
                              target_height=self.target_height,
                              target_pose=self.target_pose,
-                             target_game=self.target_game)
+                             target_game=self.target_game,
+                             skeleton_mode=self.skeleton_mode,
+                             align_pose=self.align_pose,
+                             character_size=self.character_size)
 
         if not result['success']:
             self.report({'ERROR'}, result['error'])
@@ -901,6 +973,12 @@ class ACTOR_OT_setup_skin(Operator):
             if child.type == 'MESH':
                 _ensure_igb_material_properties(child)
 
+        # Full round-trip for ALL pose modes (incl. Keep Current Pose) so the
+        # model is fully processed into a clean, game-ready skin. The round-
+        # trip faithfully preserves whatever pose the converted skeleton is
+        # in — it reconstructs bone positions from the inv_joint bind, which
+        # encodes the kept pose exactly (verified: an arms-down source stays
+        # arms-down through the round-trip).
         _round_trip_skin(context, armature_obj, props, operator=self)
         return {'FINISHED'}
 
@@ -1038,60 +1116,6 @@ def _anim_name_items(self, context):
     if not items:
         return [('NONE', "No animations found", "")]
     return items
-
-
-class ACTOR_OT_import_single_animation(Operator, ImportHelper):
-    """Import animations from an IGB file (select which ones)"""
-    bl_idname = "actor.import_single_animation"
-    bl_label = "Import Animations"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    filename_ext = ".igb"
-
-    filter_glob: StringProperty(
-        default="*.igb",
-        options={'HIDDEN'},
-    )
-
-    @classmethod
-    def poll(cls, context):
-        props = context.scene.igb_actor
-        return (props.active_armature and
-                props.active_armature in bpy.data.objects)
-
-    def execute(self, context):
-        """Read the IGB file, cache animations, then open the pick dialog."""
-        from .sg_skeleton import extract_skeleton
-        from .sg_animation import extract_animations
-        from .actor_import import _extract_bind_pose
-        from ..igb_format.igb_reader import IGBReader
-
-        reader = IGBReader(self.filepath)
-        reader.read()
-
-        skeleton = extract_skeleton(reader)
-        if skeleton is None:
-            self.report({'ERROR'}, "No skeleton found in animation file")
-            return {'CANCELLED'}
-
-        parsed_anims = extract_animations(reader, skeleton)
-        if not parsed_anims:
-            self.report({'WARNING'}, "No animations found in file")
-            return {'CANCELLED'}
-
-        bind_pose = _extract_bind_pose(parsed_anims)
-
-        # Populate the cache for the pick dialog
-        _anim_import_cache['parsed_anims'] = parsed_anims
-        _anim_import_cache['bind_pose'] = bind_pose
-        _anim_import_cache['anim_names'] = [
-            (pa.name, pa.name, f"{pa.duration_ms / 1000.0:.2f}s, {len(pa.tracks)} tracks")
-            for pa in parsed_anims
-        ]
-
-        # Open the multi-select pick dialog
-        bpy.ops.actor.pick_animation('INVOKE_DEFAULT')
-        return {'FINISHED'}
 
 
 class ACTOR_OT_pick_animation(Operator):
@@ -2237,22 +2261,242 @@ class ACTOR_OT_convert_animation(Operator, ExportHelper):
         return {'RUNNING_MODAL'}
 
 
+class ACTOR_OT_scale_anim_set(Operator, ImportHelper):
+    """Scale a character's animation IGB for a resized character.
+
+    Animations drive the root bones with ABSOLUTE heights authored for
+    the standard skeleton — a resized skin alone always floats or sinks.
+    This rewrites the character's anim set (e.g. 15_xxx.igb) at your
+    scale: every translation (skeleton, keyframes, root motion) is
+    multiplied; rotations are untouched. Deploy the output alongside
+    your resized skin and use the same factor for both.
+    """
+    bl_idname = "actor.scale_anim_set"
+    bl_label = "Scale Animation Set (.igb)"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".igb"
+    filter_glob: StringProperty(default="*.igb", options={'HIDDEN'})
+
+    scale_factor: FloatProperty(
+        name="Scale Factor",
+        description="Uniform character scale (match your skin's resize, "
+                    "e.g. 0.65 for a 65% character)",
+        default=0.65,
+        min=0.05,
+        max=5.0,
+    )
+
+    game: EnumProperty(
+        name="Game",
+        items=[('xml2', "XML2", ""), ('mua', "MUA", "")],
+        default='xml2',
+    )
+
+    def execute(self, context):
+        from .anim_scale import scale_anim_file
+
+        src = self.filepath
+        base, ext = os.path.splitext(src)
+        out = f"{base}_scaled{ext}"
+        try:
+            ok, message, skipped = scale_anim_file(
+                src, out, self.scale_factor, game=self.game)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Scaling failed: {exc}")
+            return {'CANCELLED'}
+
+        if not ok:
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+        self.report({'INFO'}, message)
+        if skipped:
+            print("[Scale Animation Set] unscaled blobs:", skipped)
+        return {'FINISHED'}
+
+
+class ACTOR_OT_fix_menu_anims(Operator, ImportHelper):
+    """Fix character-select float for resized characters.
+
+    The select screen applies the Pelvis animation track literally
+    (explicit zeros override the skin's offset), while gameplay treats
+    them as no-data — so a resized character grounds in-game but floats
+    in the menu. This bakes the skin's Pelvis offset into the MENU
+    animations (menu_idle/menu_action/menu_goodbye) of the character's
+    anim file. Menu-only animations: zero gameplay impact.
+
+    Patches the file IN PLACE (a .bak backup is written first). Select
+    the resized armature beforehand so the offset is read automatically.
+    """
+    bl_idname = "actor.fix_menu_anims"
+    bl_label = "Fix Menu Float (Anim File)"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".igb"
+    filter_glob: StringProperty(default="*.igb", options={'HIDDEN'})
+
+    pelvis_offset: FloatProperty(
+        name="Pelvis Offset (game units)",
+        description="The skin's Pelvis Z offset. 0 = read automatically "
+                    "from the active armature's stored skeleton data",
+        default=0.0,
+        min=-60.0,
+        max=0.0,
+    )
+
+    game: EnumProperty(
+        name="Game",
+        items=[('xml2', "XML2", ""), ('mua', "MUA", "")],
+        default='xml2',
+    )
+
+    def execute(self, context):
+        import json as _json
+        from .anim_scale import fix_menu_pelvis
+        from .rig_converter import _total_export_scale
+
+        offset = self.pelvis_offset
+        if abs(offset) < 1e-6:
+            # Auto-read from the active armature's stored skeleton data
+            obj = context.active_object
+            if (obj is None or obj.type != 'ARMATURE'
+                    or "igb_skin_bone_translations" not in obj):
+                self.report({'ERROR'},
+                            "Set Pelvis Offset manually, or select the "
+                            "resized armature first for auto-detect")
+                return {'CANCELLED'}
+            try:
+                translations = _json.loads(
+                    obj["igb_skin_bone_translations"])
+                offset = translations[2][2] * _total_export_scale(obj)
+            except Exception as exc:
+                self.report({'ERROR'}, f"Could not read offset: {exc}")
+                return {'CANCELLED'}
+            if abs(offset) < 1e-4:
+                self.report({'WARNING'},
+                            "Armature's Pelvis offset is 0 — character "
+                            "is standard size, nothing to fix")
+                return {'CANCELLED'}
+
+        try:
+            ok, message = fix_menu_pelvis(self.filepath, offset,
+                                          game=self.game)
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Patch failed: {exc}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'} if ok else {'ERROR'}, message)
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
+class ACTOR_OT_apply_pose_resize(Operator):
+    """Apply your Pose Mode scaling as the new shape and rebuild the
+    export data so everything stays consistent.
+
+    The proven resize recipe, one click: in Pose Mode, scale
+    'Bip01 Pelvis' to resize the body (Bip01 keeps its size), then run
+    this. The pose is baked into the meshes (shape keys included),
+    applied as the new rest pose, and ALL export data (bone translations
+    + inverse binds) is rebuilt to match — so the arms don't break.
+    """
+    bl_idname = "actor.apply_pose_resize"
+    bl_label = "Apply Pose Scale (Resize)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'ARMATURE'
+                and "igb_skin_bone_translations" in obj)
+
+    def execute(self, context):
+        from .rig_converter import apply_pose_and_rebuild
+
+        success, message = apply_pose_and_rebuild(context.active_object)
+        if success:
+            self.report({'INFO'}, message)
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
+class ACTOR_OT_fix_bip01(Operator):
+    """Re-anchor Bip01/Motion to native game values against the CURRENT
+    armature scale.
+
+    Workflow: scale the armature object in Object Mode to resize your
+    character, then click this — the body keeps your size while the root
+    bones export at exact native heights, so feet stay planted and
+    animations behave. Safe to run after every scale tweak (idempotent).
+    """
+    bl_idname = "actor.fix_bip01"
+    bl_label = "Rebuild Export Data"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'ARMATURE'
+                and "igb_skin_bone_translations" in obj)
+
+    def execute(self, context):
+        from .rig_converter import fix_root_translations
+
+        success, message = fix_root_translations(context.active_object)
+        if success:
+            self.report({'INFO'}, message)
+            return {'FINISHED'}
+        self.report({'ERROR'}, message)
+        return {'CANCELLED'}
+
+
+class ACTOR_OT_show_all_skins(Operator):
+    """Show every mesh in the skins list (undo a Solo)"""
+    bl_idname = "actor.show_all_skins"
+    bl_label = "Show All Skins"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.scene.igb_actor.skins) > 0
+
+    def execute(self, context):
+        props = context.scene.igb_actor
+        shown = 0
+        for item in props.skins:
+            obj = bpy.data.objects.get(item.object_name)
+            if obj is not None:
+                obj.hide_viewport = False
+                obj.hide_render = False
+                shown += 1
+            item.is_visible = True
+        self.report({'INFO'}, f"Showing {shown} skin mesh(es)")
+        return {'FINISHED'}
+
+
 _classes = (
+    ACTOR_OT_fix_menu_anims,
+    ACTOR_OT_scale_anim_set,
+    ACTOR_OT_apply_pose_resize,
+    ACTOR_OT_fix_bip01,
     ACTOR_OT_import_actor,
     ACTOR_OT_import_skin,
     ACTOR_OT_import_animations,
-    ACTOR_OT_import_single_animation,
     ACTOR_OT_pick_animation,
     ACTOR_OT_remove_animation,
     ACTOR_OT_select_skins,
     ACTOR_OT_toggle_skin,
     ACTOR_OT_solo_skin,
+    ACTOR_OT_show_all_skins,
     ACTOR_OT_set_animation,
     ACTOR_OT_rest_pose,
     ACTOR_OT_play_animation,
     ACTOR_OT_export_skin,
     ACTOR_OT_export_animations,
-    ACTOR_OT_convert_rig,
     ACTOR_OT_setup_skin,
     ACTOR_OT_add_mesh_as_skin,
     ACTOR_OT_remove_skin,

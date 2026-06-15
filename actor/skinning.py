@@ -20,9 +20,16 @@ def assign_vertex_groups(mesh_obj, geometry, skeleton, bms_indices=None):
         bms_indices: Optional list of int from igBlendMatrixSelect
                      (maps local vertex blend index -> global blend matrix index).
                      If None, vertex blend indices map directly to bone indices.
+
+    Returns:
+        int: number of vertices that received at least one non-zero weight.
+        (Counted directly from the assignment loop — reliable even on a
+        freshly-built mesh whose per-vertex ``v.groups`` cache is not yet
+        settled, which is why the importer trusts this over a post-hoc scan.)
     """
     if not geometry.blend_weights or not geometry.blend_indices:
-        return
+        return 0
+    weighted_vertices = set()
 
     # Build blend_matrix_index -> bone_name mapping
     bm_to_bone = skeleton.build_bm_to_bone_map()
@@ -65,6 +72,9 @@ def assign_vertex_groups(mesh_obj, geometry, skeleton, bms_indices=None):
             vg = mesh_obj.vertex_groups.get(bone_name)
             if vg is not None:
                 vg.add([vi], w, 'REPLACE')
+                weighted_vertices.add(vi)
+
+    return len(weighted_vertices)
 
 
 def parent_to_armature(mesh_obj, armature_obj):

@@ -273,12 +273,17 @@ def _import_skin_file(context, filepath, skeleton, armature_obj,
         if mesh_obj is None:
             continue
 
-        # Assign vertex groups from blend data using skin skeleton's bm_idx
+        # Assign vertex groups from blend data using skin skeleton's bm_idx.
+        # Use the count returned by the assignment loop directly — reading it
+        # back via _count_weighted_vertices here is unreliable because the
+        # freshly-built mesh's per-vertex v.groups cache has not settled yet
+        # (it under-reports, making good skins look partly unweighted).
         bms_indices = state.get('bms_indices')
-        assign_vertex_groups(mesh_obj, geom, vgroup_skeleton, bms_indices)
+        weighted = assign_vertex_groups(mesh_obj, geom, vgroup_skeleton,
+                                        bms_indices)
 
         # Cache blend weight diagnostic for Segments panel
-        mesh_obj["igb_weighted_vert_count"] = _count_weighted_vertices(mesh_obj)
+        mesh_obj["igb_weighted_vert_count"] = weighted
 
         # NOTE: igTransform in IGB skin scene graphs is metadata (pivot point),
         # NOT a vertex offset.  Skin vertices are stored in armature/bind-pose
@@ -549,20 +554,34 @@ def _count_weighted_vertices(mesh_obj):
 
     Used by the Segments panel to diagnose skinning issues.
 
+    Reads weights via BMesh (the mesh's deform layer) rather than
+    ``MeshVertex.groups`` — the latter's Python cache can lag behind recent
+    ``vertex_group.add()`` / ``object.join()`` operations until the
+    dependency graph next evaluates, which made freshly-built or just-joined
+    meshes under-report. BMesh reads the underlying deform data directly, so
+    the count is correct immediately.
+
     Returns:
         int: number of vertices that have at least one non-zero weight.
     """
     if not mesh_obj.vertex_groups:
         return 0
 
-    mesh = mesh_obj.data
-    weighted = 0
-    for v in mesh.vertices:
-        for g in v.groups:
-            if g.weight > 0.0:
+    import bmesh
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh_obj.data)
+        deform = bm.verts.layers.deform.active
+        if deform is None:
+            return 0
+        weighted = 0
+        for v in bm.verts:
+            dv = v[deform]
+            if dv and any(w > 0.0 for w in dv.values()):
                 weighted += 1
-                break
-    return weighted
+        return weighted
+    finally:
+        bm.free()
 
 
 def collect_skin_segments(props, skins_index):

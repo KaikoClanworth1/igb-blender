@@ -709,7 +709,7 @@ def _convert_material_to_igb(mat):
 # Helper: collect all IGB-ready scene materials
 # ===========================================================================
 
-def _get_igb_scene_mats(context, selected_only=False):
+def _get_igb_scene_mats(context, selected_only=False, skins_only=False):
     """Return set of IGB-ready materials used by visible scene meshes.
 
     Excludes objects in the Colliders collection and the IGB_Collision
@@ -718,11 +718,20 @@ def _get_igb_scene_mats(context, selected_only=False):
 
     Args:
         selected_only: If True, only consider selected objects.
+        skins_only: If True, only consider meshes registered in the
+            IGB Actors skins list (so actor quick tools can't clobber
+            map materials in a mixed scene).
     """
     colliders_coll = bpy.data.collections.get("Colliders")
     collider_objs = set(colliders_coll.objects) if colliders_coll else set()
 
-    if selected_only:
+    if skins_only:
+        actor_props = getattr(context.scene, "igb_actor", None)
+        skin_names = ({item.object_name for item in actor_props.skins}
+                      if actor_props is not None else set())
+        source_objects = [obj for obj in context.scene.objects
+                          if obj.name in skin_names]
+    elif selected_only:
         source_objects = context.selected_objects
     else:
         source_objects = context.scene.objects
@@ -968,16 +977,25 @@ class IGB_OT_set_all_diffuse(Operator):
         min=0.0, max=1.0,
         default=(1.0, 1.0, 1.0, 1.0),
     )
-    selected_only: BoolProperty(default=False)
+    selected_only: BoolProperty(name="Selected Only", default=False)
+    skins_only: BoolProperty(default=False, options={'HIDDEN'})
+    show_dialog: BoolProperty(default=False, options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        if self.show_dialog:
+            return context.window_manager.invoke_props_dialog(self)
+        return self.execute(context)
 
     def execute(self, context):
-        mats = _get_igb_scene_mats(context, self.selected_only)
+        mats = _get_igb_scene_mats(context, self.selected_only,
+                                   self.skins_only)
         if not mats:
             self.report({'WARNING'}, "No IGB materials found")
             return {'FINISHED'}
         for mat in mats:
             mat["igb_diffuse"] = list(self.color)
-        scope = "selected" if self.selected_only else "all"
+        scope = ("skin" if self.skins_only
+                 else "selected" if self.selected_only else "all")
         self.report({'INFO'},
                     f"Set diffuse on {len(mats)} {scope} material(s)")
         return {'FINISHED'}
@@ -999,16 +1017,25 @@ class IGB_OT_set_all_ambient(Operator):
         min=0.0, max=1.0,
         default=(0.588, 0.588, 0.588, 1.0),
     )
-    selected_only: BoolProperty(default=False)
+    selected_only: BoolProperty(name="Selected Only", default=False)
+    skins_only: BoolProperty(default=False, options={'HIDDEN'})
+    show_dialog: BoolProperty(default=False, options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        if self.show_dialog:
+            return context.window_manager.invoke_props_dialog(self)
+        return self.execute(context)
 
     def execute(self, context):
-        mats = _get_igb_scene_mats(context, self.selected_only)
+        mats = _get_igb_scene_mats(context, self.selected_only,
+                                   self.skins_only)
         if not mats:
             self.report({'WARNING'}, "No IGB materials found")
             return {'FINISHED'}
         for mat in mats:
             mat["igb_ambient"] = list(self.color)
-        scope = "selected" if self.selected_only else "all"
+        scope = ("skin" if self.skins_only
+                 else "selected" if self.selected_only else "all")
         self.report({'INFO'},
                     f"Set ambient on {len(mats)} {scope} material(s)")
         return {'FINISHED'}
@@ -1030,16 +1057,25 @@ class IGB_OT_set_all_specular(Operator):
         min=0.0, max=1.0,
         default=(0.0, 0.0, 0.0, 1.0),
     )
-    selected_only: BoolProperty(default=False)
+    selected_only: BoolProperty(name="Selected Only", default=False)
+    skins_only: BoolProperty(default=False, options={'HIDDEN'})
+    show_dialog: BoolProperty(default=False, options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        if self.show_dialog:
+            return context.window_manager.invoke_props_dialog(self)
+        return self.execute(context)
 
     def execute(self, context):
-        mats = _get_igb_scene_mats(context, self.selected_only)
+        mats = _get_igb_scene_mats(context, self.selected_only,
+                                   self.skins_only)
         if not mats:
             self.report({'WARNING'}, "No IGB materials found")
             return {'FINISHED'}
         for mat in mats:
             mat["igb_specular"] = list(self.color)
-        scope = "selected" if self.selected_only else "all"
+        scope = ("skin" if self.skins_only
+                 else "selected" if self.selected_only else "all")
         self.report({'INFO'},
                     f"Set specular on {len(mats)} {scope} material(s)")
         return {'FINISHED'}
@@ -1061,16 +1097,25 @@ class IGB_OT_set_all_emission(Operator):
         min=0.0, max=1.0,
         default=(0.0, 0.0, 0.0, 1.0),
     )
-    selected_only: BoolProperty(default=False)
+    selected_only: BoolProperty(name="Selected Only", default=False)
+    skins_only: BoolProperty(default=False, options={'HIDDEN'})
+    show_dialog: BoolProperty(default=False, options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        if self.show_dialog:
+            return context.window_manager.invoke_props_dialog(self)
+        return self.execute(context)
 
     def execute(self, context):
-        mats = _get_igb_scene_mats(context, self.selected_only)
+        mats = _get_igb_scene_mats(context, self.selected_only,
+                                   self.skins_only)
         if not mats:
             self.report({'WARNING'}, "No IGB materials found")
             return {'FINISHED'}
         for mat in mats:
             mat["igb_emission"] = list(self.color)
-        scope = "selected" if self.selected_only else "all"
+        scope = ("skin" if self.skins_only
+                 else "selected" if self.selected_only else "all")
         self.report({'INFO'},
                     f"Set emission on {len(mats)} {scope} material(s)")
         return {'FINISHED'}
@@ -1090,16 +1135,19 @@ class IGB_OT_set_all_shininess(Operator):
         min=0.0, max=128.0,
         default=0.0,
     )
-    selected_only: BoolProperty(default=False)
+    selected_only: BoolProperty(name="Selected Only", default=False)
+    skins_only: BoolProperty(default=False, options={'HIDDEN'})
 
     def execute(self, context):
-        mats = _get_igb_scene_mats(context, self.selected_only)
+        mats = _get_igb_scene_mats(context, self.selected_only,
+                                   self.skins_only)
         if not mats:
             self.report({'WARNING'}, "No IGB materials found")
             return {'FINISHED'}
         for mat in mats:
             mat["igb_shininess"] = self.shininess
-        scope = "selected" if self.selected_only else "all"
+        scope = ("skin" if self.skins_only
+                 else "selected" if self.selected_only else "all")
         self.report({'INFO'},
                     f"Set shininess={self.shininess:.1f} on {len(mats)} "
                     f"{scope} material(s)")
@@ -1332,6 +1380,12 @@ class IGB_PT_ImportExport(Panel):
         col = layout.column(align=True)
         col.scale_y = 1.3
         col.operator("import_scene.igb", text="Import IGB (.igb)", icon='IMPORT')
+        col.scale_y = 1.0
+        # The generic importer loads skins as STATIC geometry (no rig) —
+        # point character modders at the right pipeline
+        col.label(text="Characters/skins: use the IGB Actors tab",
+                  icon='INFO')
+        col.scale_y = 1.3
         col.operator("import_scene.igz", text="Import IGZ (.igz)", icon='IMPORT')
         col.operator("mm.import_eng", text="Import ENG/ENGB (.engb)", icon='IMPORT')
 

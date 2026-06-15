@@ -22,7 +22,8 @@ from typing import Dict, List, Optional, Tuple
 
 
 def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
-                texture_mode='dxt5'):
+                texture_mode='dxt5', max_texture_size=0, actor_graph='OFF',
+                igb_format='V6'):
     """Export Blender skin mesh(es) to an IGB file using from-scratch builder.
 
     Args:
@@ -32,12 +33,24 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         operator: Blender operator for reporting.
         swap_rb: If True, swap R/B channels in DXT for MUA PC BGR565 encoding.
         texture_mode: 'dxt5' for DXT5 compressed, 'clut' for 256-color palette (universal).
+        max_texture_size: 0 = keep original size; otherwise cap longest edge to this value.
+        actor_graph: 'OFF' / 'ANIM' / 'FULL' — how much of the Max-style
+            actor/animation graph to emit.
+        igb_format: 'V6' (XML2-native layout) or 'V4' (3ds Max 5-era layout,
+            mirrors community skins; required for the FULL combiner graph
+            that fixes resized-skeleton grounding).
 
     Returns:
         True on success, False on failure.
     """
     from .skin_builder import SkinBuilder
     from .mesh_extractor import extract_skin_mesh, extract_mesh
+
+    # v4 skins are CLUT-textured (the proven-universal Max-era path)
+    if igb_format == 'V4' and texture_mode != 'clut':
+        _report(operator, 'INFO',
+                "v4 export uses CLUT textures — switching texture mode")
+        texture_mode = 'clut'
 
     # Normalize mesh_objs
     if not isinstance(mesh_objs, list):
@@ -191,7 +204,8 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             # metadata — they do NOT offset vertex positions.
 
             # Apply armature world rotation + export scale to vertex data
-            _transform_mesh_for_export(mesh_part, armature_obj)
+            _transform_mesh_for_export(mesh_part, armature_obj,
+                                       mesh_obj=mesh_obj)
 
             num_verts = len(mesh_part.positions)
             num_tris = len(mesh_part.indices) // 3
@@ -235,12 +249,15 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             }
 
             if texture_mode == 'clut':
-                clut_result = _get_texture_clut(mesh_obj, mat_slot=mat_slot)
+                clut_result = _get_texture_clut(
+                    mesh_obj, mat_slot=mat_slot,
+                    max_texture_size=max_texture_size)
                 sub_dict['clut_data'] = clut_result
                 sub_dict['texture_levels'] = None
             else:
                 sub_dict['texture_levels'] = _get_texture(
-                    mesh_obj, swap_rb=swap_rb, mat_slot=mat_slot)
+                    mesh_obj, swap_rb=swap_rb, mat_slot=mat_slot,
+                    max_texture_size=max_texture_size)
                 sub_dict['clut_data'] = None
 
             submeshes.append(sub_dict)
@@ -257,9 +274,18 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
     # 0601.igb uses "0601" for igSkin name, geometry names, etc.)
     export_name = os.path.splitext(os.path.basename(filepath))[0]
 
-    builder = SkinBuilder()
-    writer = builder.build_skin(submeshes, skeleton_data, bms_palette,
-                                export_name=export_name)
+    if igb_format == 'V4':
+        from .skin_builder_v4 import SkinBuilderV4
+        builder = SkinBuilderV4()
+        writer = builder.build_skin(
+            submeshes, skeleton_data, bms_palette,
+            export_name=export_name,
+            actor_graph=('FULL' if actor_graph == 'FULL' else 'ANIM'))
+    else:
+        builder = SkinBuilder()
+        writer = builder.build_skin(submeshes, skeleton_data, bms_palette,
+                                    export_name=export_name,
+                                    actor_graph=actor_graph)
 
     # ---- 5. Write to disk ----
     writer.write(filepath)
@@ -275,10 +301,17 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
 # Export-time transforms (rotation + scale)
 # ============================================================================
 
-def _transform_mesh_for_export(mesh_export, armature_obj):
+def _transform_mesh_for_export(mesh_export, armature_obj, mesh_obj=None):
     """Transform vertex data from Blender armature-local space to game space.
 
     Applies:
+    0. Mesh-to-armature relative transform — extracted positions are in the
+       MESH object's local space, but all downstream math (rotation, export
+       scale, skeleton translations) lives in the ARMATURE's space. When the
+       mesh object's world transform differs from the armature's (common in
+       FBX rips where meshes aren't armature children and carry their own
+       scale), skipping this step exports wildly wrong sizes/orientations.
+       Identity when both transforms match, so existing flows are unchanged.
     1. Armature world rotation — converts Y-up FBX imports to Z-up game space.
        For native XML2 actors (identity rotation) this is a no-op.
     2. Blender-to-XML2 axis conversion — for converted rigs (igb_converted_rig),
@@ -292,6 +325,32 @@ def _transform_mesh_for_export(mesh_export, armature_obj):
     """
     from mathutils import Vector, Quaternion, Matrix
     import math
+
+    # ---- 0. Mesh-local -> armature-local relative transform ----
+    rel_matrix = None
+    if mesh_obj is not None:
+        try:
+            rel = armature_obj.matrix_world.inverted() @ mesh_obj.matrix_world
+        except ValueError:
+            rel = None  # non-invertible armature matrix — skip
+        if rel is not None:
+            is_identity = all(
+                abs(rel[r][c] - (1.0 if r == c else 0.0)) < 1e-5
+                for r in range(4) for c in range(4)
+            )
+            if not is_identity:
+                rel_matrix = rel
+
+    if rel_matrix is not None:
+        rel_normal = rel_matrix.to_3x3().inverted_safe().transposed()
+        for i, (x, y, z) in enumerate(mesh_export.positions):
+            v = rel_matrix @ Vector((x, y, z))
+            mesh_export.positions[i] = (v.x, v.y, v.z)
+        if mesh_export.normals:
+            for i, (nx, ny, nz) in enumerate(mesh_export.normals):
+                n = rel_normal @ Vector((nx, ny, nz))
+                n.normalize()
+                mesh_export.normals[i] = (n.x, n.y, n.z)
 
     # Get armature world rotation
     arm_rot_q = armature_obj.matrix_world.to_quaternion()
@@ -322,7 +381,7 @@ def _transform_mesh_for_export(mesh_export, armature_obj):
     scale_factor = custom_scale * obj_scale_uniform
     has_scale = abs(scale_factor - 1.0) > 0.001
 
-    if not has_rotation and not has_scale:
+    if not has_rotation and not has_scale and rel_matrix is None:
         return  # Nothing to do
 
     arm_rot_mat = arm_rot_q.to_matrix()  # 3x3
@@ -730,7 +789,7 @@ def _read_igb_render_state(mat, result):
         result['cull_face_mode'] = mat.get("igb_cull_face_mode", 0)
 
 
-def _get_texture(mesh_obj, swap_rb=False, mat_slot=0):
+def _get_texture(mesh_obj, swap_rb=False, mat_slot=0, max_texture_size=0):
     """Extract texture data from a Blender mesh object's material.
 
     Uses the same approach as the map file exporter:
@@ -743,6 +802,7 @@ def _get_texture(mesh_obj, swap_rb=False, mat_slot=0):
         mesh_obj: Blender mesh object.
         swap_rb: If True, swap R/B channels for MUA PC BGR565 encoding.
         mat_slot: Material slot index to read from (default 0).
+        max_texture_size: 0 = keep original size; otherwise cap longest edge.
 
     Returns list of (compressed_dxt5_bytes, width, height) tuples, or None.
     """
@@ -781,12 +841,12 @@ def _get_texture(mesh_obj, swap_rb=False, mat_slot=0):
     if w == 0 or h == 0:
         return None
 
-    rgba, w, h = _extract_image_rgba(bl_image, w, h)
+    rgba, w, h = _extract_image_rgba(bl_image, w, h, max_texture_size=max_texture_size)
 
     return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
 
 
-def _get_texture_clut(mesh_obj, mat_slot=0):
+def _get_texture_clut(mesh_obj, mat_slot=0, max_texture_size=0):
     """Extract texture as CLUT palette + indices for universal PS2-style format.
 
     Same image extraction as _get_texture, but quantizes to 256 colors
@@ -833,13 +893,13 @@ def _get_texture_clut(mesh_obj, mat_slot=0):
     if w == 0 or h == 0:
         return None
 
-    rgba, w, h = _extract_image_rgba(bl_image, w, h)
+    rgba, w, h = _extract_image_rgba(bl_image, w, h, max_texture_size=max_texture_size)
 
     palette_data, index_data = quantize_rgba_to_clut(bytes(rgba), w, h)
     return (palette_data, index_data, w, h)
 
 
-def _extract_image_rgba(bl_image, w, h):
+def _extract_image_rgba(bl_image, w, h, max_texture_size=0):
     """Extract RGBA uint8 pixels from a Blender image with Y-flip and POT resize.
 
     Uses numpy (bundled with Blender) for fast vectorized processing.
@@ -849,6 +909,7 @@ def _extract_image_rgba(bl_image, w, h):
         bl_image: Blender Image object.
         w: Image width.
         h: Image height.
+        max_texture_size: 0 = keep original size; otherwise cap longest edge.
 
     Returns:
         (rgba_bytes, final_w, final_h) tuple.
@@ -864,12 +925,14 @@ def _extract_image_rgba(bl_image, w, h):
 
     try:
         import numpy as np
-        return _extract_image_rgba_numpy(bl_image, w, h, np)
+        return _extract_image_rgba_numpy(bl_image, w, h, np,
+                                         max_texture_size=max_texture_size)
     except ImportError:
-        return _extract_image_rgba_python(bl_image, w, h)
+        return _extract_image_rgba_python(bl_image, w, h,
+                                          max_texture_size=max_texture_size)
 
 
-def _extract_image_rgba_numpy(bl_image, w, h, np):
+def _extract_image_rgba_numpy(bl_image, w, h, np, max_texture_size=0):
     """Numpy-vectorized pixel extraction with Y-flip and POT resize."""
     # bl_image.pixels is a flat float array [r,g,b,a, r,g,b,a, ...]
     # Grab directly into numpy — avoids creating a Python list
@@ -881,20 +944,19 @@ def _extract_image_rgba_numpy(bl_image, w, h, np):
     pixels = pixels[::-1]  # Y-flip (Blender bottom-up → IGB top-down)
     rgba = np.clip(pixels * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
-    # Ensure power-of-2 dimensions
-    new_w = _next_power_of_2(w)
-    new_h = _next_power_of_2(h)
-    if new_w != w or new_h != h:
+    # Choose target dimensions: cap to max_texture_size if requested, else POT-up
+    target_w, target_h = _target_dims(w, h, max_texture_size)
+    if target_w != w or target_h != h:
         # Nearest-neighbor resize via index mapping
-        src_y = np.minimum(np.arange(new_h) * h // new_h, h - 1)
-        src_x = np.minimum(np.arange(new_w) * w // new_w, w - 1)
+        src_y = np.minimum(np.arange(target_h) * h // target_h, h - 1)
+        src_x = np.minimum(np.arange(target_w) * w // target_w, w - 1)
         rgba = rgba[np.ix_(src_y, src_x)]
-        w, h = new_w, new_h
+        w, h = target_w, target_h
 
     return bytes(rgba.tobytes()), w, h
 
 
-def _extract_image_rgba_python(bl_image, w, h):
+def _extract_image_rgba_python(bl_image, w, h, max_texture_size=0):
     """Pure Python fallback for pixel extraction."""
     pixels = list(bl_image.pixels)
     num_pixels = w * h
@@ -910,22 +972,45 @@ def _extract_image_rgba_python(bl_image, w, h):
         rgba[dst_idx + 2] = max(0, min(255, int(pixels[src_idx + 2] * 255 + 0.5)))
         rgba[dst_idx + 3] = max(0, min(255, int(pixels[src_idx + 3] * 255 + 0.5)))
 
-    # Ensure power-of-2 dimensions
-    new_w = _next_power_of_2(w)
-    new_h = _next_power_of_2(h)
-    if new_w != w or new_h != h:
-        new_rgba = bytearray(new_w * new_h * 4)
-        for y in range(new_h):
-            src_y = min(y * h // new_h, h - 1)
-            for x in range(new_w):
-                src_x = min(x * w // new_w, w - 1)
+    # Choose target dimensions: cap to max_texture_size if requested, else POT-up
+    target_w, target_h = _target_dims(w, h, max_texture_size)
+    if target_w != w or target_h != h:
+        new_rgba = bytearray(target_w * target_h * 4)
+        for y in range(target_h):
+            src_y = min(y * h // target_h, h - 1)
+            for x in range(target_w):
+                src_x = min(x * w // target_w, w - 1)
                 src_off = (src_y * w + src_x) * 4
-                dst_off = (y * new_w + x) * 4
+                dst_off = (y * target_w + x) * 4
                 new_rgba[dst_off:dst_off + 4] = rgba[src_off:src_off + 4]
         rgba = new_rgba
-        w, h = new_w, new_h
+        w, h = target_w, target_h
 
     return bytes(rgba), w, h
+
+
+def _target_dims(w, h, max_texture_size):
+    """Compute final (width, height) for export.
+
+    Both dimensions snap to power-of-2 (DXT requirement). When max_texture_size
+    is set, the longer edge is capped to it (rounding down to POT), and the
+    shorter edge scales proportionally.
+    """
+    pot_w = _next_power_of_2(w)
+    pot_h = _next_power_of_2(h)
+    if max_texture_size <= 0:
+        return pot_w, pot_h
+    if pot_w <= max_texture_size and pot_h <= max_texture_size:
+        return pot_w, pot_h
+    # Snap cap to power-of-2 (round down so we never exceed it)
+    cap = _prev_power_of_2(max_texture_size)
+    if pot_w >= pot_h:
+        new_w = cap
+        new_h = max(1, _prev_power_of_2((pot_h * cap) // pot_w))
+    else:
+        new_h = cap
+        new_w = max(1, _prev_power_of_2((pot_w * cap) // pot_h))
+    return new_w, new_h
 
 
 def _next_power_of_2(n):
@@ -934,6 +1019,16 @@ def _next_power_of_2(n):
         return 1
     p = 1
     while p < n:
+        p <<= 1
+    return p
+
+
+def _prev_power_of_2(n):
+    """Return the largest power of 2 <= n (n >= 1)."""
+    if n <= 1:
+        return 1
+    p = 1
+    while p * 2 <= n:
         p <<= 1
     return p
 

@@ -3722,18 +3722,9 @@ class MM_OT_quick_dialog_from_text(Operator):
 # ===========================================================================
 
 def _get_deps_dir():
-    """Get the deps directory path — check deployed and source locations."""
+    """Get the deps directory path (the bundled deps/ next to this file)."""
     from pathlib import Path
-    # Primary: next to this file (deployed or source)
-    local = Path(__file__).parent / "deps"
-    if local.exists():
-        return str(local)
-    # Fallback: source project location (for portable Blender on small drive)
-    source = Path(r"F:\Projects\XMenLegends\Alchemy Engine IGB Format"
-                  r"\igb_blender\mapmaker\deps")
-    if source.exists():
-        return str(source)
-    return str(local)  # Return primary even if missing (for install target)
+    return str(Path(__file__).parent / "deps")
 
 
 def _ensure_pyside6_path():

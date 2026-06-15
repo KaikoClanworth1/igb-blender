@@ -107,6 +107,7 @@ _Short = 17
 _Vec3f = 36
 _Vec4f = 38
 _Matrix44f = 40
+_Long = 12
 
 
 # ============================================================================
@@ -299,6 +300,94 @@ SKIN_META_OBJECTS = [
      [(_Short, 2, 2), (_Enum, 4, 4), (_Enum, 5, 4), (_Enum, 6, 4),
       (_ObjRef, 7, 4), (_UChar, 8, 1), (_Short, 9, 2),
       (_Enum, 11, 4), (_Enum, 12, 4), (_Enum, 13, 4), (_Enum, 14, 4)]),
+
+    # ========================================================================
+    # Actor graph types (60+) — the animation COMBINER subsystem that gives
+    # the engine per-skin retargeting. Native v6 skins lack these entirely;
+    # 3ds Max-exported skins always carry them, which is why Max skins
+    # ground at any skeleton size. Definitions translated from a v4 Max
+    # export (210xxcableMUA2.igb): identical own-field lists, slots -1,
+    # slot_count -1 (the v4 igObject base had one extra slot).
+    # ========================================================================
+    # ---- [60..65] Bind-pose animation types (v6-precedented: identical ----
+    # ---- layouts appear in native v6 anim files AND in compatible v4  ----
+    # ---- community skins like 0103.igb). Written in ANIM and FULL.    ----
+    # [60] igAnimation (matches native v6 anim files)
+    ("igAnimation", 1, 0, 1, 11,
+     [(_String, 2, 4), (_Int, 3, 4), (_ObjRef, 4, 4), (_ObjRef, 5, 4),
+      (_ObjRef, 6, 4), (_Long, 7, 8), (_Long, 8, 8), (_Long, 9, 8),
+      (_ObjRef, 10, 4)]),
+    # [61] igAnimationBinding (native v6 layout)
+    ("igAnimationBinding", 1, 0, 0, 7,
+     [(_ObjRef, 2, 4), (_MemRef, 3, 4), (_Int, 4, 4), (_ObjRef, 5, 4),
+      (_ObjRef, 6, 4)]),
+    # [62] igAnimationBindingList
+    ("igAnimationBindingList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [63] igAnimationTrack (native v6 layout: rest quat + rest trans)
+    ("igAnimationTrack", 1, 0, 1, 6,
+     [(_String, 2, 4), (_ObjRef, 3, 4), (_Vec4f, 4, 16), (_Vec3f, 5, 12)]),
+    # [64] igAnimationTrackList
+    ("igAnimationTrackList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [65] igAnimationTransitionDefinitionList
+    ("igAnimationTransitionDefinitionList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+
+    # ---- [66..79] Combiner/actor types (UNPRECEDENTED in v6 — crashed ----
+    # ---- XML2 when included; written ONLY in FULL mode)               ----
+    # [66] igAnimationSystem
+    ("igAnimationSystem", 1, 0, 1, 4,
+     [(_String, 2, 4), (_ObjRef, 3, 4)]),
+    # [67] igAnimationCombiner (parent igAnimationSystem)
+    ("igAnimationCombiner", 1, 0, 66, 14,
+     [(_String, 2, 4), (_ObjRef, 3, 4), (_ObjRef, 4, 4), (_ObjRef, 5, 4),
+      (_ObjRef, 6, 4), (_MemRef, 7, 4), (_MemRef, 8, 4), (_Long, 9, 8),
+      (_Bool, 10, 1), (_MemRef, 12, 4), (_MemRef, 13, 4)]),
+    # [68] igAnimationCombinerBoneInfo
+    ("igAnimationCombinerBoneInfo", 1, 0, 0, 8,
+     [(_ObjRef, 2, 4), (_ObjRef, 3, 4), (_Vec4f, 4, 16), (_Vec3f, 5, 12),
+      (_Int, 6, 4), (_Bool, 7, 1)]),
+    # [69] igAnimationCombinerBoneInfoList
+    ("igAnimationCombinerBoneInfoList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [70] igAnimationCombinerBoneInfoListList
+    ("igAnimationCombinerBoneInfoListList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [71] igAnimationState
+    ("igAnimationState", 1, 0, 0, 20,
+     [(_ObjRef, 2, 4), (_Enum, 3, 4), (_Enum, 4, 4), (_Enum, 5, 4),
+      (_ObjRef, 6, 4), (_Bool, 7, 1), (_Float, 8, 4), (_Long, 9, 8),
+      (_Long, 10, 8), (_Float, 11, 4), (_Long, 12, 8), (_Long, 13, 8),
+      (_Float, 14, 4), (_Float, 15, 4), (_Long, 16, 8), (_Long, 17, 8)]),
+    # [72] igAnimationStateList
+    ("igAnimationStateList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [73] igAnimationModifierList
+    ("igAnimationModifierList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [74] igActorInfo (parent igInfo)
+    ("igActorInfo", 1, 0, 9, 10,
+     [(_String, 2, 4), (_Bool, 4, 1), (_ObjRef, 5, 4), (_ObjRef, 6, 4),
+      (_ObjRef, 7, 4), (_ObjRef, 8, 4), (_ObjRef, 9, 4)]),
+    # [75] igActorList
+    ("igActorList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [76] igActor (parent igGroup)
+    ("igActor", 1, 0, 21, 18,
+     [(_String, 2, 4), (_ObjRef, 3, 4), (_Int, 5, 4), (_ObjRef, 6, 4),
+      (_ObjRef, 7, 4), (_MemRef, 8, 4), (_MemRef, 9, 4), (_ObjRef, 10, 4),
+      (_ObjRef, 11, 4), (_ObjRef, 12, 4), (_Matrix44f, 13, 64)]),
+    # [77] igAppearance (parent igNamedObject)
+    ("igAppearance", 1, 0, 1, 8,
+     [(_String, 2, 4), (_ObjRef, 3, 4), (_ObjRef, 4, 4), (_ObjRef, 5, 4),
+      (_ObjRef, 6, 4), (_ObjRef, 7, 4)]),
+    # [78] igStringObjList
+    ("igStringObjList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
+    # [79] igModelViewMatrixBoneSelectList
+    ("igModelViewMatrixBoneSelectList", 1, 0, 16, 5,
+     [(_Int, 2, 4), (_Int, 3, 4), (_MemRef, 4, 4)]),
 ]
 
 # Skin-specific meta-object indices — matches vanilla 0601.igb except igClut added
@@ -333,6 +422,34 @@ MO_ANIMATION_HIERARCHY = 36
 MO_SKELETON = 37
 MO_SKELETON_BONE_INFO_LIST = 38
 MO_NODE_LIST = 39
+# Metas [60+] are conditional. The engine validates meta DEFINITIONS at load
+# time even when no object uses them, so each mode writes only what it needs:
+#   OFF  -> [:60]  stable types only (proven in-game)
+#   ANIM -> [:66]  + bind-pose animation types (v6-precedented; the exact set
+#                  a known-compatible community skin, 0103.igb, carries)
+#   FULL -> [:80]  + combiner/actor types (crashed XML2; v4-only so far)
+N_STABLE_METAS = 60
+N_ANIM_METAS = 66
+MO_ANIMATION = 60
+MO_ANIMATION_BINDING = 61
+MO_ANIMATION_BINDING_LIST = 62
+MO_ANIMATION_TRACK = 63
+MO_ANIMATION_TRACK_LIST = 64
+MO_ANIMATION_TRANSITION_DEF_LIST = 65
+MO_ANIMATION_SYSTEM = 66
+MO_ANIMATION_COMBINER = 67
+MO_COMBINER_BONE_INFO = 68
+MO_COMBINER_BONE_INFO_LIST = 69
+MO_COMBINER_BONE_INFO_LIST_LIST = 70
+MO_ANIMATION_STATE = 71
+MO_ANIMATION_STATE_LIST = 72
+MO_ANIMATION_MODIFIER_LIST = 73
+MO_ACTOR_INFO = 74
+MO_ACTOR_LIST = 75
+MO_ACTOR = 76
+MO_APPEARANCE = 77
+MO_STRING_OBJ_LIST = 78
+MO_MVMBS_LIST = 79
 MO_ATTR_LIST = 40
 MO_TEXTURE_BIND_ATTR = 41
 MO_MIPMAP_LIST = 42
@@ -388,6 +505,96 @@ _IDENTITY_MATRIX = (
 )
 
 
+def _quat_from_matrix3(R):
+    """Quaternion (x, y, z, w) from a 3x3 rotation matrix (nested rows)."""
+    import math
+    tr = R[0][0] + R[1][1] + R[2][2]
+    if tr > 0.0:
+        s = math.sqrt(tr + 1.0) * 2.0
+        w = 0.25 * s
+        x = (R[2][1] - R[1][2]) / s
+        y = (R[0][2] - R[2][0]) / s
+        z = (R[1][0] - R[0][1]) / s
+    elif R[0][0] > R[1][1] and R[0][0] > R[2][2]:
+        s = math.sqrt(1.0 + R[0][0] - R[1][1] - R[2][2]) * 2.0
+        w = (R[2][1] - R[1][2]) / s
+        x = 0.25 * s
+        y = (R[0][1] + R[1][0]) / s
+        z = (R[0][2] + R[2][0]) / s
+    elif R[1][1] > R[2][2]:
+        s = math.sqrt(1.0 + R[1][1] - R[0][0] - R[2][2]) * 2.0
+        w = (R[0][2] - R[2][0]) / s
+        x = (R[0][1] + R[1][0]) / s
+        y = 0.25 * s
+        z = (R[1][2] + R[2][1]) / s
+    else:
+        s = math.sqrt(1.0 + R[2][2] - R[0][0] - R[1][1]) * 2.0
+        w = (R[1][0] - R[0][1]) / s
+        x = (R[0][2] + R[2][0]) / s
+        y = (R[1][2] + R[2][1]) / s
+        z = 0.25 * s
+    return (x, y, z, w)
+
+
+def _local_bind_transforms(skeleton_data):
+    """Per-bone PARENT-LOCAL bind (quat_xyzw, trans) for the combiner.
+
+    World rotations come from the inverse joint matrices (row-major,
+    row-vector convention: R_world = R_inv transposed). Local rotation
+    composes as R_local = R_world(bone) @ R_inv(parent). Bones without an
+    inverse bind (roots, FX bones) use identity. Translations are the
+    skeleton's parent-local bind translations as-is.
+    """
+    bones = skeleton_data['bones']
+    inv3 = []      # original inv rotation 3x3 (rows)
+    world3 = []    # world rotation 3x3 = inv transposed
+    for bone in bones:
+        m = bone.get('inv_joint_matrix')
+        if m:
+            inv = [[m[4 * r + c] for c in range(3)] for r in range(3)]
+            wld = [[m[4 * c + r] for c in range(3)] for r in range(3)]
+        else:
+            inv = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            wld = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        inv3.append(inv)
+        world3.append(wld)
+
+    out = []
+    for i, bone in enumerate(bones):
+        parent = bone.get('parent_idx', -1)
+        Rb = world3[i]
+        if 0 <= parent < len(bones):
+            Rp_inv = inv3[parent]
+            local = [[sum(Rb[r][k] * Rp_inv[k][c] for k in range(3))
+                      for c in range(3)] for r in range(3)]
+        else:
+            local = Rb
+        trans = tuple(bone.get('translation', (0.0, 0.0, 0.0)))
+        out.append((_quat_from_matrix3(local), trans))
+    return out
+
+
+def _world_bind_matrix(bone):
+    """Row-major 4x4 world bind matrix (inverse of the inv joint matrix)."""
+    m = bone.get('inv_joint_matrix')
+    if not m:
+        return (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    # world rotation = inv 3x3 transposed; world position p_i = -(t . R_row_i)
+    R = [[m[4 * c + r] for c in range(3)] for r in range(3)]  # world rows
+    t = (m[12], m[13], m[14])
+    inv_rows = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]]
+    p = [-(t[0] * row[0] + t[1] * row[1] + t[2] * row[2]) for row in inv_rows]
+    return (R[0][0], R[0][1], R[0][2], 0.0,
+            R[1][0], R[1][1], R[1][2], 0.0,
+            R[2][0], R[2][1], R[2][2], 0.0,
+            p[0], p[1], p[2], 1.0)
+
+
+_IDENTITY44 = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+               0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+
+
 class SkinBuilder:
     """Builds a skin IGB file from mesh/skeleton/material data.
 
@@ -399,7 +606,8 @@ class SkinBuilder:
         self._obj_list = []
         self._ref_infos = []
 
-    def build_skin(self, submeshes, skeleton_data, bms_palette, export_name=''):
+    def build_skin(self, submeshes, skeleton_data, bms_palette, export_name='',
+                   actor_graph='OFF'):
         """Build a complete skin IGB structure.
 
         Scene graph uses Pattern B (per-unit BMS, Cable 11501 / 3ds Max style):
@@ -432,6 +640,7 @@ class SkinBuilder:
         """
         self._obj_list = []
         self._ref_infos = []
+        self._actor_graph_mode = actor_graph
 
         writer = self._init_writer()
         skel_name = skeleton_data.get('name', '')
@@ -762,17 +971,45 @@ class SkinBuilder:
             (4, root_aabox, 'ObjectRef', 4),      # _aabb
         ])
 
+        # ---- 7.5 Bind-pose animation (per-bone parent-local transforms) ----
+        # Part of the Max-style actor graph (engine-side anim retargeting).
+        # actor_graph: 'OFF' = bare native-style skin (proven in-game),
+        # 'ANIM' = bind-pose animation only (v6-precedented types — crash
+        # bisect step), 'FULL' = complete combiner/actor graph (crashed
+        # XML2 on first test; under investigation).
+        bindpose_anim_idx = None
+        bind_locals = None
+        if actor_graph in ('ANIM', 'FULL'):
+            bind_locals = _local_bind_transforms(skeleton_data)
+            bindpose_anim_idx = self._build_bindpose_animation(
+                skeleton_idx, skeleton_data, bind_locals
+            )
+
         # ---- 8. Build igAnimationDatabase (after igSkin so SkinList can reference it) ----
         anim_db_idx = self._build_animation_database(
-            skeleton_idx, skeleton_data, skin_idx, skin_name=skin_name
+            skeleton_idx, skeleton_data, skin_idx, skin_name=skin_name,
+            bindpose_anim_idx=bindpose_anim_idx
         )
 
+        # ---- 8.5 Actor graph (engine-side animation retargeting) ----
+        actor_info_idx = None
+        if actor_graph == 'FULL':
+            actor_info_idx = self._build_actor_graph(
+                skeleton_idx, skeleton_data, skin_idx, anim_db_idx,
+                bindpose_anim_idx, bms_palette, bind_locals
+            )
+
         # ---- 9. Build igInfoList ----
-        info_refs = struct.pack("<i", anim_db_idx)
+        if actor_info_idx is not None:
+            info_refs = struct.pack("<ii", actor_info_idx, anim_db_idx)
+            n_infos = 2
+        else:
+            info_refs = struct.pack("<i", anim_db_idx)
+            n_infos = 1
         info_mb = self._add_mem(MO_OBJECT, info_refs)
         info_list_idx = self._add_obj(MO_INFO_LIST, [
-            (2, 1, 'Int', 4),
-            (3, 1, 'Int', 4),
+            (2, n_infos, 'Int', 4),
+            (3, n_infos, 'Int', 4),
             (4, info_mb, 'MemoryRef', 4),
         ])
 
@@ -843,7 +1080,9 @@ class SkinBuilder:
 
         return skeleton_idx
 
-    def _build_animation_database(self, skeleton_idx, skeleton_data, skin_idx=None, skin_name=''):
+    def _build_animation_database(self, skeleton_idx, skeleton_data,
+                                  skin_idx=None, skin_name='',
+                                  bindpose_anim_idx=None):
         """Build igAnimationDatabase referencing the skeleton and skin."""
         # igSkeletonList (1 skeleton)
         skel_ref_data = struct.pack("<i", skeleton_idx)
@@ -870,12 +1109,22 @@ class SkinBuilder:
                 (4, -1, 'MemoryRef', 4),
             ])
 
-        # Empty igAnimationList (vanilla has this as an actual empty list, NOT null)
-        anim_list_idx = self._add_obj(MO_ANIMATION_LIST, [
-            (2, 0, 'Int', 4),
-            (3, 0, 'Int', 4),
-            (4, -1, 'MemoryRef', 4),
-        ])
+        # igAnimationList — carries the bind-pose animation when the actor
+        # graph is emitted (Max-exporter convention); empty otherwise
+        if bindpose_anim_idx is not None and bindpose_anim_idx >= 0:
+            anim_ref_data = struct.pack("<i", bindpose_anim_idx)
+            anim_ref_mb = self._add_mem(MO_OBJECT, anim_ref_data)
+            anim_list_idx = self._add_obj(MO_ANIMATION_LIST, [
+                (2, 1, 'Int', 4),
+                (3, 1, 'Int', 4),
+                (4, anim_ref_mb, 'MemoryRef', 4),
+            ])
+        else:
+            anim_list_idx = self._add_obj(MO_ANIMATION_LIST, [
+                (2, 0, 'Int', 4),
+                (3, 0, 'Int', 4),
+                (4, -1, 'MemoryRef', 4),
+            ])
 
         # Empty igAppearanceList (vanilla has this, NOT null)
         appear_list_idx = self._add_obj(MO_APPEARANCE_LIST, [
@@ -1374,6 +1623,195 @@ class SkinBuilder:
     # Core allocation methods (same pattern as IGBBuilder)
     # =========================================================================
 
+    def _empty_list(self, mo_idx):
+        """Add an empty igObjectList-derived object."""
+        return self._add_obj(mo_idx, [
+            (2, 0, 'Int', 4),
+            (3, 0, 'Int', 4),
+            (4, -1, 'MemoryRef', 4),
+        ])
+
+    def _ref_list(self, mo_idx, refs):
+        """Add an igObjectList-derived object containing object refs."""
+        data = struct.pack("<" + "i" * len(refs), *refs)
+        mb = self._add_mem(MO_OBJECT, data)
+        return self._add_obj(mo_idx, [
+            (2, len(refs), 'Int', 4),
+            (3, len(refs), 'Int', 4),
+            (4, mb, 'MemoryRef', 4),
+        ])
+
+    def _build_bindpose_animation(self, skeleton_idx, skeleton_data, locals_):
+        """Build the constant bind-pose igAnimation (Max-exporter style).
+
+        One track per bone carrying the parent-local bind rotation and
+        translation; no transform sources (constant), duration 0.
+        """
+        bones = skeleton_data['bones']
+        n = len(bones)
+
+        idmap = struct.pack("<" + "i" * n, *range(n))
+        map_mb = self._add_mem(MO_OBJECT, idmap)
+        binding_idx = self._add_obj(MO_ANIMATION_BINDING, [
+            (2, skeleton_idx, 'ObjectRef', 4),
+            (3, map_mb, 'MemoryRef', 4),
+            (4, n, 'Int', 4),
+            (5, -1, 'ObjectRef', 4),
+            (6, -1, 'ObjectRef', 4),
+        ])
+        binding_list_idx = self._ref_list(MO_ANIMATION_BINDING_LIST,
+                                          [binding_idx])
+
+        track_idxs = []
+        for bone, (quat, trans) in zip(bones, locals_):
+            track_idxs.append(self._add_obj(MO_ANIMATION_TRACK, [
+                (2, bone['name'], 'String', 4),
+                (3, -1, 'ObjectRef', 4),
+                (4, quat, 'Vec4f', 16),
+                (5, trans, 'Vec3f', 12),
+            ]))
+        track_list_idx = self._ref_list(MO_ANIMATION_TRACK_LIST, track_idxs)
+        trans_def_idx = self._empty_list(MO_ANIMATION_TRANSITION_DEF_LIST)
+
+        return self._add_obj(MO_ANIMATION, [
+            (2, 'igActor01_Animation01', 'String', 4),
+            (3, 0, 'Int', 4),
+            (4, binding_list_idx, 'ObjectRef', 4),
+            (5, track_list_idx, 'ObjectRef', 4),
+            (6, trans_def_idx, 'ObjectRef', 4),
+            (7, 0, 'Long', 8),
+            (8, 0, 'Long', 8),
+            (9, 0, 'Long', 8),
+            (10, -1, 'ObjectRef', 4),
+        ])
+
+    def _build_actor_graph(self, skeleton_idx, skeleton_data, skin_idx,
+                           anim_db_idx, bindpose_anim_idx, bms_palette,
+                           locals_):
+        """Build the actor/combiner graph that gives the ENGINE per-skin
+        animation retargeting (the reason 3ds Max-exported skins ground at
+        any skeleton size while bare native-style skins float).
+
+        Mirrors a v4 Max export (210xxcableMUA2.igb): igActorInfo ->
+        igActorList[igActor] / combinerList[igAnimationCombiner] /
+        appearanceList[igAppearance]; combiner carries per-bone parent-local
+        bind transforms + world bind matrices.
+        """
+        bones = skeleton_data['bones']
+        n = len(bones)
+
+        # --- igAnimationState referencing the bind-pose animation ---
+        state_idx = self._add_obj(MO_ANIMATION_STATE, [
+            (2, bindpose_anim_idx, 'ObjectRef', 4),
+            (3, 0, 'Enum', 4),
+            (4, 4, 'Enum', 4),
+            (5, 0, 'Enum', 4),
+            (6, -1, 'ObjectRef', 4),
+            (7, 0, 'Bool', 1),
+            (8, 0.0, 'Float', 4),
+            (9, 0, 'Long', 8),
+            (10, 0, 'Long', 8),
+            (11, 1.0, 'Float', 4),
+            (12, 0, 'Long', 8),
+            (13, 0, 'Long', 8),
+            (14, 0.0, 'Float', 4),
+            (15, 0.0, 'Float', 4),
+            (16, 0, 'Long', 8),
+            (17, 0, 'Long', 8),
+        ])
+        state_list_idx = self._ref_list(MO_ANIMATION_STATE_LIST, [state_idx])
+
+        # --- per-bone combiner infos, each wrapped in a 1-entry list ---
+        bi_list_idxs = []
+        for quat, trans in locals_:
+            bi_idx = self._add_obj(MO_COMBINER_BONE_INFO, [
+                (2, state_idx, 'ObjectRef', 4),
+                (3, -1, 'ObjectRef', 4),
+                (4, quat, 'Vec4f', 16),
+                (5, trans, 'Vec3f', 12),
+                (6, 0, 'Int', 4),
+                (7, 0, 'Bool', 1),
+            ])
+            bi_list_idxs.append(
+                self._ref_list(MO_COMBINER_BONE_INFO_LIST, [bi_idx]))
+        bill_idx = self._ref_list(MO_COMBINER_BONE_INFO_LIST_LIST,
+                                  bi_list_idxs)
+
+        int_list_idx = self._build_int_list([0] * n)
+
+        # --- combiner buffers ---
+        quat_buf = b"".join(struct.pack("<4f", *q) for q, _t in locals_)
+        quat_mb = self._add_mem(MO_OBJECT, quat_buf)
+        ident_bones = struct.pack("<16f", *_IDENTITY44) * n
+        identA_mb = self._add_mem(MO_OBJECT, ident_bones)
+        world_buf = b"".join(struct.pack("<16f", *_world_bind_matrix(b))
+                             for b in bones)
+        world_mb = self._add_mem(MO_OBJECT, world_buf)
+        n_palette = max(len(bms_palette), 1)
+        ident_palette = struct.pack("<16f", *_IDENTITY44) * n_palette
+        palette_mb = self._add_mem(MO_OBJECT, ident_palette)
+
+        combiner_idx = self._add_obj(MO_ANIMATION_COMBINER, [
+            (2, 'combiner_igActor01', 'String', 4),
+            (3, skeleton_idx, 'ObjectRef', 4),
+            (4, bill_idx, 'ObjectRef', 4),
+            (5, int_list_idx, 'ObjectRef', 4),
+            (6, state_list_idx, 'ObjectRef', 4),
+            (7, quat_mb, 'MemoryRef', 4),
+            (8, identA_mb, 'MemoryRef', 4),
+            (9, 0, 'Long', 8),
+            (10, 1, 'Bool', 1),
+            (12, world_mb, 'MemoryRef', 4),
+            (13, palette_mb, 'MemoryRef', 4),
+        ])
+
+        modifier_list_idx = self._empty_list(MO_ANIMATION_MODIFIER_LIST)
+
+        # --- appearance (skin reference + empty sub-lists, Max-style) ---
+        appearance_idx = self._add_obj(MO_APPEARANCE, [
+            (2, 'appearance_igActor01', 'String', 4),
+            (3, skin_idx if skin_idx is not None else -1, 'ObjectRef', 4),
+            (4, self._empty_list(MO_SKIN_LIST), 'ObjectRef', 4),
+            (5, self._empty_list(MO_MVMBS_LIST), 'ObjectRef', 4),
+            (6, self._empty_list(MO_STRING_OBJ_LIST), 'ObjectRef', 4),
+            (7, self._empty_list(MO_NODE_LIST), 'ObjectRef', 4),
+        ])
+
+        # --- igActor scene node (empty children, identity transform) ---
+        actor_ident_bones = self._add_mem(
+            MO_OBJECT, struct.pack("<16f", *_IDENTITY44) * n)
+        actor_ident_palette = self._add_mem(
+            MO_OBJECT, struct.pack("<16f", *_IDENTITY44) * n_palette)
+        actor_idx = self._add_obj(MO_ACTOR, [
+            (2, 'igActor01', 'String', 4),
+            (3, -1, 'ObjectRef', 4),
+            (5, 0, 'Int', 4),
+            (6, self._empty_list(MO_NODE_LIST), 'ObjectRef', 4),
+            (7, combiner_idx, 'ObjectRef', 4),
+            (8, actor_ident_bones, 'MemoryRef', 4),
+            (9, actor_ident_palette, 'MemoryRef', 4),
+            (10, appearance_idx, 'ObjectRef', 4),
+            (11, -1, 'ObjectRef', 4),
+            (12, modifier_list_idx, 'ObjectRef', 4),
+            (13, _IDENTITY44, 'Matrix44f', 64),
+        ])
+
+        actor_list_idx = self._ref_list(MO_ACTOR_LIST, [actor_idx])
+        combiner_list_idx = self._ref_list(MO_ANIMATION_COMBINER_LIST,
+                                           [combiner_idx])
+        appearance_list_idx = self._ref_list(MO_APPEARANCE_LIST,
+                                             [appearance_idx])
+
+        return self._add_obj(MO_ACTOR_INFO, [
+            (2, 'igActor01', 'String', 4),
+            (4, 1, 'Bool', 1),
+            (5, -1, 'ObjectRef', 4),
+            (6, actor_list_idx, 'ObjectRef', 4),
+            (7, anim_db_idx, 'ObjectRef', 4),
+            (8, combiner_list_idx, 'ObjectRef', 4),
+            (9, appearance_list_idx, 'ObjectRef', 4),
+        ])
+
     def _add_obj(self, meta_obj_idx, fields):
         """Add an object, return its index."""
         idx = len(self._obj_list)
@@ -1419,8 +1857,20 @@ class SkinBuilder:
         for name, major, minor in META_FIELDS:
             writer.meta_fields.append(MetaFieldDef(name, major, minor))
 
+        # CRITICAL: the engine validates meta defs at load even when unused.
+        # OFF  -> exact original 60-type table (proven in-game)
+        # ANIM -> +6 bind-pose animation types (v6-precedented, mirrors the
+        #         known-compatible 0103.igb community skin)
+        # FULL -> +14 combiner/actor types (crashed XML2 — experimental)
+        mode = getattr(self, '_actor_graph_mode', 'OFF')
+        if mode == 'FULL':
+            metas = SKIN_META_OBJECTS
+        elif mode == 'ANIM':
+            metas = SKIN_META_OBJECTS[:N_ANIM_METAS]
+        else:
+            metas = SKIN_META_OBJECTS[:N_STABLE_METAS]
         writer.meta_objects = []
-        for name, major, minor, parent_idx, slot_count, fields in SKIN_META_OBJECTS:
+        for name, major, minor, parent_idx, slot_count, fields in metas:
             field_defs = [MetaObjectFieldDef(ti, slot, size) for ti, slot, size in fields]
             writer.meta_objects.append(MetaObjectDef(
                 name, major, minor, field_defs, parent_idx, slot_count

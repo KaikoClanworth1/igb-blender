@@ -48,6 +48,7 @@ def export_igb(context, filepath, operator=None):
     surface_type = 0
     swap_rb = False
     texture_mode = 'dxt5'  # 'dxt5' or 'clut'
+    max_texture_size = 0  # 0 = original size; otherwise 256/512/1024
     if operator is not None:
         if hasattr(operator, 'collision_source'):
             collision_source = operator.collision_source
@@ -70,6 +71,15 @@ def export_igb(context, filepath, operator=None):
                 swap_rb = False
         elif hasattr(operator, 'game_preset'):
             swap_rb = 'mua' in operator.game_preset
+        # Texture resolution cap (operator passes string enum: 'original', '1024', ...)
+        if hasattr(operator, 'texture_resolution'):
+            try:
+                max_texture_size = int(operator.texture_resolution)
+            except (TypeError, ValueError):
+                max_texture_size = 0  # 'original' or anything non-numeric
+        if max_texture_size > 0:
+            _report(operator, 'INFO',
+                    f"Texture resolution cap: {max_texture_size}px on longest edge")
 
     # Build set of objects to EXCLUDE from visual export:
     # 1. "Colliders" collection (collision-only geometry)
@@ -177,7 +187,8 @@ def export_igb(context, filepath, operator=None):
             if texture_mode == 'clut':
                 # CLUT mode: only supports single diffuse texture
                 clut_data, texture_name = _get_texture_clut_for_material(
-                    bl_mat, texture_cache, operator
+                    bl_mat, texture_cache, operator,
+                    max_texture_size=max_texture_size,
                 )
                 builder_submeshes.append({
                     'mesh': sub_mesh,
@@ -197,6 +208,7 @@ def export_igb(context, filepath, operator=None):
                     tex_levels, tex_name = _get_texture_for_image(
                         bl_image, texture_cache, operator,
                         swap_rb=swap_rb, flip_green=is_nmap,
+                        max_texture_size=max_texture_size,
                     )
                     texture_stages.append((tex_levels, tex_name, unit_id))
                     _report(operator, 'INFO',
@@ -212,7 +224,8 @@ def export_igb(context, filepath, operator=None):
             else:
                 # Single-texture path (most common)
                 texture_levels, texture_name = _get_texture_for_material(
-                    bl_mat, texture_cache, operator, swap_rb=swap_rb
+                    bl_mat, texture_cache, operator, swap_rb=swap_rb,
+                    max_texture_size=max_texture_size,
                 )
                 builder_submeshes.append({
                     'mesh': sub_mesh,
@@ -464,8 +477,12 @@ def _collect_scene_lights(context):
 # Texture extraction with caching
 # ===========================================================================
 
-def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False):
+def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False,
+                              max_texture_size=0):
     """Get compressed texture levels for a material, using cache.
+
+    Args:
+        max_texture_size: 0 = keep original size; otherwise cap longest edge.
 
     Returns:
         (texture_levels, texture_name)
@@ -480,9 +497,10 @@ def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False):
         if bl_image is not None:
             texture_name = bl_image.name
 
-            # Check cache first
-            if texture_name in texture_cache:
-                cached_levels, cached_name = texture_cache[texture_name]
+            # Cache key includes the cap so different caps don't collide
+            cache_key = f"{texture_name}@{max_texture_size}"
+            if cache_key in texture_cache:
+                cached_levels, cached_name = texture_cache[cache_key]
                 _report(operator, 'INFO',
                         f"      Texture: {texture_name} (cached)")
                 return cached_levels, cached_name
@@ -494,6 +512,9 @@ def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False):
             # Extract RGBA pixels
             rgba_data, img_w, img_h = _extract_image_pixels(bl_image)
             if rgba_data is not None:
+                # Optional max-size cap (downscale, no upscale)
+                img_w, img_h, rgba_data = _cap_resolution(
+                    img_w, img_h, rgba_data, max_texture_size)
                 # Ensure power-of-2 dimensions
                 img_w, img_h, rgba_data = _ensure_power_of_2(
                     img_w, img_h, rgba_data)
@@ -507,7 +528,7 @@ def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False):
                             f"{len(texture_levels)} mip levels")
 
                     # Cache for reuse
-                    texture_cache[texture_name] = (texture_levels, texture_name)
+                    texture_cache[cache_key] = (texture_levels, texture_name)
                 except Exception as e:
                     _report(operator, 'WARNING',
                             f"      Texture compression failed: {e}")
@@ -522,7 +543,7 @@ def _get_texture_for_material(bl_mat, texture_cache, operator, swap_rb=False):
 
 
 def _get_texture_for_image(bl_image, texture_cache, operator, swap_rb=False,
-                           flip_green=False):
+                           flip_green=False, max_texture_size=0):
     """Get compressed texture levels for a specific Blender image, using cache.
 
     Like _get_texture_for_material but takes a bl_image directly (for multi-texture).
@@ -533,6 +554,7 @@ def _get_texture_for_image(bl_image, texture_cache, operator, swap_rb=False,
         operator: Blender operator for reporting
         swap_rb: swap R/B channels (MUA PC)
         flip_green: flip green channel (OpenGL → DirectX normal map conversion)
+        max_texture_size: 0 = keep original size; otherwise cap longest edge.
 
     Returns:
         (texture_levels, texture_name)
@@ -542,10 +564,10 @@ def _get_texture_for_image(bl_image, texture_cache, operator, swap_rb=False,
     texture_levels = None
     texture_name = bl_image.name if bl_image is not None else ''
 
-    # Include flip_green in cache key so normal maps get their own entry
-    cache_key = texture_name
+    # Include flip_green and cap size in cache key so variants stay separate
+    cache_key = f"{texture_name}@{max_texture_size}"
     if flip_green:
-        cache_key = texture_name + '_nmap'
+        cache_key = cache_key + '_nmap'
 
     if bl_image is not None:
         # Check cache first
@@ -558,14 +580,21 @@ def _get_texture_for_image(bl_image, texture_cache, operator, swap_rb=False,
         # Extract RGBA pixels
         rgba_data, img_w, img_h = _extract_image_pixels(bl_image)
         if rgba_data is not None:
+            # Optional max-size cap (downscale, no upscale)
+            img_w, img_h, rgba_data = _cap_resolution(
+                img_w, img_h, rgba_data, max_texture_size)
             # Ensure power-of-2 dimensions
             img_w, img_h, rgba_data = _ensure_power_of_2(
                 img_w, img_h, rgba_data)
 
             # Flip green channel for normal maps (OpenGL → DirectX)
             if flip_green:
+                # rgba_data is bytes (immutable) after _ensure_power_of_2 —
+                # convert to bytearray so we can mutate in place.
+                rgba_data = bytearray(rgba_data)
                 for i in range(len(rgba_data) // 4):
                     rgba_data[i * 4 + 1] = 255 - rgba_data[i * 4 + 1]
+                rgba_data = bytes(rgba_data)
 
             # DXT5 compress with mipmaps
             try:
@@ -588,8 +617,12 @@ def _get_texture_for_image(bl_image, texture_cache, operator, swap_rb=False,
     return texture_levels, texture_name
 
 
-def _get_texture_clut_for_material(bl_mat, texture_cache, operator):
+def _get_texture_clut_for_material(bl_mat, texture_cache, operator,
+                                   max_texture_size=0):
     """Get CLUT-quantized texture data for a material, using cache.
+
+    Args:
+        max_texture_size: 0 = keep original size; otherwise cap longest edge.
 
     Returns:
         (clut_data, texture_name) where clut_data is
@@ -606,7 +639,7 @@ def _get_texture_clut_for_material(bl_mat, texture_cache, operator):
             texture_name = bl_image.name
 
             # Check cache first
-            cache_key = texture_name + '_clut'
+            cache_key = f"{texture_name}@{max_texture_size}_clut"
             if cache_key in texture_cache:
                 cached_data, cached_name = texture_cache[cache_key]
                 _report(operator, 'INFO',
@@ -619,6 +652,8 @@ def _get_texture_clut_for_material(bl_mat, texture_cache, operator):
 
             rgba_data, img_w, img_h = _extract_image_pixels(bl_image)
             if rgba_data is not None:
+                img_w, img_h, rgba_data = _cap_resolution(
+                    img_w, img_h, rgba_data, max_texture_size)
                 img_w, img_h, rgba_data = _ensure_power_of_2(
                     img_w, img_h, rgba_data)
                 try:
@@ -1030,6 +1065,48 @@ def _ensure_power_of_2(width, height, rgba_data):
             new_data[dst_off:dst_off + 4] = rgba_data[src_off:src_off + 4]
 
     return new_w, new_h, bytes(new_data)
+
+
+def _cap_resolution(width, height, rgba_data, max_size):
+    """Downscale to at most max_size on the longest edge, preserving aspect.
+
+    Result dimensions are clamped to powers of 2 (DXT requirement). When
+    max_size is 0, returns the input unchanged.
+    """
+    if max_size <= 0 or (width <= max_size and height <= max_size):
+        return width, height, rgba_data
+
+    if width >= height:
+        new_w = max_size
+        new_h = max(1, (height * max_size) // width)
+    else:
+        new_h = max_size
+        new_w = max(1, (width * max_size) // height)
+
+    # Snap to power-of-2 (round down so we don't bounce back over the cap)
+    new_w = _prev_power_of_2(new_w)
+    new_h = _prev_power_of_2(new_h)
+
+    new_data = bytearray(new_w * new_h * 4)
+    for y in range(new_h):
+        src_y = min(y * height // new_h, height - 1)
+        for x in range(new_w):
+            src_x = min(x * width // new_w, width - 1)
+            src_off = (src_y * width + src_x) * 4
+            dst_off = (y * new_w + x) * 4
+            new_data[dst_off:dst_off + 4] = rgba_data[src_off:src_off + 4]
+
+    return new_w, new_h, bytes(new_data)
+
+
+def _prev_power_of_2(n):
+    """Return the largest power of 2 <= n (n >= 1)."""
+    if n <= 1:
+        return 1
+    p = 1
+    while p * 2 <= n:
+        p <<= 1
+    return p
 
 
 def _create_placeholder_texture(swap_rb=False):

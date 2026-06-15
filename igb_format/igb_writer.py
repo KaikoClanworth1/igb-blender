@@ -127,11 +127,14 @@ class IGBWriter:
             if self.has_memory_pool_names:
                 f.write(pool_buf)  # 6. Memory pool names
             f.write(entry_buf)     # 7. Entry buffer
-            f.write(index_buf)     # 8. Index buffer
-            if self.has_info:
-                f.write(info_buf)  # 9. Info V4
+            if self.version >= 6:
+                f.write(index_buf)  # 8. Index buffer (v6+ only)
+                if self.has_info:
+                    f.write(info_buf)  # 9. Info list index (v6+: before objects)
             f.write(obj_buf)       # 10. Object buffer
             f.write(mref_buf)      # 11. Memory reference buffer
+            if self.version < 6 and self.has_info:
+                f.write(info_buf)  # 12. Info list index (v4/v5: end of file)
 
     def _serialize_meta_fields(self):
         """Serialize the meta-field buffer.
@@ -188,8 +191,11 @@ class IGBWriter:
                 raw_len = len(name_bytes) + 1  # name + null
                 name_len = (raw_len + 1) & ~1  # round up to even
 
-            # Build padded name data
-            name_data = name_bytes + b'\x00' * (name_len - len(name_bytes))
+            # Build padded name data (use exact original bytes if preserved)
+            if mo.raw_name is not None and len(mo.raw_name) == name_len:
+                name_data = mo.raw_name
+            else:
+                name_data = name_bytes + b'\x00' * (name_len - len(name_bytes))
 
             static_parts.append(struct.pack(
                 endian + "IIIIiI",
@@ -273,6 +279,13 @@ class IGBWriter:
 
         for entry in self.entries:
             type_index = entry.type_index
+
+            if entry.raw_bytes is not None:
+                buf.extend(struct.pack(endian + "II", type_index,
+                                       8 + len(entry.raw_bytes)))
+                buf.extend(entry.raw_bytes)
+                continue
+
             field_data = bytearray()
 
             # Get field descriptors from meta-object
@@ -564,10 +577,11 @@ class MetaObjectDef:
     """Definition of a meta-object (class) for the writer."""
 
     __slots__ = ('name', 'major_version', 'minor_version', 'fields',
-                 'parent_index', 'slot_count', 'name_len')
+                 'parent_index', 'slot_count', 'name_len', 'raw_name')
 
     def __init__(self, name, major_version=1, minor_version=0,
-                 fields=None, parent_index=-1, slot_count=2, name_len=None):
+                 fields=None, parent_index=-1, slot_count=2, name_len=None,
+                 raw_name=None):
         self.name = name if isinstance(name, bytes) else name.encode('ascii')
         self.major_version = major_version
         self.minor_version = minor_version
@@ -577,16 +591,26 @@ class MetaObjectDef:
         # name_len: original serialized name length (including null + padding)
         # If None, computed as name+null padded to 2-byte boundary
         self.name_len = name_len
+        # raw_name: exact original name bytes incl. padding (v4 Max exports
+        # leave garbage in the pad byte after the null terminator)
+        self.raw_name = raw_name
 
 
 class EntryDef:
-    """Definition of a directory entry for the writer."""
+    """Definition of a directory entry for the writer.
 
-    __slots__ = ('type_index', 'field_values')
+    For round-trip fidelity, raw_bytes can be set to the exact original
+    field data bytes (without the 8-byte type+size header) — v4 Max
+    exporters leave garbage in field alignment padding which re-serializing
+    would zero out.
+    """
 
-    def __init__(self, type_index, field_values=None):
+    __slots__ = ('type_index', 'field_values', 'raw_bytes')
+
+    def __init__(self, type_index, field_values=None, raw_bytes=None):
         self.type_index = type_index
         self.field_values = field_values or []
+        self.raw_bytes = raw_bytes
 
 
 class ObjectFieldDef:
@@ -670,17 +694,29 @@ def from_reader(reader):
         )[0]
         mf_name_lens.append(name_len)
 
-    # Meta-object buffer: static part has nameLen for each entry
+    # Meta-object buffer: static part has nameLen + raw major/minor for each
+    # entry (the parser normalizes major 0 -> 1, so re-read the raw values
+    # here to preserve them byte-for-byte — v4 Max exports store major=0)
     mo_name_lens = []
+    mo_raw_vers = []
     # Compute meta-object buffer start position
     mo_static_start = mf_static_start + reader.header.mf_buffer_size
     align_size = struct.unpack_from(reader.header.endian + "I", reader.data, mo_static_start)[0]
     mo_static_start += align_size  # skip alignment buffer
     for i in range(len(reader.meta_objects)):
-        name_len = struct.unpack_from(
-            reader.header.endian + "I", reader.data, mo_static_start + i * 24
-        )[0]
+        name_len, raw_major, raw_minor = struct.unpack_from(
+            reader.header.endian + "III", reader.data, mo_static_start + i * 24
+        )
         mo_name_lens.append(name_len)
+        mo_raw_vers.append((raw_major, raw_minor))
+
+    # Walk the meta-object dynamic part to capture raw name bytes (padding
+    # after the null terminator can contain exporter garbage)
+    mo_raw_names = []
+    mo_dyn = mo_static_start + len(reader.meta_objects) * 24
+    for i, mo in enumerate(reader.meta_objects):
+        mo_raw_names.append(bytes(reader.data[mo_dyn:mo_dyn + mo_name_lens[i]]))
+        mo_dyn += mo_name_lens[i] + len(mo.fields) * 6
 
     # Copy meta-fields with original name lengths
     for i, mf in enumerate(reader.meta_fields):
@@ -701,10 +737,11 @@ def from_reader(reader):
                 fdef.short_name = reader.meta_fields[fd.type_index].short_name
             fields.append(fdef)
 
+        raw_major, raw_minor = mo_raw_vers[i]
         writer.meta_objects.append(MetaObjectDef(
-            mo.name, mo.major_version, mo.minor_version,
+            mo.name, raw_major, raw_minor,
             fields, mo.parent_index, mo.slot_count,
-            name_len=mo_name_lens[i]
+            name_len=mo_name_lens[i], raw_name=mo_raw_names[i]
         ))
 
     # Copy alignment data (raw bytes including size prefix)
@@ -725,10 +762,25 @@ def from_reader(reader):
     # Copy memory pool names
     writer.memory_pool_names = list(reader.memory_pool_names)
 
-    # Copy entries
+    # Copy entries, preserving raw field bytes — v4 Max exporters leave
+    # garbage in the alignment padding after sub-4-byte fields, which
+    # re-serializing from parsed values would zero out
+    ent_pos = mf_static_start + reader.header.mf_buffer_size
+    ent_pos += struct.unpack_from(reader.header.endian + "I", reader.data, ent_pos)[0]
+    ent_pos += reader.header.meta_obj_buffer_size
+    if reader.header.has_external:
+        ent_pos += struct.unpack_from(reader.header.endian + "I", reader.data, ent_pos)[0]
+    if reader.header.has_memory_pool_names:
+        ent_pos += struct.unpack_from(reader.header.endian + "I", reader.data, ent_pos)[0]
+    ent_scan = ent_pos
     for ent_type, fields in reader.entries:
         field_values = [f[1] for f in fields]
-        writer.entries.append(EntryDef(ent_type, field_values))
+        _et, esize = struct.unpack_from(
+            reader.header.endian + "II", reader.data, ent_scan
+        )
+        raw = bytes(reader.data[ent_scan + 8:ent_scan + esize])
+        writer.entries.append(EntryDef(ent_type, field_values, raw_bytes=raw))
+        ent_scan += esize
 
     # Copy index map
     writer.index_map = list(reader.index_map)
@@ -751,10 +803,13 @@ def from_reader(reader):
         pool_s = struct.unpack_from(reader.header.endian + "I", reader.data, obj_buf_pos)[0]
         obj_buf_pos += pool_s
     obj_buf_pos += reader.header.entry_buffer_size
-    idx_s = struct.unpack_from(reader.header.endian + "I", reader.data, obj_buf_pos)[0]
-    obj_buf_pos += idx_s
-    if reader.header.has_info:
-        obj_buf_pos += 4
+    if reader.header.version >= 6:
+        # v6+: index buffer, then info list index (v4/v5 have neither here —
+        # entries are sequential and the info index sits at the END of file)
+        idx_s = struct.unpack_from(reader.header.endian + "I", reader.data, obj_buf_pos)[0]
+        obj_buf_pos += idx_s
+        if reader.header.has_info:
+            obj_buf_pos += 4
 
     # Parse per-object raw bytes from original object buffer
     raw_obj_bytes = {}  # obj_index -> bytes (field data only, no header)

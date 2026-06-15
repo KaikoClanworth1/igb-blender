@@ -19,21 +19,28 @@ from .. import _get_icon_id
 # ---------------------------------------------------------------------------
 
 class ACTOR_UL_skins(UIList):
-    """UIList for actor skin variants."""
+    """UIList for the mesh parts that make up the current skin."""
     bl_idname = "ACTOR_UL_skins"
 
-    def draw_item(self, context, layout, data, item, icon, active_data, active_property):
+    def draw_item(self, context, layout, data, item, icon, active_data,
+                  active_property, index=0, flt_flag=0):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
             # Visibility icon
             vis_icon = 'HIDE_OFF' if item.is_visible else 'HIDE_ON'
             op = row.operator("actor.toggle_skin", text="", icon=vis_icon, emboss=False)
-            op.index = list(data.skins).index(item)
+            op.index = index
+            # Part-type icon: outline meshes render as wireframe glyph
+            obj = bpy.data.objects.get(item.object_name)
+            if obj is not None and obj.get("igb_is_outline", False):
+                part_icon = 'MOD_WIREFRAME'
+            elif obj is not None and obj.get("igb_segment_name", ""):
+                part_icon = 'OBJECT_DATA'
+            else:
+                part_icon = 'MESH_DATA'
+            row.label(text="", icon=part_icon)
             # Name
             row.prop(item, "name", text="", emboss=False)
-            # Skin code
-            if item.skin_code:
-                row.label(text=item.skin_code)
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
             layout.label(text=item.name)
@@ -43,12 +50,13 @@ class ACTOR_UL_animations(UIList):
     """UIList for actor animations."""
     bl_idname = "ACTOR_UL_animations"
 
-    def draw_item(self, context, layout, data, item, icon, active_data, active_property):
+    def draw_item(self, context, layout, data, item, icon, active_data,
+                  active_property, index=0, flt_flag=0):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
             # Play button
             op = row.operator("actor.set_animation", text="", icon='PLAY', emboss=False)
-            op.index = list(data.animations).index(item)
+            op.index = index
             # Name
             row.prop(item, "name", text="", emboss=False)
             # Duration
@@ -156,14 +164,16 @@ class ACTOR_PT_Import(Panel):
                 box.label(text=f"Target: {target_game}", icon='SCENE')
 
                 box.operator("actor.setup_skin", text="Re-setup Skin",
-                             icon='FILE_REFRESH')
+                             icon='TOOL_SETTINGS')
+                box.label(text="Resize & fix tools live in Quick Tools",
+                          icon='INFO')
             else:
                 from .rig_converter import is_bip01_rig
                 if is_bip01_rig(obj):
                     box.label(text="Bip01 rig — will configure for export")
                 else:
                     box.label(text="Non-XML2 rig — will convert and setup")
-                box.operator("actor.setup_skin", icon='FILE_REFRESH')
+                box.operator("actor.setup_skin", icon='TOOL_SETTINGS')
 
         # Active armature info
         if props.active_armature:
@@ -175,6 +185,66 @@ class ACTOR_PT_Import(Panel):
                 box.label(text=f"Name: {arm_obj.name}")
                 bone_count = arm_obj.get("igb_bone_count", 0)
                 box.label(text=f"Bones: {bone_count}")
+
+
+class ACTOR_PT_QuickTools(Panel):
+    """One-stop workflow buttons so the user never has to leave this tab."""
+    bl_label = "Quick Tools"
+    bl_idname = "ACTOR_PT_QuickTools"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "IGB Actors"
+    bl_parent_id = "ACTOR_PT_Main"
+
+    def draw(self, context):
+        layout = self.layout
+
+        # ---- 1. Import ----
+        box = layout.box()
+        box.label(text="1. Import", icon='IMPORT')
+        col = box.column(align=True)
+        col.operator("actor.import_actor", text="Import Actor (.igb)",
+                     icon='ARMATURE_DATA')
+        col.operator("import_scene.igb", text="Import Scene/Model (.igb)",
+                     icon='MESH_DATA')
+        col.label(text="Skins need Import Actor, not Import Scene",
+                  icon='INFO')
+
+        # ---- 2. Setup ----
+        box = layout.box()
+        box.label(text="2. Setup", icon='TOOL_SETTINGS')
+        col = box.column(align=True)
+        col.operator("actor.setup_skin", text="Setup / Convert Rig",
+                     icon='TOOL_SETTINGS')
+        col.operator("actor.add_mesh_as_skin", icon='ADD')
+        col.operator("actor.add_segment", icon='ADD')
+        col.operator("igb.convert_materials",
+                     text="Convert Materials to IGB", icon='MATERIAL')
+
+        # ---- 3. Resize & Fixes ----
+        # Always drawn: the armature-dependent operators grey out via
+        # their own poll(), while scale_anim_set / fix_menu_anims are
+        # pure file tools that work with nothing selected.
+        box = layout.box()
+        box.label(text="3. Resize & Fixes", icon='CON_SIZELIKE')
+        col = box.column(align=True)
+        # In Pose Mode scale 'Bip01 Pelvis' to resize the body, then
+        # one click bakes + rebuilds all data
+        col.operator("actor.apply_pose_resize", icon='CON_SIZELIKE')
+        # Resized characters ALSO need their animation set scaled
+        # (anims drive root heights absolutely — skin alone floats)
+        col.operator("actor.scale_anim_set", icon='ANIM')
+        # Character select evaluates pelvis tracks literally
+        col.operator("actor.fix_menu_anims", icon='SEQ_PREVIEW')
+        # Rebuild export data from the current bones (after any
+        # manual bone/scale surgery)
+        col.operator("actor.fix_bip01", icon='FILE_REFRESH')
+
+        # ---- 4. Export ----
+        box = layout.box()
+        box.label(text="4. Export", icon='EXPORT')
+        box.operator("actor.export_skin", text="Export Skin (.igb)",
+                     icon='EXPORT')
 
 
 class ACTOR_PT_Skins(Panel):
@@ -195,6 +265,14 @@ class ACTOR_PT_Skins(Panel):
         layout = self.layout
         props = context.scene.igb_actor
 
+        # Every row below is one MESH PART of the same skin (body, outline,
+        # segments...) — they all export together into a single .igb. This
+        # is the main point of confusion for multi-mesh imports.
+        n = len(props.skins)
+        if n > 1:
+            layout.label(text=f"{n} mesh parts — export as ONE skin",
+                         icon='INFO')
+
         # Skin list
         row = layout.row()
         row.template_list(
@@ -204,11 +282,14 @@ class ACTOR_PT_Skins(Panel):
             rows=3,
         )
 
-        # Solo button for selected skin
+        # Solo / Show All for visibility wrangling
         if props.skins_index < len(props.skins):
             row = layout.row(align=True)
-            op = row.operator("actor.solo_skin", text="Solo Selected", icon='RESTRICT_VIEW_OFF')
+            op = row.operator("actor.solo_skin", text="Solo Selected",
+                              icon='RESTRICT_VIEW_OFF')
             op.index = props.skins_index
+            row.operator("actor.show_all_skins", text="Show All",
+                         icon='HIDE_OFF')
 
         layout.separator()
 
@@ -307,11 +388,9 @@ class ACTOR_PT_Segments(Panel):
                 op.segment_name = base_name
 
                 # Remove button
-                all_seg_meshes = grp['main'] + grp['outline']
-                if all_seg_meshes:
-                    op_rem = header.operator("actor.remove_segment",
-                                            text="", icon='X')
-                    op_rem.segment_name = base_name
+                op_rem = header.operator("actor.remove_segment",
+                                         text="", icon='X')
+                op_rem.segment_name = base_name
 
             # Sub-meshes
             col = box.column(align=True)
@@ -373,7 +452,7 @@ class ACTOR_PT_Animations(Panel):
 
         # Side buttons for add/remove
         col = row.column(align=True)
-        col.operator("actor.import_single_animation", icon='IMPORT', text="")
+        col.operator("actor.import_animations", icon='IMPORT', text="")
         col.operator("actor.remove_animation", icon='REMOVE', text="")
 
         # Playback controls
@@ -397,7 +476,7 @@ class ACTOR_PT_Animations(Panel):
         row = layout.row(align=True)
         row.operator("actor.import_animations", text="Import Animations",
                       icon='IMPORT')
-        row.operator("actor.export_animations", text="Save Animations",
+        row.operator("actor.export_animations", text="Export Animations",
                       icon='EXPORT')
 
 
@@ -419,99 +498,98 @@ class ACTOR_PT_Materials(Panel):
         layout = self.layout
         props = context.scene.igb_actor
 
-        # Find the selected skin's mesh object to show its material
-        mat = None
+        # Find the selected skin's mesh object and gather ALL its materials
+        # (combined meshes carry one material per original part)
         mesh_obj = None
+        materials = []
         if props.skins_index < len(props.skins):
             skin = props.skins[props.skins_index]
             mesh_obj = bpy.data.objects.get(skin.object_name)
-            if mesh_obj and mesh_obj.data.materials:
-                mat = mesh_obj.data.materials[0]
+            if mesh_obj:
+                materials = [m for m in mesh_obj.data.materials
+                             if m is not None]
 
-        if mat is None:
+        if not materials:
             layout.label(text="Select a skin to see materials.", icon='INFO')
             return
 
-        # Skin name + material name
+        from ..panels import _draw_material_colors
+
         box = layout.box()
         box.label(text=f"Skin: {mesh_obj.name}", icon='MESH_DATA')
-        box.label(text=f"Material: {mat.name}", icon='MATERIAL')
+        if len(materials) > 1:
+            box.label(text=f"{len(materials)} materials on this mesh")
 
-        # Draw material colors using the shared helper from panels.py
-        from ..panels import _draw_material_colors
-        _draw_material_colors(layout, mat)
+        # One section per material slot — every material is editable
+        for mat in materials:
+            mat_box = layout.box()
+            mat_box.label(text=mat.name, icon='MATERIAL')
 
-        # --- Render State Summary ---
-        box = layout.box()
-        box.label(text="Render State", icon='SHADING_RENDERED')
+            _draw_material_colors(mat_box, mat)
 
-        # Blend
-        blend_en = mat.get("igb_blend_enabled")
-        if blend_en is not None:
-            box.prop(mat, '["igb_blend_enabled"]', text="Blend Enabled")
+            # Render state for this material
+            if mat.get("igb_blend_enabled") is not None:
+                mat_box.prop(mat, '["igb_blend_enabled"]',
+                             text="Blend Enabled")
+            if mat.get("igb_alpha_test_enabled") is not None:
+                mat_box.prop(mat, '["igb_alpha_test_enabled"]',
+                             text="Alpha Test")
+            if mat.get("igb_lighting_enabled") is not None:
+                mat_box.prop(mat, '["igb_lighting_enabled"]',
+                             text="Lighting")
+            if mat.get("igb_cull_face_enabled") is not None:
+                mat_box.prop(mat, '["igb_cull_face_enabled"]',
+                             text="Backface Culling")
 
-        # Alpha test
-        alpha_en = mat.get("igb_alpha_test_enabled")
-        if alpha_en is not None:
-            box.prop(mat, '["igb_alpha_test_enabled"]', text="Alpha Test")
+            if not any(key.startswith("igb_") for key in mat.keys()):
+                mat_box.label(text="No IGB properties yet.", icon='INFO')
 
-        # Lighting
-        lighting = mat.get("igb_lighting_enabled")
-        if lighting is not None:
-            box.prop(mat, '["igb_lighting_enabled"]', text="Lighting")
-
-        # Backface culling
-        cull = mat.get("igb_cull_face_enabled")
-        if cull is not None:
-            box.prop(mat, '["igb_cull_face_enabled"]', text="Backface Culling")
-
-        has_igb = any(key.startswith("igb_") for key in mat.keys())
-        if not has_igb:
-            layout.separator()
-            layout.label(text="No IGB properties. Import an IGB skin first.")
-
-        # --- Quick Tools for actor materials ---
+        # --- Quick Tools for actor materials (SKIN meshes only — never
+        # touches map/scene materials in a mixed scene) ---
         layout.separator()
         box = layout.box()
         box.label(text="Quick Tools (All Skins)", icon='TOOL_SETTINGS')
-        box.label(text="Apply to all materials on all skin meshes.")
+        box.label(text="Applies to skin-list meshes only.")
 
-        # Emission quick set
+        # Emission quick set ("Set..." opens a color picker dialog)
         row = box.row(align=True)
         op = row.operator("igb.set_all_emission", text="No Emission",
                           icon='COLORSET_13_VEC')
         op.color = (0.0, 0.0, 0.0, 1.0)
-        op.selected_only = False
-        op = row.operator("igb.set_all_emission", text="Set Emission",
+        op.skins_only = True
+        op = row.operator("igb.set_all_emission", text="Set Emission...",
                           icon='LIGHT_SUN')
-        op.selected_only = False
+        op.skins_only = True
+        op.show_dialog = True
 
         # Specular quick set
         row = box.row(align=True)
         op = row.operator("igb.set_all_specular", text="No Specular",
                           icon='COLORSET_13_VEC')
         op.color = (0.0, 0.0, 0.0, 1.0)
-        op.selected_only = False
-        op = row.operator("igb.set_all_specular", text="Set Specular",
+        op.skins_only = True
+        op = row.operator("igb.set_all_specular", text="Set Specular...",
                           icon='LIGHT_POINT')
-        op.selected_only = False
+        op.skins_only = True
+        op.show_dialog = True
 
         # Diffuse quick set
         row = box.row(align=True)
-        op = row.operator("igb.set_all_diffuse", text="Set Diffuse",
+        op = row.operator("igb.set_all_diffuse", text="Set Diffuse...",
                           icon='COLORSET_03_VEC')
-        op.selected_only = False
+        op.skins_only = True
+        op.show_dialog = True
 
         # Shininess
         row = box.row(align=True)
         op = row.operator("igb.set_all_shininess", text="Matte (0)",
                           icon='MATPLANE')
         op.shininess = 0.0
-        op.selected_only = False
+        op.skins_only = True
         op = row.operator("igb.set_all_shininess", text="Shiny (64)",
                           icon='SHADING_RENDERED')
         op.shininess = 64.0
-        op.selected_only = False
+        op.skins_only = True
 
 
 class ACTOR_PT_VMC(Panel):
@@ -616,6 +694,13 @@ class ACTOR_PT_AnimConverter(Panel):
         layout = self.layout
         obj = context.active_object
 
+        # This panel works on whatever armature is ACTIVE (it converts
+        # foreign rigs) — flag when that differs from the loaded IGB actor
+        props = context.scene.igb_actor
+        if props.active_armature and obj.name != props.active_armature:
+            layout.label(text=f"Converting non-IGB rig: {obj.name}",
+                         icon='INFO')
+
         # Rig analysis
         from .rig_converter import build_rename_map
         bone_mapping = build_rename_map(obj)
@@ -671,6 +756,7 @@ _classes = (
     ACTOR_UL_skins,
     ACTOR_UL_animations,
     ACTOR_PT_Main,
+    ACTOR_PT_QuickTools,
     ACTOR_PT_Import,
     ACTOR_PT_Skins,
     ACTOR_PT_Segments,
