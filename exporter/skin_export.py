@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
                 texture_mode='dxt5', max_texture_size=0, actor_graph='OFF',
-                igb_format='V6'):
+                igb_format='V6', use_normal_maps=False, normal_map_size=0):
     """Export Blender skin mesh(es) to an IGB file using from-scratch builder.
 
     Args:
@@ -46,11 +46,23 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
     from .skin_builder import SkinBuilder
     from .mesh_extractor import extract_skin_mesh, extract_mesh
 
-    # v4 skins are CLUT-textured (the proven-universal Max-era path)
-    if igb_format == 'V4' and texture_mode != 'clut':
-        _report(operator, 'INFO',
-                "v4 export uses CLUT textures — switching texture mode")
-        texture_mode = 'clut'
+    # Normal maps are a MUA-only, v4-only feature (the proven 3ds Max recipe:
+    # DXT diffuse/normal/specular + tangent-frame vertex streams). XML2 has no
+    # normal maps, and our CLUT/v6 paths can't carry them — so gate it.
+    if use_normal_maps and igb_format != 'V4':
+        _report(operator, 'WARNING',
+                "Normal maps require the 3ds Max v4 (MUA) skin format — "
+                "ignoring 'Use Normal Maps' for this export")
+        use_normal_maps = False
+
+    if igb_format == 'V4':
+        if use_normal_maps:
+            # diffuse/normal/specular all ship as DXT for normal-mapped skins
+            texture_mode = 'dxt5'
+        elif texture_mode != 'clut':
+            _report(operator, 'INFO',
+                    "v4 export uses CLUT textures — switching texture mode")
+            texture_mode = 'clut'
 
     # Normalize mesh_objs
     if not isinstance(mesh_objs, list):
@@ -260,6 +272,22 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
                     max_texture_size=max_texture_size)
                 sub_dict['clut_data'] = None
 
+            # Normal-map path (MUA/v4): also extract normal + specular maps,
+            # DXT-encoded, with their own size cap (normal_map_size).
+            if use_normal_maps and not is_outline:
+                nm_cap = normal_map_size or max_texture_size
+                sub_dict['normal_levels'] = _get_texture_role(
+                    mesh_obj, 'normal', swap_rb=swap_rb, mat_slot=mat_slot,
+                    max_texture_size=nm_cap)
+                sub_dict['specular_levels'] = _get_texture_role(
+                    mesh_obj, 'specular', swap_rb=swap_rb, mat_slot=mat_slot,
+                    max_texture_size=nm_cap)
+                if sub_dict.get('normal_levels'):
+                    _report(operator, 'INFO',
+                            f"  + normal map for '{mesh_part.name}'"
+                            + ('' if not sub_dict.get('specular_levels')
+                               else ' (+ specular)'))
+
             submeshes.append(sub_dict)
 
             total_verts += num_verts
@@ -280,7 +308,8 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
         writer = builder.build_skin(
             submeshes, skeleton_data, bms_palette,
             export_name=export_name,
-            actor_graph=('FULL' if actor_graph == 'FULL' else 'ANIM'))
+            actor_graph=('FULL' if actor_graph == 'FULL' else 'ANIM'),
+            use_normal_maps=use_normal_maps)
     else:
         builder = SkinBuilder()
         writer = builder.build_skin(submeshes, skeleton_data, bms_palette,
@@ -843,6 +872,70 @@ def _get_texture(mesh_obj, swap_rb=False, mat_slot=0, max_texture_size=0):
 
     rgba, w, h = _extract_image_rgba(bl_image, w, h, max_texture_size=max_texture_size)
 
+    return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
+
+
+def _find_role_image(mat, role):
+    """Find the Image feeding a Normal Map / Specular slot in a BSDF tree.
+
+    role 'normal': BSDF 'Normal' input <- Normal Map node <- Image Texture
+    (or a direct Image Texture). role 'specular': image into 'Specular IOR
+    Level' (or legacy 'Specular'). Returns a bpy Image or None.
+    """
+    nodes = mat.node_tree.nodes
+    bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is None:
+        return None
+    if role == 'normal':
+        inp = bsdf.inputs.get('Normal')
+        if inp and inp.is_linked:
+            src = inp.links[0].from_node
+            if src.type == 'NORMAL_MAP':
+                col = src.inputs.get('Color')
+                if col and col.is_linked:
+                    img_node = col.links[0].from_node
+                    if img_node.type == 'TEX_IMAGE' and img_node.image:
+                        return img_node.image
+            elif src.type == 'TEX_IMAGE' and src.image:
+                return src.image
+        return None
+    if role == 'specular':
+        for name in ('Specular IOR Level', 'Specular'):
+            inp = bsdf.inputs.get(name)
+            if inp and inp.is_linked:
+                src = inp.links[0].from_node
+                if src.type == 'TEX_IMAGE' and src.image:
+                    return src.image
+        return None
+    return None
+
+
+def _get_texture_role(mesh_obj, role, swap_rb=False, mat_slot=0,
+                      max_texture_size=0):
+    """Extract a normal/specular map as DXT5 levels, or None if absent.
+
+    Normal maps get their green channel flipped (Blender/OpenGL +Y -> the
+    DirectX -Y convention MUA expects). Specular passes through unchanged.
+    """
+    from ..utils.dxt_compress import compress_with_mipmaps
+
+    if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
+        return None
+    mat = mesh_obj.data.materials[mat_slot]
+    if mat is None or not mat.use_nodes or not mat.node_tree:
+        return None
+    bl_image = _find_role_image(mat, role)
+    if bl_image is None:
+        return None
+    w, h = bl_image.size[0], bl_image.size[1]
+    if w == 0 or h == 0:
+        return None
+    rgba, w, h = _extract_image_rgba(bl_image, w, h,
+                                     max_texture_size=max_texture_size)
+    if role == 'normal':
+        rgba = bytearray(rgba)
+        for i in range(1, len(rgba), 4):
+            rgba[i] = 255 - rgba[i]   # flip green (OpenGL -> DirectX)
     return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
 
 

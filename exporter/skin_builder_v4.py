@@ -140,6 +140,74 @@ _IDENTITY44 = (1.0, 0.0, 0.0, 0.0,
 VTX_FMT_SLOTS = 19          # v4 slot-table size (v6 uses 20)
 FMT_SKINNED = 0x443         # pos+normals+weights
 FMT_SKINNED_UV = 0x10443    # pos+normals+uv+weights
+# Normal-mapped format flag, observed verbatim in 3ds Max MUA modder skins
+# (0104bladecybernetic.igb etc). Declares the tangent-frame layout: slot 0 pos
+# (12B), slot 1 normal-frame (36B = normal+tangent+binormal), slot 11 uv (8B),
+# slot 17 tangent (12B), slot 18 binormal (12B). See memory/mua_normal_maps.md.
+FMT_NORMAL_MAPPED = 0xC0E443
+# extra ext-indexed-entry slots used only by the normal-mapped format
+VTX_SLOT_TANGENT = 17
+VTX_SLOT_BINORMAL = 18
+
+
+def _compute_tangent_frame(positions, normals, uvs, indices):
+    """Per-vertex orthonormal tangent + binormal from UVs (Lengyel's method).
+
+    Returns (tangents, binormals) as lists of (x,y,z). Used to emit the
+    tangent-frame vertex streams MUA's normal-map shader path reads. Requires
+    UVs; callers must guard. Degenerate-UV triangles contribute nothing.
+    """
+    n = len(positions)
+    tan = [[0.0, 0.0, 0.0] for _ in range(n)]
+    bin_ = [[0.0, 0.0, 0.0] for _ in range(n)]
+    for t in range(0, len(indices) - 2, 3):
+        i0, i1, i2 = indices[t], indices[t + 1], indices[t + 2]
+        if i0 >= n or i1 >= n or i2 >= n:
+            continue
+        p0, p1, p2 = positions[i0], positions[i1], positions[i2]
+        w0, w1, w2 = uvs[i0], uvs[i1], uvs[i2]
+        e1 = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+        e2 = (p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2])
+        du1, dv1 = w1[0] - w0[0], w1[1] - w0[1]
+        du2, dv2 = w2[0] - w0[0], w2[1] - w0[1]
+        denom = du1 * dv2 - du2 * dv1
+        f = 1.0 / denom if abs(denom) > 1e-12 else 0.0
+        tx = (dv2 * e1[0] - dv1 * e2[0]) * f
+        ty = (dv2 * e1[1] - dv1 * e2[1]) * f
+        tz = (dv2 * e1[2] - dv1 * e2[2]) * f
+        bx = (du1 * e2[0] - du2 * e1[0]) * f
+        by = (du1 * e2[1] - du2 * e1[1]) * f
+        bz = (du1 * e2[2] - du2 * e1[2]) * f
+        for i in (i0, i1, i2):
+            tan[i][0] += tx; tan[i][1] += ty; tan[i][2] += tz
+            bin_[i][0] += bx; bin_[i][1] += by; bin_[i][2] += bz
+
+    tangents, binormals = [], []
+    for i in range(n):
+        nx, ny, nz = normals[i] if i < len(normals) else (0.0, 0.0, 1.0)
+        tx, ty, tz = tan[i]
+        # Gram-Schmidt: T' = normalize(T - N*(N.T))
+        d = nx * tx + ny * ty + nz * tz
+        tx, ty, tz = tx - nx * d, ty - ny * d, tz - nz * d
+        ln = (tx * tx + ty * ty + tz * tz) ** 0.5
+        if ln < 1e-8:
+            # Degenerate: pick any axis perpendicular to N
+            if abs(nx) < 0.9:
+                tx, ty, tz = 1.0 - nx * nx, -nx * ny, -nx * nz
+            else:
+                tx, ty, tz = -ny * nx, 1.0 - ny * ny, -ny * nz
+            ln = (tx * tx + ty * ty + tz * tz) ** 0.5 or 1.0
+        tx, ty, tz = tx / ln, ty / ln, tz / ln
+        # Binormal = N x T, sign-corrected against the accumulated bitangent
+        bxc = ny * tz - nz * ty
+        byc = nz * tx - nx * tz
+        bzc = nx * ty - ny * tx
+        bax, bay, baz = bin_[i]
+        if bxc * bax + byc * bay + bzc * baz < 0.0:
+            bxc, byc, bzc = -bxc, -byc, -bzc
+        tangents.append((tx, ty, tz))
+        binormals.append((bxc, byc, bzc))
+    return tangents, binormals
 
 
 def _quat_from_matrix3(m):
@@ -243,7 +311,7 @@ class SkinBuilderV4:
     """Builds Max-style v4 skin IGBs (0103.igb structure)."""
 
     def build_skin(self, submeshes, skeleton_data, bms_palette,
-                   export_name='', actor_graph='ANIM'):
+                   export_name='', actor_graph='ANIM', use_normal_maps=False):
         """Build a complete v4 skin.
 
         Args:
@@ -261,6 +329,7 @@ class SkinBuilderV4:
         """
         self._obj_list = []      # ('obj', mo_idx, fields) | ('mem', tag, data, align)
         self._mode = actor_graph if actor_graph in ('ANIM', 'FULL') else 'ANIM'
+        self._use_normal_maps = bool(use_normal_maps)
 
         skin_name = export_name or skeleton_data.get('name', 'skin')
         bones = skeleton_data['bones']
@@ -268,14 +337,22 @@ class SkinBuilderV4:
         # ---- skeleton ----
         skeleton_idx = self._build_skeleton(skeleton_data, bms_palette)
 
-        # ---- texture chains (CLUT only — the proven-universal v4 path) ----
+        # ---- texture chains ----
+        # Default path: CLUT (the proven-universal v4 texture). Normal-map path
+        # (MUA only): DXT5 diffuse(unit0) + normal(unit1) + specular(unit2),
+        # built per-submesh below from the texture_levels/normal_levels/
+        # specular_levels the exporter prepared. DXT chains are cached by
+        # (name, unit) so shared textures aren't duplicated.
         tex_chain_map = {}
+        self._dxt_cache = {}
         outline_material = _default_outline_material()
         for sub in submeshes:
             if sub.get('is_outline'):
                 if sub.get('material'):
                     outline_material = sub['material']
                 continue
+            if self._use_normal_maps:
+                continue  # DXT binds built per-submesh in the unit loop
             key = sub.get('texture_name', '') or ''
             if key in tex_chain_map or not sub.get('clut_data'):
                 continue
@@ -283,6 +360,22 @@ class SkinBuilderV4:
             tex_chain_map[key] = self._build_clut_chain(
                 palette_data, index_data, cw, ch, key)
         default_chain = next(iter(tex_chain_map.values()), None)
+
+        def _dxt_binds(sub, base_name):
+            """[diffuse, normal, specular] bind idxs for a normal-mapped sub."""
+            specs = [(sub.get('texture_levels'), base_name, 0),
+                     (sub.get('normal_levels'), base_name + '_n', 1),
+                     (sub.get('specular_levels'), base_name + '_s', 2)]
+            binds = []
+            for levels, nm, unit in specs:
+                if not levels:
+                    continue
+                ck = (nm, unit)
+                if ck not in self._dxt_cache:
+                    self._dxt_cache[ck] = self._build_dxt_chain(levels, nm, unit)
+                if self._dxt_cache[ck] is not None:
+                    binds.append(self._dxt_cache[ck])
+            return binds
 
         # ---- shared attrs ----
         cull_idx = self._add_obj(MO_CULL_FACE, [
@@ -312,9 +405,15 @@ class SkinBuilderV4:
             segment_name = sub.get('segment_name', '') or ''
             mat = sub.get('material') or (
                 outline_material if is_outline else _default_material())
-            chain = (None if is_outline
-                     else tex_chain_map.get(sub.get('texture_name', '') or '',
-                                            default_chain))
+            if is_outline:
+                chain = None
+            elif self._use_normal_maps:
+                base = (sub.get('texture_name', '') or segment_name or skin_name)
+                binds = _dxt_binds(sub, base)
+                chain = binds or None
+            else:
+                chain = tex_chain_map.get(sub.get('texture_name', '') or '',
+                                          default_chain)
             if segment_name:
                 unit_name = (f'{segment_name}_outline' if is_outline
                              else segment_name)
@@ -479,6 +578,59 @@ class SkinBuilderV4:
             (5, 0, 'Int', 4)])
         return bind_idx
 
+    def _build_dxt_chain(self, levels, name, unit_id):
+        """DXT5 igImage + igTextureAttr + igTextureBindAttr (single base level).
+
+        Used by the normal-map path (units 0=diffuse, 1=normal, 2=specular),
+        which the 3ds Max MUA modder skins ship as DXT. Returns the bind idx,
+        or None if no level data. Mips omitted (base level renders fine;
+        avoids the v4 mip-list layout risk).
+        """
+        if not levels:
+            return None
+        comp_data, tw, th = levels[0]
+        stride = max(1, (tw + 3) // 4) * 16     # DXT5 block-row stride
+        pix_mb = self._add_mem(TAG_IMAGE_DATA, bytes(comp_data),
+                               align=ALIGN_IMAGE)
+        mip_idx = self._empty_list(MO_MIPMAP_LIST)
+        image_idx = self._add_obj(MO_IMAGE, [
+            (3, tw, 'UnsignedInt', 4),
+            (4, th, 'UnsignedInt', 4),
+            (5, 4, 'UnsignedInt', 4),
+            (6, 1, 'UnsignedInt', 4),
+            (7, 100, 'UnsignedInt', 4),
+            (8, 2, 'UnsignedInt', 4),
+            (9, 2, 'UnsignedInt', 4),
+            (10, 2, 'UnsignedInt', 4),
+            (11, 2, 'UnsignedInt', 4),
+            (12, 16, 'Enum', 4),             # pfmt DXT5
+            (13, len(comp_data), 'Int', 4),
+            (14, pix_mb, 'MemoryRef', 4),
+            (15, -1, 'MemoryRef', 4),
+            (16, 1, 'Bool', 1),
+            (17, 0, 'UnsignedInt', 4),
+            (18, -1, 'ObjectRef', 4),        # no clut for DXT
+            (19, 0, 'UnsignedInt', 4),
+            (20, stride, 'Int', 4),          # bytesPerRow (block stride)
+            (21, 1, 'Bool', 1),              # compressed
+            (22, 0, 'UnsignedInt', 4),
+            (23, name or '', 'String', 4)])
+        tex_attr_idx = self._add_obj(MO_TEXTURE_ATTR, [
+            (3, 1, 'Short', 2),
+            (4, 0, 'UnsignedInt', 4),
+            (5, 1, 'Enum', 4), (6, 1, 'Enum', 4),
+            (7, 1, 'Enum', 4), (8, 1, 'Enum', 4),
+            (10, 0, 'Enum', 4), (11, 0, 'Enum', 4),
+            (12, image_idx, 'ObjectRef', 4),
+            (13, 0, 'Bool', 1),
+            (14, -1, 'ObjectRef', 4),
+            (15, 1, 'Int', 4),
+            (16, mip_idx, 'ObjectRef', 4)])
+        return self._add_obj(MO_TEX_BIND, [
+            (3, 1, 'Short', 2),
+            (4, tex_attr_idx, 'ObjectRef', 4),
+            (5, int(unit_id), 'Int', 4)])
+
     def _build_render_state_attrs(self, mat_props):
         """Optional blend/alpha attrs from IGB Materials panel settings.
 
@@ -534,17 +686,35 @@ class SkinBuilderV4:
 
     # ---- geometry ----
 
-    def _build_vertex_array(self, mesh, has_uvs):
+    def _build_vertex_array(self, mesh, has_uvs, normal_mapped=False):
         n = len(mesh.positions)
+
+        # Normal mapping needs UVs to derive a tangent frame; fall back to the
+        # plain format if a normal-mapped mesh somehow lacks UVs.
+        normal_mapped = bool(normal_mapped and has_uvs and mesh.uvs)
 
         pos_data = bytearray(n * 12)
         for i, (x, y, z) in enumerate(mesh.positions):
             struct.pack_into('<fff', pos_data, i * 12, x, y, z)
         pos_mb = self._add_mem(TAG_VTX_STREAM, bytes(pos_data))
 
-        norm_data = bytearray(n * 12)
-        for i, (nx, ny, nz) in enumerate(mesh.normals):
-            struct.pack_into('<fff', norm_data, i * 12, nx, ny, nz)
+        tangents = binormals = None
+        if normal_mapped:
+            tangents, binormals = _compute_tangent_frame(
+                mesh.positions, mesh.normals, mesh.uvs, mesh.indices)
+            # slot 1 normal-frame: normal + tangent + binormal (36 bytes/vertex),
+            # matching the 3ds Max modder layout the engine loads.
+            norm_data = bytearray(n * 36)
+            for i in range(n):
+                nx, ny, nz = mesh.normals[i] if i < len(mesh.normals) else (0.0, 0.0, 1.0)
+                tx, ty, tz = tangents[i]
+                bx, by, bz = binormals[i]
+                struct.pack_into('<9f', norm_data, i * 36,
+                                 nx, ny, nz, tx, ty, tz, bx, by, bz)
+        else:
+            norm_data = bytearray(n * 12)
+            for i, (nx, ny, nz) in enumerate(mesh.normals):
+                struct.pack_into('<fff', norm_data, i * 12, nx, ny, nz)
         norm_mb = self._add_mem(TAG_VTX_STREAM, bytes(norm_data))
 
         uv_mb = -1
@@ -554,11 +724,24 @@ class SkinBuilderV4:
                 struct.pack_into('<ff', uv_data, i * 8, u, v)
             uv_mb = self._add_mem(TAG_VTX_STREAM, bytes(uv_data))
 
+        tan_mb = bin_mb = -1
+        if normal_mapped:
+            tan_data = bytearray(n * 12)
+            bin_data = bytearray(n * 12)
+            for i in range(n):
+                struct.pack_into('<fff', tan_data, i * 12, *tangents[i])
+                struct.pack_into('<fff', bin_data, i * 12, *binormals[i])
+            tan_mb = self._add_mem(TAG_VTX_STREAM, bytes(tan_data))
+            bin_mb = self._add_mem(TAG_VTX_STREAM, bytes(bin_data))
+
         slots = [0xFFFFFFFF] * VTX_FMT_SLOTS
         slots[0] = pos_mb
         slots[1] = norm_mb
         if uv_mb >= 0:
             slots[11] = uv_mb
+        if normal_mapped:
+            slots[VTX_SLOT_TANGENT] = tan_mb
+            slots[VTX_SLOT_BINORMAL] = bin_mb
         fmt_mb = self._add_mem(TAG_VA_FORMAT,
                                struct.pack('<' + 'I' * VTX_FMT_SLOTS, *slots))
 
@@ -574,7 +757,10 @@ class SkinBuilderV4:
             struct.pack_into('BBBB', b_data, i * 4, i0, i1, i2, i3)
         b_mb = self._add_mem(TAG_BLEND_IDX, bytes(b_data))
 
-        fmt = FMT_SKINNED_UV if uv_mb >= 0 else FMT_SKINNED
+        if normal_mapped:
+            fmt = FMT_NORMAL_MAPPED
+        else:
+            fmt = FMT_SKINNED_UV if uv_mb >= 0 else FMT_SKINNED
         return self._add_obj(MO_VERTEX_ARRAY_1_1, [
             (3, fmt_mb, 'MemoryRef', 4),
             (4, n, 'UnsignedInt', 4),
@@ -588,9 +774,25 @@ class SkinBuilderV4:
     def _build_unit(self, mesh, material, tex_bind_idx, is_outline,
                     palette_idx, cull_idx, light_idx, texstate_on_idx,
                     texstate_off_idx, vbs_idx, unit_name):
-        """group -> BMS -> AttrSet -> Geometry chain for one submesh."""
+        """group -> BMS -> AttrSet -> Geometry chain for one submesh.
+
+        tex_bind_idx may be a single bind idx (CLUT path) or a list of bind
+        idxs (normal-map path: [diffuse(unit0), normal(unit1), specular(unit2)]).
+        """
+        if isinstance(tex_bind_idx, (list, tuple)):
+            tex_binds = [b for b in tex_bind_idx if b is not None]
+        elif tex_bind_idx is not None:
+            tex_binds = [tex_bind_idx]
+        else:
+            tex_binds = []
+        # Normal mapping active when this textured unit carries a 2nd (normal)
+        # bind — emit the tangent-frame vertex format to match.
+        normal_mapped = (getattr(self, '_use_normal_maps', False)
+                         and not is_outline and len(tex_binds) >= 2)
+
         has_uvs = bool(mesh.uvs) and not is_outline
-        va_idx = self._build_vertex_array(mesh, has_uvs)
+        va_idx = self._build_vertex_array(mesh, has_uvs,
+                                          normal_mapped=normal_mapped)
 
         idx_data = bytearray(len(mesh.indices) * 2)
         for i, v in enumerate(mesh.indices):
@@ -628,7 +830,7 @@ class SkinBuilderV4:
         # 0103: main sets carry WHITE vertex color + texturing ON;
         # outline sets carry BLACK color + texturing OFF. The IGB Materials
         # panel can override color tint, lighting, cull face, blend, alpha.
-        textured = not is_outline and tex_bind_idx is not None
+        textured = not is_outline and len(tex_binds) > 0
         if textured:
             color_val = tuple(material.get('color_attr', (1.0, 1.0, 1.0, 1.0)))
         else:
@@ -651,8 +853,13 @@ class SkinBuilderV4:
                 (4, int(material['lighting_enabled']), 'Bool', 1)]))
 
         if textured:
-            attrs = ([cull_idx, color_idx, mat_idx] + extra
-                     + [tex_bind_idx, texstate_on_idx])
+            # Each texture bind is followed by a texturing-ON state — mirrors
+            # the (TextureBind, TextureState) pairing in 3ds Max skins. For
+            # normal maps this emits diffuse/normal/specular in unit order.
+            tex_pairs = []
+            for b in tex_binds:
+                tex_pairs += [b, texstate_on_idx]
+            attrs = [cull_idx, color_idx, mat_idx] + extra + tex_pairs
         else:
             attrs = ([cull_idx, light_idx, color_idx, mat_idx] + extra
                      + [texstate_off_idx])

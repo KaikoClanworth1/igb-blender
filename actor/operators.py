@@ -472,6 +472,50 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
         default='OFF',
     )
 
+    use_normal_maps: BoolProperty(
+        name="Use Normal Maps (MUA)",
+        description="Export normal + specular maps alongside the diffuse "
+                    "(MUA only, 3ds Max v4 format). Reads the Normal Map and "
+                    "Specular textures from each material and emits the "
+                    "tangent-frame vertex data MUA's shader needs. Requires "
+                    "Texture Format = DXT5 (MUA Only) and Skin Format = 3ds "
+                    "Max v4. XML2 has no normal maps and ignores this",
+        default=False,
+    )
+
+    normal_map_size: EnumProperty(
+        name="Normal Map Size",
+        description="Resize + recompress the normal/specular maps to keep the "
+                    "IGB small (the diffuse uses Texture Resolution above)",
+        items=[
+            ('0', "Keep Same Size", "Use each normal/specular map's source size"),
+            ('512', "512 x 512", "Cap normal/specular maps at 512px"),
+            ('256', "256 x 256", "Cap normal/specular maps at 256px"),
+        ],
+        default='0',
+    )
+
+    def _normal_maps_available(self):
+        """Normal maps need the MUA DXT5 + 3ds Max v4 path."""
+        return (self.actor_graph.startswith('V4')
+                and self.texture_format == 'dxt5_mua')
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "texture_format")
+        layout.prop(self, "texture_resolution")
+        layout.prop(self, "actor_graph")
+        layout.separator()
+        avail = self._normal_maps_available()
+        row = layout.row()
+        row.enabled = avail
+        row.prop(self, "use_normal_maps")
+        if not avail:
+            layout.label(text="Normal maps: set DXT5 (MUA) + 3ds Max v4",
+                         icon='INFO')
+        elif self.use_normal_maps:
+            layout.prop(self, "normal_map_size")
+
     @classmethod
     def poll(cls, context):
         props = context.scene.igb_actor
@@ -546,6 +590,11 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             igb_format = 'V6'
             graph_mode = self.actor_graph
 
+        try:
+            normal_map_size = int(self.normal_map_size)
+        except (TypeError, ValueError):
+            normal_map_size = 0
+
         success = export_skin(
             filepath=self.filepath,
             mesh_objs=mesh_objs,
@@ -556,6 +605,8 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             max_texture_size=max_texture_size,
             actor_graph=graph_mode,
             igb_format=igb_format,
+            use_normal_maps=self.use_normal_maps,
+            normal_map_size=normal_map_size,
         )
 
         return {'FINISHED'} if success else {'CANCELLED'}
@@ -912,6 +963,17 @@ class ACTOR_OT_setup_skin(Operator):
         max=1.5,
     )
 
+    full_fingers: BoolProperty(
+        name="Full Fingers (MUA)",
+        description="Build MUA's full 5-finger hand (Bip01_{L|R}_Finger0-4) "
+                    "instead of the reduced thumb+1 hand, mapping each source "
+                    "finger to its own bone. MUA only. NOTE: fingers only "
+                    "ANIMATE if the character uses a full-finger moveset "
+                    "(Storm/Ultron/Loki); on other movesets they stay at the "
+                    "(correct) rest pose. XML2 ignores this",
+        default=False,
+    )
+
     # --- Shared options ---
     auto_scale: BoolProperty(
         name="Auto Scale",
@@ -952,6 +1014,10 @@ class ACTOR_OT_setup_skin(Operator):
         layout.prop(self, "target_game")
         if self.target_game == 'MUA':
             layout.label(text="  +14 FX bones (Gun1, fx01-fx13)", icon='BONE_DATA')
+            layout.prop(self, "full_fingers")
+            if self.full_fingers:
+                layout.label(text="  Needs a full-finger moveset to animate",
+                             icon='INFO')
         layout.prop(self, "target_pose")
         layout.prop(self, "skeleton_mode")
         layout.prop(self, "align_pose")
@@ -977,7 +1043,8 @@ class ACTOR_OT_setup_skin(Operator):
                              target_game=self.target_game,
                              skeleton_mode=self.skeleton_mode,
                              align_pose=self.align_pose,
-                             character_size=self.character_size)
+                             character_size=self.character_size,
+                             full_fingers=self.full_fingers)
 
         if not result['success']:
             self.report({'ERROR'}, result['error'])

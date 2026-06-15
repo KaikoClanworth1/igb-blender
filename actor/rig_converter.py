@@ -112,22 +112,79 @@ MUA_BONE_NAMES = {entry[0] for entry in MUA_SKELETON}
 MUA_JOINT_COUNT = sum(1 for _, _, _, bm, _ in MUA_SKELETON if bm >= 0)  # = 32 (same as XML2)
 
 
-def get_skeleton_for_game(game: str):
+def _build_full_finger_skeleton():
+    """MUA skeleton with the reduced 2-finger hand replaced by the full
+    5-finger underscore-named hand (30 finger bones, Bip01_{side}_Finger{0-4}
+    _{0-2}) — the names MUA's full-finger movesets (Storm/Ultron/Loki) drive.
+
+    Built programmatically from MUA_SKELETON so indices + blend-matrix indices
+    stay consistent. MUA-only; gated behind the full_fingers option.
+    """
+    reduced = {"Bip01 L Finger0", "Bip01 L Finger01", "Bip01 L Finger1",
+               "Bip01 L Finger11", "Bip01 R Finger0", "Bip01 R Finger01",
+               "Bip01 R Finger1", "Bip01 R Finger11"}
+    idx_to_name = {e[1]: e[0] for e in MUA_SKELETON}
+    # (name, parent_name, was_deform, flags), dropping the reduced fingers
+    seq = []
+    for name, idx, parent_idx, bm, flags in MUA_SKELETON:
+        if name in reduced:
+            continue
+        parent_name = idx_to_name.get(parent_idx) if parent_idx >= 0 else None
+        seq.append((name, parent_name, bm >= 0, flags))
+    # insert the full finger bones right after each Hand
+    expanded = []
+    for entry in seq:
+        expanded.append(entry)
+        name = entry[0]
+        if name in ("Bip01 L Hand", "Bip01 R Hand"):
+            side = 'L' if ' L ' in name else 'R'
+            for col in range(5):           # 0=thumb .. 4=little
+                for s in range(3):         # 0=proximal,1=medial,2=distal
+                    fn = f'Bip01_{side}_Finger{col}_{s}'
+                    par = name if s == 0 else f'Bip01_{side}_Finger{col}_{s - 1}'
+                    expanded.append((fn, par, True, 0x02))
+    # re-index + assign blend-matrix indices to deforming bones in order
+    name_to_idx = {e[0]: i for i, e in enumerate(expanded)}
+    skel = []
+    bm = 0
+    for i, (name, parent_name, deform, flags) in enumerate(expanded):
+        parent_idx = name_to_idx.get(parent_name, -1) if parent_name else -1
+        bm_idx = -1
+        if deform:
+            bm_idx = bm
+            bm += 1
+        skel.append((name, i, parent_idx, bm_idx, flags))
+    return skel
+
+
+_MUA_FULL_FINGER_SKELETON = None
+
+
+def get_skeleton_for_game(game: str, full_fingers: bool = False):
     """Return the skeleton definition for the specified target game.
 
     Args:
         game: 'XML2' or 'MUA'
+        full_fingers: when True and game is MUA, return the full 5-finger
+            variant (30 finger bones) instead of the reduced 2-finger hand.
 
     Returns:
         List of (name, index, parent_idx, bm_idx, flags) tuples.
     """
+    global _MUA_FULL_FINGER_SKELETON
+    if full_fingers and game == 'MUA':
+        if _MUA_FULL_FINGER_SKELETON is None:
+            _MUA_FULL_FINGER_SKELETON = _build_full_finger_skeleton()
+        return _MUA_FULL_FINGER_SKELETON
     if game == 'MUA':
         return MUA_SKELETON
     return XML2_SKELETON
 
 
-def get_bone_names_for_game(game: str):
+def get_bone_names_for_game(game: str, full_fingers: bool = False):
     """Return set of bone names for the specified target game."""
+    if full_fingers and game == 'MUA':
+        return {e[0] for e in get_skeleton_for_game(game, full_fingers=True)}
     if game == 'MUA':
         return MUA_BONE_NAMES
     return XML2_BONE_NAMES
@@ -1201,8 +1258,20 @@ def chains_keys_for_side(chains, side):
     return {f for (s, f) in chains if s == side}
 
 
-def _build_finger_maps(armature_obj):
-    """Classify finger bones and map them to XML2's reduced finger rig.
+# Full-finger (MUA) target columns: thumb..little -> Finger0..Finger4.
+# Used when full_fingers is on; bone names use the underscore scheme
+# Bip01_{side}_Finger{col}_{seg} that MUA's full-finger movesets (Storm/Ultron/
+# Loki) drive.
+_FULL_FINGER_COL = {'thumb': 0, 'index': 1, 'middle': 2, 'ring': 3, 'little': 4}
+
+
+def _build_finger_maps(armature_obj, full_fingers=False):
+    """Classify finger bones and map them to the target finger rig.
+
+    Default (reduced) target = XML2/MUA's 2-chain hand: Finger0/Finger01 (thumb)
+    + Finger1/Finger11 (one combined finger). When full_fingers is True, targets
+    MUA's full 5-finger hand (Bip01_{side}_Finger{0-4}_{0-2}, underscore scheme)
+    — each source finger keeps its own column, no promotion/merge.
 
     XML2 has two chains per hand: Finger0/Finger01 (thumb) and
     Finger1/Finger11 (fingers). Mapping rules:
@@ -1286,6 +1355,34 @@ def _build_finger_maps(armature_obj):
             else:
                 segs = [1, 2, 3] + [4] * (n - 3)
 
+            hand = f'Bip01 {side} Hand'
+
+            # --- Full-finger (MUA) path: each finger keeps its own column ---
+            if full_fingers:
+                col = _FULL_FINGER_COL.get(finger)
+                if col is None:
+                    continue
+                for (bone, _hint), seg in zip(entries, segs):
+                    if seg == 0:
+                        merge[bone.name] = hand          # metacarpal -> Hand
+                    else:
+                        s = min(seg - 1, 2)              # 1/2/3 -> 0/1/2
+                        tname = f'Bip01_{side}_Finger{col}_{s}'
+                        if seg <= 3:
+                            rename[bone.name] = tname
+                        else:
+                            merge[bone.name] = tname     # extra tips -> distal
+                # duplicate-suffixed members handled by the shared block below
+                for dup_bone, stripped in dup_members.get((side, finger), ()):
+                    target = None
+                    for primary, _h in entries:
+                        if _normalize_bone_name(primary.name).lower() == stripped:
+                            target = (rename.get(primary.name)
+                                      or merge.get(primary.name))
+                            break
+                    merge[dup_bone.name] = target or f'Bip01_{side}_Finger{col}_0'
+                continue
+
             kind = ('thumb' if finger == 'thumb'
                     else 'main' if finger == main
                     else 'other')
@@ -1294,7 +1391,6 @@ def _build_finger_maps(armature_obj):
             f01 = f'Bip01 {side} Finger01'
             f1 = f'Bip01 {side} Finger1'
             f11 = f'Bip01 {side} Finger11'
-            hand = f'Bip01 {side} Hand'
 
             for (bone, _hint), seg in zip(entries, segs):
                 if seg == 0:
@@ -1336,8 +1432,12 @@ def _build_finger_maps(armature_obj):
 
     # Duplicate members whose entire primary chain is absent
     for (side, finger), dups in dup_members.items():
-        base = (f'Bip01 {side} Finger0' if finger == 'thumb'
-                else f'Bip01 {side} Finger1')
+        if full_fingers:
+            col = _FULL_FINGER_COL.get(finger, 0)
+            base = f'Bip01_{side}_Finger{col}_0'
+        else:
+            base = (f'Bip01 {side} Finger0' if finger == 'thumb'
+                    else f'Bip01 {side} Finger1')
         for dup_bone, _stripped in dups:
             if dup_bone.name not in merge and dup_bone.name not in rename:
                 merge[dup_bone.name] = base
@@ -1345,7 +1445,8 @@ def _build_finger_maps(armature_obj):
     return rename, merge
 
 
-def build_rename_map(armature_obj, profile=None, target_game='XML2'):
+def build_rename_map(armature_obj, profile=None, target_game='XML2',
+                     full_fingers=False):
     """Build a mapping from current bone names to target skeleton bone names.
 
     Three passes:
@@ -1364,10 +1465,11 @@ def build_rename_map(armature_obj, profile=None, target_game='XML2'):
         Dict mapping old_name -> new_name for bones that can be mapped.
     """
     rename_map = {}
-    valid_names = get_bone_names_for_game(target_game)
+    valid_names = get_bone_names_for_game(target_game, full_fingers=full_fingers)
 
     spine_rename, spine_extras = _assign_spine_chain(armature_obj)
-    finger_rename, finger_merge = _build_finger_maps(armature_obj)
+    finger_rename, finger_merge = _build_finger_maps(
+        armature_obj, full_fingers=full_fingers)
     demotions = _conflict_demotions(armature_obj)
 
     # Spine/finger-classified and conflict-demoted bones are settled —
@@ -1405,7 +1507,7 @@ def build_rename_map(armature_obj, profile=None, target_game='XML2'):
 
 
 def build_merge_map(armature_obj, profile=None, rename_map=None,
-                    target_game='XML2'):
+                    target_game='XML2', full_fingers=False):
     """Build a mapping for bones whose weights should merge into a target.
 
     Resolution order per bone:
@@ -1426,14 +1528,16 @@ def build_merge_map(armature_obj, profile=None, rename_map=None,
         Dict mapping old_bone_name -> xml2_target_name for weight merging.
     """
     if rename_map is None:
-        rename_map = build_rename_map(armature_obj, target_game=target_game)
+        rename_map = build_rename_map(armature_obj, target_game=target_game,
+                                      full_fingers=full_fingers)
 
     merge_map = {}
 
     # 1. Chain-derived merges (spine extras + non-promoted fingers +
     # conflict-demoted helper bones like Nintendo's Knee_L)
     spine_rename, spine_extras = _assign_spine_chain(armature_obj)
-    finger_rename, finger_merge = _build_finger_maps(armature_obj)
+    finger_rename, finger_merge = _build_finger_maps(
+        armature_obj, full_fingers=full_fingers)
     demotions = _conflict_demotions(armature_obj)
     for source, target in (list(spine_extras.items())
                            + list(finger_merge.items())
@@ -2420,7 +2524,7 @@ def _align_thumbs_to_native(armature_obj, target_game='XML2'):
 def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.0,
                 target_pose='T_POSE', target_game='XML2',
                 skeleton_mode='NATIVE', align_pose=False,
-                character_size=1.0):
+                character_size=1.0, full_fingers=False):
     """Convert an armature from Unity/Mixamo naming to XML2/MUA Bip01 convention.
 
     This is the main entry point. It:
@@ -2483,10 +2587,18 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     else:
         profile = profile.lower()
 
+    # Full fingers is a MUA-only feature (targets the 5-finger underscore hand
+    # that MUA's Storm/Ultron/Loki movesets drive). Stored on the armature so
+    # the skeleton-export-data builders below pick the matching variant.
+    full_fingers = bool(full_fingers and target_game == 'MUA')
+    armature_obj["igb_full_fingers"] = full_fingers
+
     # ---- 2. Build rename and merge maps (universal normalization) ----
-    rename_map = build_rename_map(armature_obj, target_game=target_game)
+    rename_map = build_rename_map(armature_obj, target_game=target_game,
+                                  full_fingers=full_fingers)
     merge_map = build_merge_map(armature_obj, rename_map=rename_map,
-                                target_game=target_game)
+                                target_game=target_game,
+                                full_fingers=full_fingers)
 
     # ---- Console diagnostics (check the System Console for this) ----
     skinned_meshes = _get_skinned_meshes(armature_obj)
@@ -2546,7 +2658,8 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     _rename_vertex_groups(armature_obj, rename_map)
 
     # Also remove vertex groups for bones being deleted (not in rename or merge)
-    target_skeleton = get_skeleton_for_game(target_game)
+    target_skeleton = get_skeleton_for_game(target_game,
+                                            full_fingers=full_fingers)
     all_target_names = {entry[0] for entry in target_skeleton if entry[0]}
     bones_to_remove = set()
     for bone in armature_obj.data.bones:
@@ -2781,7 +2894,14 @@ def convert_rig(armature_obj, profile='AUTO', auto_scale=True, target_height=68.
     # horizontal — silently undoing the A-pose (the long-standing "A-pose
     # setup does nothing" bug). A_POSE therefore always keeps the model's
     # own skeleton/proportions (KEEP behaviour), regardless of skeleton_mode.
-    if skeleton_mode == 'NATIVE' and target_pose == 'T_POSE':
+    if full_fingers:
+        # Native-fit targets only the reduced biped (no full-finger positions),
+        # so it would move the Hand but leave the 5-finger bones behind, tearing
+        # the wrist. Keep the source's self-consistent hand+body proportions;
+        # MUA's combiner retargets animation onto the exported skeleton anyway.
+        print("[IGB Rig Converter] Full fingers (MUA): skipping native-biped "
+              "fit to preserve the 5-finger hand geometry")
+    elif skeleton_mode == 'NATIVE' and target_pose == 'T_POSE':
         _fit_skeleton_to_native(armature_obj, target_game=target_game)
     elif skeleton_mode == 'NATIVE' and target_pose == 'A_POSE':
         print("[IGB Rig Converter] A-pose target: skipping native-biped fit "
@@ -2897,8 +3017,10 @@ def setup_bip01_rig(armature_obj, auto_scale=True, target_height=68.0,
     avg_bone_len = (sum(bone_lengths) / len(bone_lengths)
                     if bone_lengths else 0.05)
 
-    # Create missing target skeleton bones (XML2 or MUA)
-    skeleton = get_skeleton_for_game(target_game)
+    # Create missing target skeleton bones (XML2 or MUA; full-finger variant
+    # when the conversion flagged it on the armature)
+    skeleton = get_skeleton_for_game(
+        target_game, full_fingers=armature_obj.get('igb_full_fingers', False))
     current_names = {eb.name for eb in edit_bones}
     for name, idx, parent_idx, bm_idx, flags in skeleton:
         display_name = name if name else "Bone_000"
@@ -3915,7 +4037,8 @@ def _store_skeleton_properties(armature_obj, inv_matrices, translations,
     """
     import bpy
 
-    skeleton = get_skeleton_for_game(target_game)
+    skeleton = get_skeleton_for_game(
+        target_game, full_fingers=armature_obj.get('igb_full_fingers', False))
     joint_count = sum(1 for _, _, _, bm, _ in skeleton if bm >= 0)
 
     # Skeleton-level properties

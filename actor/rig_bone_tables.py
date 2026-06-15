@@ -558,6 +558,11 @@ _SEG_ALT = rf'\d{{1,2}}|{_SEGWORD_ALT}|[a-c]'
 # Optional decorations: leading 'j'/'h'/'b'/'def' prefixes, 'bip'/'hand'/'f'
 # joiners, trailing '_001'-style numeric suffix (stripped before matching).
 _FINGER_PATTERNS = [
+    # --- BG3/Larian: arm_left_finger_1a (1-based finger1=thumb..5=little,
+    #     a/b/c segments). Requires the 'arm_' prefix so it can't shadow the
+    #     0-based Max scheme below.
+    re.compile(
+        rf'^arm_(?P<side>{_SIDE_ALT})_finger_?(?P<fnum1>[1-5])(?P<seg>[a-c])?$'),
     # --- side prefix, word finger: l_thumb_02 / lefthandindex1 / j_bip_l_thumb1
     re.compile(
         rf'^(?:[jhbf]_|def_)?(?:bip_)?(?P<side>{_SIDE_ALT})_?(?:hand_?|f_?)?'
