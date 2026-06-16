@@ -158,6 +158,46 @@ def _auto_detect_igz_data_dir(filepath):
     return ""
 
 
+def _wire_vertex_colors_to_material(mat, mesh_obj):
+    """Drive a material's Base Color from the mesh's vertex Color attribute.
+
+    Only acts when the material has NO diffuse texture bound (base input
+    unlinked) and the mesh has a color attribute — i.e. vertex-colored,
+    untextured geometry like MUA PC UI backgrounds. Without this the mesh
+    renders flat gray and the vertex colors are invisible.
+    """
+    if mat is None or not mat.use_nodes or mat.node_tree is None:
+        return
+    me = getattr(mesh_obj, 'data', None)
+    cattrs = getattr(me, 'color_attributes', None) if me else None
+    if not cattrs or len(cattrs) == 0:
+        return
+    color_name = cattrs[0].name
+    nt = mat.node_tree
+    shader = next((n for n in nt.nodes
+                   if n.type in ('GROUP', 'BSDF_PRINCIPLED')), None)
+    if shader is None:
+        return
+    # Prefer the IGB Material group's dedicated "Vertex Color" input — it
+    # multiplies into the base color (faithful: tex × diffuse × tint × vcol),
+    # so it's correct even when a texture is also bound. Fall back to Base
+    # Color for a plain Principled material, but only when untextured.
+    target = shader.inputs.get('Vertex Color')
+    if target is None:
+        target = shader.inputs.get('Base Color')
+        if target is None or target.is_linked:
+            return
+    elif target.is_linked:
+        return
+    try:
+        vc = nt.nodes.new('ShaderNodeVertexColor')
+    except RuntimeError:
+        return
+    vc.layer_name = color_name
+    vc.location = (-700, 250)
+    nt.links.new(vc.outputs['Color'], target)
+
+
 def _finalize_imported_objects(collection):
     """Make single user on object data and apply all transforms.
 
@@ -394,7 +434,13 @@ def import_igb(context, filepath, operator=None):
                     diffuse_tex = None
                     for pt in parsed_textures:
                         uid = getattr(pt, 'unit_id', 0) or 0
-                        role = _UNIT_TO_ROLE.get(uid, TEX_ROLE_DIFFUSE)
+                        # Only units 0/1/2 are BSDF roles. Unknown units
+                        # (3=sphere/env, 4=mask, 5=gloss on MUA v8) must be
+                        # SKIPPED — defaulting them to diffuse let the black
+                        # gloss map overwrite the real _d diffuse.
+                        role = _UNIT_TO_ROLE.get(uid)
+                        if role is None:
+                            continue
                         if pt.image is not None:
                             texture_role_map[role] = pt.image
                         if uid == 0:
@@ -421,6 +467,12 @@ def import_igb(context, filepath, operator=None):
                 if bl_material is not None:
                     obj.data.materials.append(bl_material)
                     materials_created.add(bl_material.name)
+                    # Untextured, vertex-colored geometry (e.g. MUA PC UI
+                    # backgrounds like convo_background_select) would render
+                    # flat gray otherwise — drive Base Color from the imported
+                    # vertex Color attribute when the material has no texture.
+                    if geom.has_colors:
+                        _wire_vertex_colors_to_material(bl_material, obj)
 
         collection.objects.link(obj)
         created_count += 1

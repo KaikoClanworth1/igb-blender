@@ -476,11 +476,10 @@ def _apply_extra_state(mat, bsdf, extra_state, nodes, links, blend_decision):
         mat["igb_color_g"] = color[1]
         mat["igb_color_b"] = color[2]
         mat["igb_color_a"] = color[3]
-        # If not white, insert a Multiply node for visual feedback
-        is_white = (abs(color[0] - 1.0) < 0.001 and abs(color[1] - 1.0) < 0.001
-                    and abs(color[2] - 1.0) < 0.001)
-        if not is_white:
-            _insert_color_multiply(mat, bsdf, color, nodes, links)
+        # NOTE: the color tint is applied by the IGB Material node group's
+        # "Color Tint" socket (Base Color = Tex × Diffuse × Tint × VertexColor),
+        # so the legacy _insert_color_multiply node is intentionally NOT added
+        # here — adding it would double-apply the tint.
         # If color alpha < 1.0 and blend is active, set BSDF alpha
         if color[3] < 0.999 and blend_decision != 'OPAQUE':
             bsdf.inputs['Alpha'].default_value = color[3]
@@ -895,7 +894,13 @@ def _get_or_create_blender_image(parsed_image, profile=None, is_normal_map=False
     Returns:
         bpy.types.Image or None
     """
-    swap_rb = profile is not None and profile.texture.swap_rb
+    # MUA PC stores DXT color endpoints as BGR565 (R/B swapped vs XML2), so the
+    # profile sets swap_rb to correct DXT decode. But CLUT palettes are RGBA on
+    # EVERY platform (igClut pfmt 7 = RGBA_8888_32) — swapping them tints PC UI
+    # textures wrong (e.g. convo_background), which is why the same CLUT file
+    # renders fine on console (swap_rb=False) but wrong on PC. Only swap DXT.
+    swap_rb = (profile is not None and profile.texture.swap_rb
+               and not parsed_image.is_indexed)
 
     # Determine cache key: prefer explicit cache_key (file path for IGZ),
     # fall back to source object offset (fine for IGB where objects are in one file)

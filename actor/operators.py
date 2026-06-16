@@ -495,6 +495,19 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
         default='0',
     )
 
+    mannequin_mode: BoolProperty(
+        name="MUA Animated Mannequin",
+        description="Export a v6 skinned actor for the MUA character-select "
+                    "screen. The mannequin is NOT animated by the file — the "
+                    "MUA menu plays an idle on any skinned actor it finds at "
+                    "ui/models/mannequin/<id>.igb, keyed by the character slot "
+                    "<id>. (Verified: the stock animated mannequins ship an "
+                    "EMPTY animation list; nothing is embedded.) Forces v6 "
+                    "Native + no combiner so it loads cleanly",
+        default=False,
+        options={'HIDDEN'},
+    )
+
     def _normal_maps_available(self):
         """Normal maps need the MUA DXT5 + 3ds Max v4 path."""
         return (self.actor_graph.startswith('V4')
@@ -504,6 +517,17 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
         layout = self.layout
         layout.prop(self, "texture_format")
         layout.prop(self, "texture_resolution")
+        if self.mannequin_mode:
+            # The actor_graph/normal-map knobs are forced/irrelevant here;
+            # show placement guidance instead (the only thing that matters).
+            box = layout.box()
+            box.label(text="MUA Animated Mannequin", icon='ARMATURE_DATA')
+            box.label(text="Save as <id>.igb (id = a character slot)",
+                      icon='FILE_TICK')
+            box.label(text="into  ui/models/mannequin/")
+            box.label(text="The MUA menu supplies the idle automatically.",
+                      icon='INFO')
+            return
         layout.prop(self, "actor_graph")
         layout.separator()
         avail = self._normal_maps_available()
@@ -590,6 +614,20 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             igb_format = 'V6'
             graph_mode = self.actor_graph
 
+        # Mannequin export is just a bare v6 skinned actor — the MUA menu
+        # animates it at runtime (no embedded animation; verified the stock
+        # mannequins ship an empty igAnimationList). Force the proven layout
+        # regardless of how the dialog was left, and never emit a combiner.
+        if self.mannequin_mode:
+            igb_format = 'V6'
+            graph_mode = 'OFF'
+            use_nm = False
+            self.report({'INFO'},
+                        "Mannequin: save as <id>.igb in ui/models/mannequin/ "
+                        "(id = character slot). The menu plays the idle.")
+        else:
+            use_nm = self.use_normal_maps
+
         try:
             normal_map_size = int(self.normal_map_size)
         except (TypeError, ValueError):
@@ -605,7 +643,7 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             max_texture_size=max_texture_size,
             actor_graph=graph_mode,
             igb_format=igb_format,
-            use_normal_maps=self.use_normal_maps,
+            use_normal_maps=use_nm,
             normal_map_size=normal_map_size,
         )
 
@@ -623,7 +661,15 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             if source_path and os.path.exists(source_path):
                 dirname = os.path.dirname(source_path)
                 basename = os.path.splitext(os.path.basename(source_path))[0]
-                self.filepath = os.path.join(dirname, f"{basename}_export.igb")
+                if self.mannequin_mode:
+                    # The internal igSkin/database name derives from the
+                    # filename, and the engine keys the idle on <id>.igb — so
+                    # offer a clean <id>.igb (no _export suffix) for the user
+                    # to rename to the target character slot.
+                    self.filepath = os.path.join(dirname, f"{basename}.igb")
+                else:
+                    self.filepath = os.path.join(dirname,
+                                                 f"{basename}_export.igb")
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 

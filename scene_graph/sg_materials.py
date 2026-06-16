@@ -297,7 +297,12 @@ def extract_texture_bind(reader, texbind_obj, profile=None):
     for slot, val, fi in texbind_obj._raw_fields:
         if slot == 4 and fi.short_name == b"ObjectRef" and val != -1:
             texture_attr_ref = val
-        elif slot == 5 and fi.short_name == b"Int":
+        elif fi.short_name == b"Int":
+            # _unitID — igTextureBindAttr has exactly one Int field, but its
+            # slot number shifts across versions (v8 MUA next-gen puts it
+            # somewhere other than 5). Hardcoding slot==5 left unit_id=None on
+            # v8 skins, so every texture defaulted to unit 0 (diffuse) and the
+            # last bind (the black gloss map) clobbered the real _d diffuse.
             tex.unit_id = val
 
     if texture_attr_ref is None:

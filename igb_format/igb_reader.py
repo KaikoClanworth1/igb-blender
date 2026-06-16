@@ -45,6 +45,11 @@ class IGBReader:
         self.name_pool = []     # v8+ name pool (class/string names)
         self.back_refs = {}     # tracks which objects reference which
         self._obj_list_data = set()  # indices that are igObjectList data blocks
+        # Opt-in: record absolute file byte offset of each object field's data
+        # (keyed by (obj_index, slot)). Used by the team-menu editor to patch
+        # transform matrices in place. Off by default (zero overhead).
+        self.track_field_offsets = False
+        self.field_offsets = {}
 
     @property
     def slot_offset(self):
@@ -433,6 +438,11 @@ class IGBReader:
                 obj.fields_by_slot[slot] = val
                 obj.fields_by_name[short_name] = val
                 obj._raw_fields.append((slot, val, fi))
+
+                if self.track_field_offsets:
+                    # Absolute file offset of this field's data:
+                    #   obj buffer start + entry start + 8-byte entry header
+                    self.field_offsets[(i, slot)] = pos + buf_offset + 8 + data_offset
 
                 # Advance with 4-byte alignment
                 data_offset += (actual_size + 3) & ~3

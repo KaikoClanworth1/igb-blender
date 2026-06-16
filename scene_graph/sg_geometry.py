@@ -919,7 +919,9 @@ def _extract_v2_component_data(reader, geom, vdata_items, endian, profile):
         is_compound = (
             data_list_obj.is_type(b"igVec2fList") or
             data_list_obj.is_type(b"igVec3fList") or
-            data_list_obj.is_type(b"igVec4fList")
+            data_list_obj.is_type(b"igVec4fList") or
+            data_list_obj.is_type(b"igVec4ucList") or
+            data_list_obj.is_type(b"igVec3ucList")
         )
         if is_compound:
             stride = elem_bytes
@@ -963,6 +965,24 @@ def _extract_v2_component_data(reader, geom, vdata_items, endian, profile):
                     if off + 16 <= len(data):
                         r, g, b, a = struct.unpack_from(endian + "ffff", data, off)
                         geom.colors.append((r, g, b, a))
+            elif data_list_obj.is_type(b"igVec4ucList"):
+                # 4 unsigned bytes per vertex = R,G,B,A (MUA PC UI vertex colors,
+                # e.g. convo_background_select). Without this branch the colors
+                # were dropped and the geometry imported blank/gray.
+                for i in range(num_verts):
+                    off = i * stride
+                    if off + 4 <= len(data):
+                        r, g, b, a = struct.unpack_from("BBBB", data, off)
+                        geom.colors.append((r / 255.0, g / 255.0,
+                                            b / 255.0, a / 255.0))
+            elif data_list_obj.is_type(b"igVec3ucList"):
+                # 3 unsigned bytes per vertex = R,G,B (alpha defaults to opaque)
+                for i in range(num_verts):
+                    off = i * stride
+                    if off + 3 <= len(data):
+                        r, g, b = struct.unpack_from("BBB", data, off)
+                        geom.colors.append((r / 255.0, g / 255.0,
+                                            b / 255.0, 1.0))
 
         elif comp_type == VCOMP_WEIGHT:
             if data_list_obj.is_type(b"igFloatList"):

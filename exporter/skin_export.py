@@ -302,6 +302,14 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
     # 0601.igb uses "0601" for igSkin name, geometry names, etc.)
     export_name = os.path.splitext(os.path.basename(filepath))[0]
 
+    # The igSkeleton must be NAMED. Game actors sometimes ship an unnamed
+    # skeleton (loads fine via herostat), but every working MUA mannequin has
+    # a "<id>_skel" name — and the character-select viewer appears to need it
+    # to set up the skinned actor. Synthesize one from the file id when the
+    # imported skeleton carried no name, matching the vanilla convention.
+    if skeleton_data and not skeleton_data.get('name'):
+        skeleton_data['name'] = f"{export_name}_skel"
+
     if igb_format == 'V4':
         from .skin_builder_v4 import SkinBuilderV4
         builder = SkinBuilderV4()

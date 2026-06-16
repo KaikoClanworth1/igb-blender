@@ -37,10 +37,14 @@ _NODE_GROUP_NAME = ".IGB Material"
 
 _INPUT_DEFS = [
     # ── Texture Inputs (from Image Texture nodes) ──
-    ("Base Texture",     "Color",  (0.8, 0.8, 0.8, 1.0), None, None),
+    # Base Texture defaults to WHITE so the final color = Diffuse when there is
+    # no texture bound (Base Color = Base Texture × Diffuse × Tint × VertexColor).
+    ("Base Texture",     "Color",  (1.0, 1.0, 1.0, 1.0), None, None),
     ("Texture Alpha",    "Float",  1.0,   0.0, 1.0),
     ("Normal",           "Vector", (0.0, 0.0, 0.0), None, None),
     ("Specular Texture", "Float",  0.0,   0.0, 1.0),
+    # Per-vertex color (igVec4ucList / igColorAttr); white = no tint.
+    ("Vertex Color",     "Color",  (1.0, 1.0, 1.0, 1.0), None, None),
 
     # ── Material Colors (igMaterialAttr) ──
     ("Diffuse",          "Color",  (1.0, 1.0, 1.0, 1.0), None, None),
@@ -138,14 +142,18 @@ def get_or_create_igb_node_group():
         # Version check — must have Shader output (v3 architecture)
         existing_outputs = {item.name for item in ng.interface.items_tree
                            if item.item_type == 'SOCKET' and item.in_out == 'OUTPUT'}
-        if 'Shader' not in existing_outputs:
-            # Old version — recreate
+        existing_inputs = {item.name for item in ng.interface.items_tree
+                           if item.item_type == 'SOCKET' and item.in_out == 'INPUT'}
+        # Recreate when the OUTPUT changed (pre-v3) OR the internal wiring
+        # changed. 'Vertex Color' marks the v4 base-color pipeline
+        # (Base Texture × Diffuse × Color Tint × Vertex Color); without it the
+        # group is the old "Base Texture only" wiring and just adding the input
+        # would leave it unwired — so rebuild from scratch.
+        if 'Shader' not in existing_outputs or 'Vertex Color' not in existing_inputs:
             bpy.data.node_groups.remove(ng)
             ng = None
         else:
             # Check for missing inputs (forward compat)
-            existing_inputs = {item.name for item in ng.interface.items_tree
-                               if item.item_type == 'SOCKET' and item.in_out == 'INPUT'}
             for name, stype, default, mn, mx in _INPUT_DEFS:
                 if name not in existing_inputs:
                     _add_input(ng, name, stype, default, mn, mx)
@@ -504,11 +512,43 @@ def _build_internal_nodes(ng):
     # Wire BSDF output → Group Output Shader
     links.new(bsdf.outputs['BSDF'], go.inputs['Shader'])
 
-    # ── Base Texture → Base Color ──
-    links.new(gi.outputs['Base Texture'], bsdf.inputs['Base Color'])
+    # ── Base Color = Base Texture × Diffuse × Color Tint × Vertex Color ──
+    # Faithful fixed-function combine. Base Texture / Color Tint / Vertex Color
+    # all default to WHITE, so:
+    #   • textured mesh      → texture × diffuse(usually white) = texture
+    #   • untextured colored → white × diffuse × tint × vcol = the real color
+    # This is why color-driven geometry (UI backgrounds, igColorAttr/material
+    # diffuse, vertex colors) now renders correctly instead of flat gray.
+    # VectorMath MULTIPLY is used (component-wise RGB) for version stability;
+    # alpha is combined separately below.
+    cm1 = ng.nodes.new('ShaderNodeVectorMath')
+    cm1.operation = 'MULTIPLY'; cm1.location = (-350, 250); cm1.label = "Tex x Diffuse"
+    links.new(gi.outputs['Base Texture'], cm1.inputs[0])
+    links.new(gi.outputs['Diffuse'], cm1.inputs[1])
 
-    # ── Texture Alpha → Alpha ──
-    links.new(gi.outputs['Texture Alpha'], bsdf.inputs['Alpha'])
+    cm2 = ng.nodes.new('ShaderNodeVectorMath')
+    cm2.operation = 'MULTIPLY'; cm2.location = (-200, 250); cm2.label = "x Color Tint"
+    links.new(cm1.outputs['Vector'], cm2.inputs[0])
+    links.new(gi.outputs['Color Tint'], cm2.inputs[1])
+
+    cm3 = ng.nodes.new('ShaderNodeVectorMath')
+    cm3.operation = 'MULTIPLY'; cm3.location = (-50, 250); cm3.label = "x Vertex Color"
+    cm3.name = "BaseColorMix"
+    links.new(cm2.outputs['Vector'], cm3.inputs[0])
+    links.new(gi.outputs['Vertex Color'], cm3.inputs[1])
+    links.new(cm3.outputs['Vector'], bsdf.inputs['Base Color'])
+
+    # ── Alpha = Texture Alpha × Diffuse Alpha × Color Tint Alpha ──
+    am1 = ng.nodes.new('ShaderNodeMath')
+    am1.operation = 'MULTIPLY'; am1.location = (-200, 100)
+    links.new(gi.outputs['Texture Alpha'], am1.inputs[0])
+    links.new(gi.outputs['Diffuse Alpha'], am1.inputs[1])
+
+    am2 = ng.nodes.new('ShaderNodeMath')
+    am2.operation = 'MULTIPLY'; am2.location = (-50, 100)
+    links.new(am1.outputs[0], am2.inputs[0])
+    links.new(gi.outputs['Color Tint Alpha'], am2.inputs[1])
+    links.new(am2.outputs[0], bsdf.inputs['Alpha'])
 
     # ── Normal → Normal ──
     links.new(gi.outputs['Normal'], bsdf.inputs['Normal'])

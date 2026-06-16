@@ -1481,68 +1481,66 @@ class SkinBuilder:
         """
         attrs = []
 
-        blend_on = bool(mat_props.get('blend_enabled', False))
-        alpha_on = bool(mat_props.get('alpha_test_enabled', False))
+        # Every vanilla game skin — and every working MUA mannequin — carries
+        # ALL SIX of these render-state attrs in its attr set (blend, blend
+        # function, alpha state, alpha function, lighting, cull face), in this
+        # exact order. Without them the MUA character-select viewer renders the
+        # skin INVISIBLY (no cull/lighting/blend state to draw with); in-game
+        # herostat actors happen to be more forgiving, which hid the gap.
+        # The actor importer doesn't capture these states, so mat_props is
+        # usually empty on re-export — emit the vanilla opaque-character
+        # defaults, overridden by any material-stored values from import.
+        blend_on = bool(mat_props.get('blend_enabled', True))
+        alpha_on = bool(mat_props.get('alpha_test_enabled', True))
+        lighting_on = bool(mat_props.get('lighting_enabled', True))
+        cull_on = bool(mat_props.get('cull_face_enabled', True))
 
-        # Blend state — emit when blending is on, or when alpha is on
-        # with an explicit blend_enabled=False (cutout pattern)
-        if blend_on or (alpha_on and 'blend_enabled' in mat_props):
-            blend_state_idx = self._add_obj(MO_BLEND_STATE_ATTR, [
-                (2, 0, 'Short', 2),
-                (4, int(blend_on), 'Bool', 1),
-            ])
-            attrs.append(blend_state_idx)
+        # Blend state
+        attrs.append(self._add_obj(MO_BLEND_STATE_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, int(blend_on), 'Bool', 1),
+        ]))
 
-        # Blend function — only when blending is actually on
-        if blend_on and mat_props.get('blend_src') is not None:
-            blend_func_idx = self._add_obj(MO_BLEND_FUNCTION_ATTR, [
-                (2, 0, 'Short', 2),
-                (4, mat_props.get('blend_src', 4), 'Enum', 4),   # SRC_ALPHA
-                (5, mat_props.get('blend_dst', 5), 'Enum', 4),   # ONE_MINUS_SRC_ALPHA
-                (6, 0, 'Enum', 4),
-                (7, -1, 'ObjectRef', 4),
-                (8, 0, 'UnsignedChar', 1),
-                (9, 0, 'Short', 2),
-                (11, 0, 'Enum', 4),
-                (12, 0, 'Enum', 4),
-                (13, 0, 'Enum', 4),
-                (14, 0, 'Enum', 4),
-            ])
-            attrs.append(blend_func_idx)
+        # Blend function (SRC_ALPHA / ONE_MINUS_SRC_ALPHA)
+        attrs.append(self._add_obj(MO_BLEND_FUNCTION_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, mat_props.get('blend_src', 4), 'Enum', 4),
+            (5, mat_props.get('blend_dst', 5), 'Enum', 4),
+            (6, 0, 'Enum', 4),
+            (7, -1, 'ObjectRef', 4),
+            (8, 0, 'UnsignedChar', 1),
+            (9, 0, 'Short', 2),
+            (11, 0, 'Enum', 4),
+            (12, 0, 'Enum', 4),
+            (13, 0, 'Enum', 4),
+            (14, 0, 'Enum', 4),
+        ]))
 
-        # Alpha state — only when alpha test is enabled
-        if alpha_on:
-            alpha_state_idx = self._add_obj(MO_ALPHA_STATE_ATTR, [
-                (2, 0, 'Short', 2),
-                (4, 1, 'Bool', 1),
-            ])
-            attrs.append(alpha_state_idx)
+        # Alpha state
+        attrs.append(self._add_obj(MO_ALPHA_STATE_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, int(alpha_on), 'Bool', 1),
+        ]))
 
-        # Alpha function — only when alpha test is on
-        if alpha_on and mat_props.get('alpha_func') is not None:
-            alpha_func_idx = self._add_obj(MO_ALPHA_FUNCTION_ATTR, [
-                (2, 0, 'Short', 2),
-                (4, mat_props.get('alpha_func', 6), 'Enum', 4),
-                (5, mat_props.get('alpha_ref', 0.5), 'Float', 4),
-            ])
-            attrs.append(alpha_func_idx)
+        # Alpha function (GEQUAL, ref 0.5)
+        attrs.append(self._add_obj(MO_ALPHA_FUNCTION_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, mat_props.get('alpha_func', 6), 'Enum', 4),
+            (5, mat_props.get('alpha_ref', 0.5), 'Float', 4),
+        ]))
 
         # Lighting state
-        if 'lighting_enabled' in mat_props:
-            lighting_idx = self._add_obj(MO_LIGHTING_STATE_ATTR, [
-                (2, 0, 'Short', 2),
-                (4, int(mat_props['lighting_enabled']), 'Bool', 1),
-            ])
-            attrs.append(lighting_idx)
+        attrs.append(self._add_obj(MO_LIGHTING_STATE_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, int(lighting_on), 'Bool', 1),
+        ]))
 
         # Cull face
-        if 'cull_face_enabled' in mat_props:
-            cull_idx = self._add_obj(MO_CULL_FACE_ATTR, [
-                (2, 0, 'Short', 2),
-                (4, int(mat_props['cull_face_enabled']), 'Bool', 1),
-                (5, mat_props.get('cull_face_mode', 0), 'Enum', 4),
-            ])
-            attrs.append(cull_idx)
+        attrs.append(self._add_obj(MO_CULL_FACE_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, int(cull_on), 'Bool', 1),
+            (5, mat_props.get('cull_face_mode', 0), 'Enum', 4),
+        ]))
 
         return attrs
 

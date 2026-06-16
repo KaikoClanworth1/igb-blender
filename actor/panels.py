@@ -246,6 +246,41 @@ class ACTOR_PT_QuickTools(Panel):
         box.operator("actor.export_skin", text="Export Skin (.igb)",
                      icon='EXPORT')
 
+        # ---- 5. MUA-Only Fixes (crashes XML2) ----
+        # The igAnimationCombiner actor graph retargets animation root heights
+        # onto the skin's own Bip01, so a SCALED skeleton grounds in the menu
+        # (no float) at any size. Every MUA skin with an off-native skeleton
+        # ships this graph; XML2 cannot deserialize the combiner classes, so it
+        # crashes there — hence MUA-only. This button is just Export Skin with
+        # the combiner ('v4 + Combiner') pre-selected.
+        box = layout.box()
+        box.label(text="5. MUA-Only Fixes (crashes XML2)", icon='ERROR')
+        box.label(text="For SCALED characters that float in the MUA menu",
+                  icon='INFO')
+        op = box.operator("actor.export_skin",
+                          text="Export Skin + Combiner (fixes menu float)",
+                          icon='EXPORT')
+        op.actor_graph = 'V4_FULL'
+
+        # ---- 6. MUA Animated Mannequin ----
+        # A mannequin is just a v6 skinned actor placed in
+        # ui/models/mannequin/<id>.igb. The MUA character-select screen plays
+        # an idle on it at runtime, keyed by the character slot <id> — nothing
+        # is embedded in the file (the stock animated mannequins ship an EMPTY
+        # igAnimationList; verified). This button is Export Skin pre-set to the
+        # proven bare-v6 layout + MUA textures, with no combiner.
+        box = layout.box()
+        box.label(text="6. MUA Animated Mannequin", icon='ARMATURE_DATA')
+        box.label(text="Idles in the MUA character-select screen",
+                  icon='INFO')
+        op = box.operator("actor.export_skin",
+                          text="Export Animated Mannequin (MUA)",
+                          icon='ARMATURE_DATA')
+        op.mannequin_mode = True
+        op.actor_graph = 'OFF'
+        op.texture_format = 'dxt5_mua'
+        box.label(text="Save as <id>.igb in ui/models/mannequin/")
+
 
 class ACTOR_PT_Skins(Panel):
     """Skin management section"""

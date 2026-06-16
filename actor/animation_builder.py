@@ -99,9 +99,11 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
     # For cross-character animation, prefer target_bind_pose so bone
     # positions are relative to the TARGET character's skeleton.
     bind_trans_map = {}
+    bind_quat_map = {}
     if bind_pose:
         for bone_name, (quat_wxyz, trans_xyz) in bind_pose.items():
             bind_trans_map[bone_name] = Vector(trans_xyz)
+            bind_quat_map[bone_name] = quat_wxyz
 
     target_trans_map = {}
     if target_bind_pose:
@@ -159,10 +161,18 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
             if bind_trans is None and bone_name != track.bone_name:
                 bind_trans = bind_trans_map.get(bone_name)
 
-        # Insert rotation keyframes using general formula:
-        # pose_q = rest_q^{-1} @ conjugate(anim_q)
+        # The anim's own bind-frame quaternion (keyed by SOURCE bone name) —
+        # lets the rotation be applied as a delta from the anim's bind onto the
+        # actor's rest, so a separate anim file doesn't flip/rotate the actor.
+        anim_bind_q = bind_quat_map.get(track.bone_name)
+        if anim_bind_q is None and bone_name != track.bone_name:
+            anim_bind_q = bind_quat_map.get(bone_name)
+
+        # Insert rotation keyframes (delta-from-anim-bind retarget when the
+        # anim's bind quat is known; else pose_q = rest_q^{-1} @ conjugate(anim_q))
         _insert_quaternion_keyframes(action, track, fps, rest_q,
-                                     bone_name_override=bone_name)
+                                     bone_name_override=bone_name,
+                                     bind_q=anim_bind_q)
 
         # Insert location keyframes using bind-pose translation delta
         _insert_location_keyframes(action, track, fps, rest_rot_inv, bind_trans,
@@ -216,7 +226,7 @@ def set_active_action(armature_obj, action):
 
 
 def _insert_quaternion_keyframes(action, track, fps, rest_q=None,
-                                  bone_name_override=None):
+                                  bone_name_override=None, bind_q=None):
     """Insert quaternion rotation keyframes for a track.
 
     Uses the general formula to convert Alchemy absolute local quaternions
@@ -249,6 +259,22 @@ def _insert_quaternion_keyframes(action, track, fps, rest_q=None,
 
     # Precompute rest_q inverse
     rest_q_inv = rest_q.inverted() if rest_q is not None else None
+    # The anim's OWN bind-frame quaternion for this bone (from the source
+    # animation file). When present, the animation is applied as a DELTA from
+    # its own bind, mapped onto the actor's rest:
+    #     final_local = conjugate(anim_q) @ bind_q @ rest_q
+    #     pose_q      = rest_q^{-1} @ final_local
+    # This makes applying the bind pose a no-op (returns to rest) even when the
+    # actor's rest differs from the anim's bind — the case for a SEPARATE anim
+    # file on a native actor, which otherwise flips/rotates the whole body.
+    # For an actor's OWN anim (rest_q == conjugate(bind_q)) it reduces exactly
+    # to the old formula pose_q = rest_q^{-1} @ conjugate(anim_q), so no change.
+    bq = Quaternion(bind_q) if bind_q is not None else None
+    # Guard: some files (e.g. v8 next-gen) store a degenerate afakeanim with
+    # near-zero bind quaternions. A zero quat would corrupt the delta math, so
+    # discard it and fall back to the absolute formula.
+    if bq is not None and bq.magnitude < 0.5:
+        bq = None
 
     prev_q = None
     for ki, kf in enumerate(track.keyframes):
@@ -257,8 +283,11 @@ def _insert_quaternion_keyframes(action, track, fps, rest_q=None,
         # Alchemy quaternion (w, x, y, z) — already in Blender WXYZ order
         aq = Quaternion(kf.quaternion)
 
-        # General formula: pose_q = rest_q^{-1} @ conjugate(anim_q)
-        if rest_q_inv is not None:
+        if rest_q_inv is not None and bq is not None:
+            # delta-from-anim-bind, retargeted onto the actor's rest
+            q = rest_q_inv @ aq.conjugated() @ bq @ rest_q
+        elif rest_q_inv is not None:
+            # General formula: pose_q = rest_q^{-1} @ conjugate(anim_q)
             q = rest_q_inv @ aq.conjugated()
         else:
             q = aq

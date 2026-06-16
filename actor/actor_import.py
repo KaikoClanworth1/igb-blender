@@ -404,21 +404,47 @@ def _store_skin_skeleton_data(armature_obj, skin_skeleton, collector):
 def _import_materials_for_mesh(reader, mesh_obj, state, profile):
     """Import materials for a skin mesh from scene graph state."""
     from ..scene_graph.sg_materials import extract_material, extract_texture_bind
-    from ..importer.material_builder import build_material
+    from ..importer.material_builder import build_material, build_multitex_material
 
     mat_obj = state.get('material_obj')
     texbind_obj = state.get('texbind_obj')
+    texbind_by_unit = state.get('texbind_by_unit') or {}
 
     if mat_obj is None:
         return
 
     parsed_mat = extract_material(reader, mat_obj, profile)
-    parsed_tex = None
+    blender_mat = None
 
-    if texbind_obj:
-        parsed_tex = extract_texture_bind(reader, texbind_obj, profile)
+    # Multi-texture path: v8 MUA skins bind diffuse/normal/spec/gloss as
+    # separate units in one attr set. Map units 0/1/2 to BSDF roles and SKIP
+    # unknown units (3=sphere, 4=mask, 5=gloss) so the black gloss map can't
+    # overwrite the real diffuse.
+    if len(texbind_by_unit) > 1:
+        from ..igz_format.igz_materials import (
+            TEX_ROLE_DIFFUSE, TEX_ROLE_NORMAL, TEX_ROLE_SPECULAR,
+        )
+        unit_to_role = {0: TEX_ROLE_DIFFUSE, 1: TEX_ROLE_NORMAL,
+                        2: TEX_ROLE_SPECULAR}
+        role_map = {}
+        for unit, tb in texbind_by_unit.items():
+            role = unit_to_role.get(unit)
+            if role is None:
+                continue
+            pt = extract_texture_bind(reader, tb, profile)
+            if pt is not None and pt.image is not None:
+                role_map[role] = pt.image
+        if role_map:
+            blender_mat = build_multitex_material(
+                parsed_mat, role_map, name=mesh_obj.name, profile=profile)
 
-    blender_mat = build_material(parsed_mat, parsed_tex, name=mesh_obj.name)
+    # Single-texture path (XML2 v6 and untextured meshes)
+    if blender_mat is None:
+        parsed_tex = None
+        if texbind_obj:
+            parsed_tex = extract_texture_bind(reader, texbind_obj, profile)
+        blender_mat = build_material(parsed_mat, parsed_tex, name=mesh_obj.name)
+
     if blender_mat:
         try:
             mesh_obj.data.materials.append(blender_mat)
@@ -634,6 +660,11 @@ class _SkinGeometryCollector:
         # Material state tracking
         self._material_obj = None
         self._texbind_obj = None
+        # unit_id -> texbind attr. v8 MUA skins bind 4 texture units
+        # (0=diffuse, 1=normal, 2=specular, 5=gloss) in ONE igAttrSet.
+        # Keying by unit stops the last bind (the black gloss map) from
+        # clobbering the diffuse, which is what made imported bodies black.
+        self._texbind_by_unit = {}
         self._bms_indices = None
 
         # Segment context stack: [(name, flags), ...]
@@ -644,6 +675,14 @@ class _SkinGeometryCollector:
 
     def visit_texture_bind_attr(self, attr, parent):
         self._texbind_obj = attr
+        # Read the texture unit (igTextureBindAttr has exactly one Int field =
+        # _unitID; its slot number shifts across versions, so match by type).
+        unit = 0
+        for slot, val, fi in attr._raw_fields:
+            if fi.short_name == b"Int":
+                unit = val
+                break
+        self._texbind_by_unit[unit] = attr
 
     def visit_blend_matrix_select(self, attr, parent):
         """Track igBlendMatrixSelect for bone index remapping."""
@@ -682,6 +721,7 @@ class _SkinGeometryCollector:
         state = {
             'material_obj': self._material_obj,
             'texbind_obj': self._texbind_obj,
+            'texbind_by_unit': dict(self._texbind_by_unit),
             'bms_indices': self._bms_indices,
             'node_name': node_name,
             'is_outline': is_outline,

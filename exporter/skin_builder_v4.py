@@ -473,9 +473,10 @@ class SkinBuilderV4:
             skeleton_idx, skin_idx, anim_idx, combiner_idx)
 
         if actor_info_idx is not None:
-            # wire the database into the actor info (slot 7 _animationDatabase)
+            # wire the database into the actor info (slot 8 _animationDatabase;
+            # slot 7 is the actorList — donor layout)
             kind, mo_idx, fields = self._obj_list[actor_info_idx]
-            fields = [(7, adb_idx, 'ObjectRef', 4) if f[0] == 7 else f
+            fields = [(8, adb_idx, 'ObjectRef', 4) if f[0] == 8 else f
                       for f in fields]
             self._obj_list[actor_info_idx] = (kind, mo_idx, fields)
 
@@ -1017,13 +1018,19 @@ class SkinBuilderV4:
         bones = skeleton_data['bones']
         n = len(bones)
 
+        # Field layouts below mirror a WORKING MUA combiner skin verbatim
+        # (X-Men Evolution 1230x-JEAN, F:\Downloads\Skins\MUA ONLY). The
+        # previous layout (derived from the v6 graph +1) had the combiner /
+        # actor / actorInfo / appearance fields misaligned, which is why
+        # V4_FULL crashed. Buffer sizes: quat = n*16, world-bind = n*64,
+        # palette = joints*64; the donor uses a distinct block per slot.
         state_idx = self._add_obj(MO_ANIM_STATE, [
             (3, anim_idx, 'ObjectRef', 4),
             (4, 0, 'Enum', 4),
             (5, 4, 'Enum', 4),
             (6, 0, 'Enum', 4),
             (7, -1, 'ObjectRef', 4),
-            (8, 0, 'Bool', 1),
+            (8, 1, 'Bool', 1),                 # donor: 1
             (9, 0.0, 'Float', 4),
             (10, 0, 'Long', 8),
             (11, 0, 'Long', 8),
@@ -1036,6 +1043,7 @@ class SkinBuilderV4:
             (18, 0, 'Long', 8)])
         state_list_idx = self._ref_list(MO_ANIM_STATE_LIST, [state_idx])
 
+        # one igAnimationCombinerBoneInfo per bone, each in a 1-entry list
         bi_list_idxs = []
         for quat, trans in locals_:
             bi_idx = self._add_obj(MO_CBONE_INFO, [
@@ -1048,64 +1056,76 @@ class SkinBuilderV4:
             bi_list_idxs.append(self._ref_list(MO_CBONE_INFO_LIST, [bi_idx]))
         bill_idx = self._ref_list(MO_CBONE_INFO_LIST_LIST, bi_list_idxs)
 
+        # combiner int list: one entry per bone (all 0 -> all use state 0)
+        comb_int_idx = self._build_int_list([0] * n)
         modifier_list_idx = self._empty_list(MO_ANIM_MODIFIER_LIST)
 
-        quat_buf = b''.join(struct.pack('<4f', *q) for q, _t in locals_)
-        quat_mb = self._add_mem(TAG_INT_LIST, quat_buf)
-        ident_bones = struct.pack('<16f', *_IDENTITY44) * n
-        identA_mb = self._add_mem(TAG_INT_LIST, ident_bones)
-        world_buf = b''.join(struct.pack('<16f', *_world_bind_matrix(b))
-                             for b in bones)
-        world_mb = self._add_mem(TAG_INT_LIST, world_buf)
+        # buffers — distinct blocks per slot, matching the donor
+        quat_bytes = b''.join(struct.pack('<4f', *q) for q, _t in locals_)
+        world_bytes = b''.join(struct.pack('<16f', *_world_bind_matrix(b))
+                               for b in bones)
         n_pal = max(len(bms_palette), 1)
-        pal_mb = self._add_mem(TAG_INT_LIST,
-                               struct.pack('<16f', *_IDENTITY44) * n_pal)
+        pal_bytes = struct.pack('<16f', *_IDENTITY44) * n_pal
+        quat_mb = self._add_mem(TAG_INT_LIST, quat_bytes)
+        comb_world9 = self._add_mem(TAG_INT_LIST, world_bytes)
+        comb_world13 = self._add_mem(TAG_INT_LIST, world_bytes)
+        comb_pal14 = self._add_mem(TAG_INT_LIST, pal_bytes)
+        actor_world9 = self._add_mem(TAG_INT_LIST, world_bytes)
+        actor_pal10 = self._add_mem(TAG_INT_LIST, pal_bytes)
 
+        # igAnimationCombiner (donor: 4=skeleton, 5=boneInfoListList,
+        # 6=intList, 7=stateList, 8=quat, 9/13=world-bind, 14=palette)
         combiner_idx = self._add_obj(MO_COMBINER, [
-            (3, 'igActor01Combiner', 'String', 4),
-            (4, state_list_idx, 'ObjectRef', 4),
-            (5, modifier_list_idx, 'ObjectRef', 4),
-            (6, bill_idx, 'ObjectRef', 4),
-            (7, skeleton_idx, 'ObjectRef', 4),
+            (3, 'combiner_igActor01', 'String', 4),
+            (4, skeleton_idx, 'ObjectRef', 4),
+            (5, bill_idx, 'ObjectRef', 4),
+            (6, comb_int_idx, 'ObjectRef', 4),
+            (7, state_list_idx, 'ObjectRef', 4),
             (8, quat_mb, 'MemoryRef', 4),
-            (9, identA_mb, 'MemoryRef', 4),
+            (9, comb_world9, 'MemoryRef', 4),
             (10, 0, 'Long', 8),
-            (11, 1, 'Bool', 1),
-            (13, world_mb, 'MemoryRef', 4),
-            (14, pal_mb, 'MemoryRef', 4)])
+            (11, 0, 'Bool', 1),               # donor: 0
+            (13, comb_world13, 'MemoryRef', 4),
+            (14, comb_pal14, 'MemoryRef', 4)])
         combiner_list_idx = self._ref_list(MO_COMBINER_LIST, [combiner_idx])
 
+        # igAppearance (donor: 4=skin, 5=skinList, 6=MVMBSList,
+        # 7=stringObjList, 8=nodeList — all empty lists except the skin ref)
         appearance_idx = self._add_obj(MO_APPEARANCE, [
-            (3, 'igActor01Appearance', 'String', 4),
+            (3, 'appearance_igActor01', 'String', 4),
             (4, skin_idx, 'ObjectRef', 4),
-            (5, self._empty_list(MO_STRING_OBJ_LIST), 'ObjectRef', 4),
-            (6, self._empty_list(MO_STRING_OBJ_LIST), 'ObjectRef', 4),
-            (7, self._empty_list(MO_MVMBS_LIST), 'ObjectRef', 4),
-            (8, self._empty_list(MO_STRING_OBJ_LIST), 'ObjectRef', 4)])
+            (5, self._empty_list(MO_SKIN_LIST), 'ObjectRef', 4),
+            (6, self._empty_list(MO_MVMBS_LIST), 'ObjectRef', 4),
+            (7, self._empty_list(MO_STRING_OBJ_LIST), 'ObjectRef', 4),
+            (8, self._empty_list(MO_NODE_LIST), 'ObjectRef', 4)])
         appearance_list_idx = self._ref_list(MO_APPEARANCE_LIST,
                                              [appearance_idx])
 
+        # igActor (donor: the hub — 8=combiner, 9=world-bind, 10=palette,
+        # 11=appearance, 13=modifierList, 14=identity)
         actor_nl = self._empty_list(MO_NODE_LIST)
         actor_idx = self._add_obj(MO_ACTOR, [
             (3, 'igActor01', 'String', 4),
             (4, -1, 'ObjectRef', 4),
             (6, 0, 'Int', 4),
             (7, actor_nl, 'ObjectRef', 4),
-            (8, -1, 'ObjectRef', 4),
-            (9, -1, 'MemoryRef', 4),
-            (10, -1, 'MemoryRef', 4),
-            (11, -1, 'ObjectRef', 4),
+            (8, combiner_idx, 'ObjectRef', 4),
+            (9, actor_world9, 'MemoryRef', 4),
+            (10, actor_pal10, 'MemoryRef', 4),
+            (11, appearance_idx, 'ObjectRef', 4),
             (12, -1, 'ObjectRef', 4),
-            (13, -1, 'ObjectRef', 4),
+            (13, modifier_list_idx, 'ObjectRef', 4),
             (14, _IDENTITY44, 'Matrix44f', 64)])
         actor_list_idx = self._ref_list(MO_ACTOR_LIST, [actor_idx])
 
+        # igActorInfo (donor: 6=-1, 7=actorList, 8=animDB, 9=combinerList,
+        # 10=appearanceList). animDB ref is wired in build_skin at slot 8.
         actor_info_idx = self._add_obj(MO_ACTOR_INFO, [
-            (3, 'igActor01Info', 'String', 4),
+            (3, 'igActor01', 'String', 4),
             (5, 1, 'Bool', 1),
-            (6, actor_list_idx, 'ObjectRef', 4),
-            (7, -1, 'ObjectRef', 4),          # animationDatabase (wired later)
-            (8, -1, 'ObjectRef', 4),
+            (6, -1, 'ObjectRef', 4),
+            (7, actor_list_idx, 'ObjectRef', 4),
+            (8, -1, 'ObjectRef', 4),          # animationDatabase (wired later)
             (9, combiner_list_idx, 'ObjectRef', 4),
             (10, appearance_list_idx, 'ObjectRef', 4)])
 

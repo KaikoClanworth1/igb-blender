@@ -480,6 +480,8 @@ def register():
     mapmaker.register()
     from . import actor
     actor.register()
+    from . import teammenu
+    teammenu.register()
 
     # File menu: split export into Scene + Skin, add Actor import.
     # Mirrors the N-panel tabs (IGB → scene, IGB Actors → skin/actor).
@@ -501,6 +503,8 @@ def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_igz)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
 
+    from . import teammenu
+    teammenu.unregister()
     from . import actor
     actor.unregister()
     from . import mapmaker
