@@ -679,7 +679,8 @@ class SkinBuilder:
                 continue  # Already built chain for this texture
 
             # Skip submeshes with NO texture data — they'll use fallback
-            has_tex_data = bool(sub.get('clut_data') or sub.get('texture_levels'))
+            has_tex_data = bool(sub.get('clut_data') or sub.get('texture_levels')
+                                or sub.get('cmpr_levels'))
             if not tex_key and not has_tex_data:
                 continue
 
@@ -688,6 +689,10 @@ class SkinBuilder:
                 palette_data, index_data, cw, ch = sub['clut_data']
                 _, tex_bind_idx = self._build_clut_texture_chain(
                     palette_data, index_data, cw, ch, tex_key
+                )
+            elif sub.get('cmpr_levels'):
+                _, tex_bind_idx = self._build_cmpr_texture_chain(
+                    sub.get('cmpr_levels'), tex_key
                 )
             else:
                 _, tex_bind_idx = self._build_texture_chain(
@@ -1324,6 +1329,91 @@ class SkinBuilder:
 
         return texture_attr_idx, texture_bind_idx
 
+    def _build_cmpr_texture_chain(self, cmpr_levels, tex_name):
+        """Build a GameCube/Wii CMPR (igImage pfmt 34) texture chain.
+
+        Mirrors _build_texture_chain but emits the GX-tiled CMPR image layout
+        verified against native GC actors: components=4, _order=101, bits=1,
+        pfmt=34, stride=width*2, compressed=1, NO igClut. `cmpr_levels` is a
+        list of (cmpr_bytes, w, h) — currently a single base level.
+        """
+        if cmpr_levels is None:
+            cmpr_levels = []
+
+        base_img_idx = None
+        mip_img_indices = []
+
+        for level_idx, (comp_data, tw, th) in enumerate(cmpr_levels):
+            pixel_mb = self._add_mem(MO_EXTERNAL_INFO_ENTRY, comp_data, align_type=1)
+            img_size = len(comp_data)
+            # Native GC stride = width*2 = (blocks-per-row) * 8 bytes per block.
+            stride = max(1, (tw + 3) // 4) * 8
+
+            img_idx = self._add_obj(MO_IMAGE, [
+                (2, tw, 'UnsignedInt', 4),
+                (3, th, 'UnsignedInt', 4),
+                (4, 4, 'UnsignedInt', 4),
+                (5, 1, 'UnsignedInt', 4),
+                (6, 101, 'UnsignedInt', 4),       # _order = RGBA (native GC value)
+                (7, 1, 'UnsignedInt', 4),
+                (8, 1, 'UnsignedInt', 4),
+                (9, 1, 'UnsignedInt', 4),
+                (10, 1, 'UnsignedInt', 4),
+                (11, 34, 'Enum', 4),              # pfmt = 34 (GameCube CMPR)
+                (12, img_size, 'Int', 4),
+                (13, pixel_mb, 'MemoryRef', 4),
+                (14, -1, 'MemoryRef', 4),
+                (15, 1, 'Bool', 1),
+                (16, 0, 'UnsignedInt', 4),
+                (17, -1, 'ObjectRef', 4),          # no CLUT
+                (18, 0, 'UnsignedInt', 4),
+                (19, stride, 'Int', 4),
+                (20, 1, 'Bool', 1),                # compressed
+                (21, 0, 'UnsignedInt', 4),
+                (22, tex_name, 'String', 4),
+            ])
+
+            if level_idx == 0:
+                base_img_idx = img_idx
+            else:
+                mip_img_indices.append(img_idx)
+
+        if mip_img_indices:
+            mip_data = struct.pack("<" + "i" * len(mip_img_indices), *mip_img_indices)
+            mip_mb = self._add_mem(MO_OBJECT, mip_data)
+            mipmap_list_idx = self._add_obj(MO_MIPMAP_LIST, [
+                (2, len(mip_img_indices), 'Int', 4),
+                (3, len(mip_img_indices), 'Int', 4),
+                (4, mip_mb, 'MemoryRef', 4),
+            ])
+        else:
+            mipmap_list_idx = -1
+
+        num_levels = len(cmpr_levels)
+        texture_attr_idx = self._add_obj(MO_TEXTURE_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, 0, 'UnsignedInt', 4),
+            (5, 1, 'Enum', 4),
+            (6, 3, 'Enum', 4),
+            (7, 1, 'Enum', 4),
+            (8, 1, 'Enum', 4),
+            (10, 0, 'Enum', 4),
+            (11, 0, 'Enum', 4),
+            (12, base_img_idx if base_img_idx is not None else -1, 'ObjectRef', 4),
+            (13, 0, 'Bool', 1),
+            (14, -1, 'ObjectRef', 4),
+            (15, num_levels, 'Int', 4),
+            (16, mipmap_list_idx, 'ObjectRef', 4),
+        ])
+
+        texture_bind_idx = self._add_obj(MO_TEXTURE_BIND_ATTR, [
+            (2, 0, 'Short', 2),
+            (4, texture_attr_idx, 'ObjectRef', 4),
+            (5, 0, 'Int', 4),
+        ])
+
+        return texture_attr_idx, texture_bind_idx
+
     def _build_clut_texture_chain(self, palette_data, index_data, width, height, tex_name):
         """Build CLUT image + igClut + texture attr + bind.
 
@@ -1412,9 +1502,10 @@ class SkinBuilder:
         emission = material.get('emission', (0.0, 0.0, 0.0, 1.0))
         shininess = material.get('shininess', 0.0)
         flags = material.get('flags', 31)
+        priority = int(material.get('priority', 0))
 
         return self._add_obj(MO_MATERIAL_ATTR, [
-            (2, 0, 'Short', 2),
+            (2, priority, 'Short', 2),
             (4, shininess, 'Float', 4),
             (5, diffuse, 'Vec4f', 16),
             (6, ambient, 'Vec4f', 16),

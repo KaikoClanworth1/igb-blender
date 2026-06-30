@@ -40,6 +40,33 @@ def clear_caches():
     _material_cache = {}
 
 
+def _set_igb_material_prop_ui(mat):
+    """Give the editable igMaterialAttr custom props sensible slider bounds so
+    the N-panel renders them as ranged sliders instead of raw number fields.
+
+    Safe no-op on Blender builds without id_properties_ui.
+    """
+    spec = {
+        "igb_shininess": dict(min=0.0, max=128.0, soft_min=0.0, soft_max=128.0,
+                              description="Specular power/exponent (0 = off). "
+                                          "Native presets: 0, 1.28, 12.8."),
+        "igb_priority": dict(min=-32768, max=32767, soft_min=0, soft_max=8,
+                             description="igMaterialAttr base sort key "
+                                         "(native: 0 on v6/v8, 1 on v4)."),
+        "igb_flags": dict(min=0, max=255, soft_min=0, soft_max=31,
+                          description="Material flag bitmask "
+                                      "(AMBIENT_FOR_DIFFUSE=0x02; 0x1F seen in XML2 v6)."),
+    }
+    for key, kw in spec.items():
+        if mat.get(key) is None:
+            continue
+        # mat.id_properties_ui(key).update(**kw) — method takes the prop name.
+        try:
+            mat.id_properties_ui(key).update(**kw)
+        except (AttributeError, TypeError, KeyError):
+            pass
+
+
 def _obj_cache_key(source_obj):
     """Get a hashable cache key from an IGB or IGZ source object."""
     if source_obj is None:
@@ -173,6 +200,8 @@ def build_material(parsed_material, parsed_texture=None,
     mat["igb_emission"] = list(parsed_material.emission)
     mat["igb_shininess"] = parsed_material.shininess
     mat["igb_flags"] = parsed_material.flags
+    mat["igb_priority"] = parsed_material.priority
+    _set_igb_material_prop_ui(mat)
 
     # --- Apply extra material state attributes (custom props + visual) ---
     _apply_extra_state(mat, bsdf, extra_state, nodes, links, blend_decision)
@@ -457,6 +486,30 @@ def _apply_extra_state(mat, bsdf, extra_state, nodes, links, blend_decision):
         mat["igb_blend_c"] = blend_func.get('blend_c', 0)
         mat["igb_blend_d"] = blend_func.get('blend_d', 0)
 
+    # --- Friendly Blend Mode (for the Materials panel dropdown / round-trip) ---
+    # Derive the 4-way mode from (enabled, src, dst) so an imported blended
+    # material shows the correct choice and re-exports identically.
+    _enabled = bool(blend_state.get('enabled', False)) if blend_state else False
+    _src = blend_func.get('src', 0) if blend_func else 0
+    _dst = blend_func.get('dst', 0) if blend_func else 0
+    if not _enabled:
+        _mode = 'OPAQUE'
+    elif _src == BLEND_SRC_ALPHA and _dst == BLEND_ONE:
+        _mode = 'ADDITIVE'
+    elif _src == BLEND_ONE_MINUS_SRC_ALPHA and _dst == BLEND_ONE:
+        _mode = 'INV_ALPHA_ADD'
+    elif _src == BLEND_SRC_ALPHA and _dst == BLEND_ONE_MINUS_SRC_ALPHA:
+        _mode = 'ALPHA'
+    else:
+        # Enabled with some other/unknown pair — surface it as standard alpha
+        _mode = 'ALPHA'
+    # Attribute assignment (not mat[...]) so Blender maps the string to the
+    # registered EnumProperty's integer storage correctly.
+    try:
+        mat.igb_blend_mode = _mode
+    except (AttributeError, TypeError):
+        pass  # property not registered (e.g. standalone parse) — skip
+
     # --- Alpha State ---
     alpha_state = extra_state.get('alpha_state')
     if alpha_state is not None:
@@ -630,6 +683,7 @@ def build_multitex_material(parsed_material, texture_role_map,
     from ..igz_format.igz_materials import (
         TEX_ROLE_DIFFUSE, TEX_ROLE_NORMAL, TEX_ROLE_SPECULAR,
         TEX_ROLE_EMISSIVE, TEX_ROLE_METALLIC, TEX_ROLE_CUBEMAP,
+        TEX_ROLE_GLOSS,
     )
 
     if parsed_material is None:
@@ -728,8 +782,8 @@ def build_multitex_material(parsed_material, texture_role_map,
         if parsed_image is None:
             continue
 
-        # Normal maps need green channel flip (DirectX → OpenGL)
-        # Profile needed for MUA PC R/B channel swap
+        # Normal maps: flip green DirectX->OpenGL so Blender's viewport is
+        # correct (the export flips it back). Profile needed for MUA PC R/B swap.
         nmap_flag = (role == TEX_ROLE_NORMAL)
         bl_image = _get_or_create_blender_image(
             parsed_image, profile=profile, is_normal_map=nmap_flag)
@@ -792,6 +846,8 @@ def build_multitex_material(parsed_material, texture_role_map,
     mat["igb_emission"] = list(parsed_material.emission)
     mat["igb_shininess"] = parsed_material.shininess
     mat["igb_flags"] = parsed_material.flags
+    mat["igb_priority"] = parsed_material.priority
+    _set_igb_material_prop_ui(mat)
     mat["igz_format"] = True  # Mark as IGZ-sourced
 
     # Store texture roles for debugging/export
@@ -804,6 +860,28 @@ def build_multitex_material(parsed_material, texture_role_map,
 
     # --- Create IGB Material Settings node group ---
     _create_igb_settings_node(mat, parsed_material, extra_state)
+
+    # --- Gloss/Mask (texture unit 5) ---
+    # Wire it into the .IGB Material group's "Gloss/Mask Texture" input AFTER
+    # the group is created (the group becomes the surface shader and the old
+    # BSDF is removed). This makes the v4/v8 export and the Materials panel find
+    # it the same way as normal/specular, so it round-trips. It does NOT touch
+    # Base Color, so the black gloss map can't darken the body.
+    gloss_img = texture_role_map.get(TEX_ROLE_GLOSS)
+    if gloss_img is not None:
+        from ..utils.material_nodes import find_igb_node
+        grp = find_igb_node(mat)
+        gloss_in = grp.inputs.get('Gloss/Mask Texture') if grp else None
+        if gloss_in is not None and not gloss_in.is_linked:
+            bl_gimg = _get_or_create_blender_image(gloss_img, profile=profile)
+            if bl_gimg is not None:
+                bl_gimg.colorspace_settings.name = 'Non-Color'
+                gtex = nodes.new(type='ShaderNodeTexImage')
+                gtex.label = "Gloss/Mask"
+                gtex.image = bl_gimg
+                gtex.location = (x_offset, -1200)
+                links.new(uv_node.outputs['UV'], gtex.inputs['Vector'])
+                links.new(gtex.outputs['Color'], gloss_in)
 
     _apply_blend_decision(mat, blend_decision, extra_state)
 
@@ -889,7 +967,8 @@ def _get_or_create_blender_image(parsed_image, profile=None, is_normal_map=False
     Args:
         parsed_image: ParsedImage from sg_materials
         profile: GameProfile instance (used for R/B channel swap on MUA PC)
-        is_normal_map: If True, flip green channel (DirectX → OpenGL conversion)
+        is_normal_map: If True, keep on a separate cache key (normal maps are
+            kept in their native DirectX convention — no green flip)
 
     Returns:
         bpy.types.Image or None
@@ -969,7 +1048,10 @@ def _get_or_create_blender_image(parsed_image, profile=None, is_normal_map=False
             float_pixels[dst_idx] = rgba_data[src_idx] / 255.0        # R
             g_val = rgba_data[src_idx + 1] / 255.0
             if is_normal_map:
-                g_val = 1.0 - g_val  # DirectX → OpenGL: flip Y/green channel
+                # MUA normals are DirectX (Y-down); Blender's Normal Map node is
+                # OpenGL (Y-up). Flip green so the viewport preview is correct;
+                # the export flips it back to DirectX (normal_y_flip default ON).
+                g_val = 1.0 - g_val
             float_pixels[dst_idx + 1] = g_val                          # G
             float_pixels[dst_idx + 2] = rgba_data[src_idx + 2] / 255.0  # B
             float_pixels[dst_idx + 3] = rgba_data[src_idx + 3] / 255.0  # A

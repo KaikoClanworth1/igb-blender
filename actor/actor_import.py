@@ -65,6 +65,23 @@ def import_actor(context, anim_filepath, skin_filepaths=None,
 
     if game_preset == 'auto':
         profile = detect_profile(reader)
+        # A moveset/anim file (e.g. 02_daredevil.igb) carries no textures or
+        # geometry, so PC-vs-PS2 detection on it is unreliable and falls back
+        # to the first-registered v8 profile (MUA2 PS2 -> no R/B swap -> blue
+        # MUA PC skins). The skin file holds the textures + geometry that
+        # actually distinguish the platform, so detect from it instead.
+        if skin_filepaths:
+            _skin_path0 = skin_filepaths[0][1]
+            if (_skin_path0 and _skin_path0 != anim_filepath
+                    and os.path.exists(_skin_path0)):
+                try:
+                    _skin_reader0 = IGBReader(_skin_path0)
+                    _skin_reader0.read()
+                    _skin_profile = detect_profile(_skin_reader0)
+                    if _skin_profile is not None:
+                        profile = _skin_profile
+                except Exception:
+                    pass
     else:
         profile = get_profile(game_preset)
 
@@ -115,6 +132,16 @@ def import_actor(context, anim_filepath, skin_filepaths=None,
         inv_joint_data=inv_joint_data,
     )
     armature_obj["igb_anim_file"] = anim_filepath
+
+    # Record the detected game so (a) the Skin Setup validation targets the
+    # right skeleton (XML2 vs MUA), and (b) the skin export can default to a
+    # matching preset (MUA PC -> v4 + DXT5(MUA)). Without this it defaulted to
+    # XML2 and validated a MUA skin against the 35-bone XML2 template.
+    _game_name = getattr(profile, 'game_name', '') or ''
+    _is_mua = 'Ultimate Alliance' in _game_name
+    armature_obj["igb_target_game"] = 'MUA' if _is_mua else 'XML2'
+    armature_obj["igb_game_profile"] = _game_name
+    armature_obj["igb_source_is_mua_pc"] = int(bool(_is_mua and 'PC' in _game_name))
 
     t_skel = time.perf_counter()
 
@@ -417,15 +444,17 @@ def _import_materials_for_mesh(reader, mesh_obj, state, profile):
     blender_mat = None
 
     # Multi-texture path: v8 MUA skins bind diffuse/normal/spec/gloss as
-    # separate units in one attr set. Map units 0/1/2 to BSDF roles and SKIP
-    # unknown units (3=sphere, 4=mask, 5=gloss) so the black gloss map can't
-    # overwrite the real diffuse.
+    # separate units in one attr set. Map units 0/1/2 to BSDF roles and 5 to
+    # gloss (wired to Sheen Tint so it round-trips on v4 export WITHOUT
+    # touching Base Color — keeping the black gloss map off the diffuse). Other
+    # unknown units (3=sphere, 4=mask) are still skipped.
     if len(texbind_by_unit) > 1:
         from ..igz_format.igz_materials import (
             TEX_ROLE_DIFFUSE, TEX_ROLE_NORMAL, TEX_ROLE_SPECULAR,
+            TEX_ROLE_GLOSS,
         )
         unit_to_role = {0: TEX_ROLE_DIFFUSE, 1: TEX_ROLE_NORMAL,
-                        2: TEX_ROLE_SPECULAR}
+                        2: TEX_ROLE_SPECULAR, 5: TEX_ROLE_GLOSS}
         role_map = {}
         for unit, tb in texbind_by_unit.items():
             role = unit_to_role.get(unit)
@@ -443,7 +472,12 @@ def _import_materials_for_mesh(reader, mesh_obj, state, profile):
         parsed_tex = None
         if texbind_obj:
             parsed_tex = extract_texture_bind(reader, texbind_obj, profile)
-        blender_mat = build_material(parsed_mat, parsed_tex, name=mesh_obj.name)
+        # MUST pass profile — build_material -> _get_or_create_blender_image
+        # uses profile.texture.swap_rb to do the MUA-PC BGR565 R/B swap. Omitting
+        # it (the old bug) left single-texture MUA skins like 2103 blue, while the
+        # multitex path above passed it and looked correct.
+        blender_mat = build_material(parsed_mat, parsed_tex,
+                                     name=mesh_obj.name, profile=profile)
 
     if blender_mat:
         try:

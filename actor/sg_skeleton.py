@@ -116,7 +116,6 @@ def _find_skeleton_from_anim_db(reader, anim_db_obj) -> Optional[ParsedSkeleton]
     """Find skeleton through AnimationDatabase -> SkeletonList chain."""
     # igAnimationDatabase fields:
     #   slot 5: ObjectRef -> igSkeletonList
-    skel_list_ref = None
     for slot, val, fi in anim_db_obj._raw_fields:
         if fi.short_name == b"ObjectRef" and val != -1:
             ref = reader.resolve_ref(val)

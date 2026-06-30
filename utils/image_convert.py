@@ -261,8 +261,9 @@ def convert_image_to_rgba(parsed_image):
     if pfmt in (PFMT_RGB_DXT1, PFMT_RGBA_DXT1, PFMT_RGBA_DXT3, PFMT_RGBA_DXT5):
         return decompress_dxt(data, w, h, pfmt)
 
-    # Wii CMPR (GameCube S3TC in tiled 8x8 macro-blocks)
-    if pfmt == PFMT_WII_CMPR:
+    # Wii/GameCube CMPR (GX-tiled S3TC). pfmt 21 = Wii (mip-bearing), 34 = the
+    # dominant GameCube/MUA2-Wii variant — both share the 8x8 macro-block layout.
+    if pfmt in (PFMT_WII_CMPR, 34):
         return decompress_wii_cmpr(data, w, h)
 
     # DXN / BC5 (Xbox 360 two-channel normal map)

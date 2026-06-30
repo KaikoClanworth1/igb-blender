@@ -141,7 +141,7 @@ class ParsedMaterial:
 
     __slots__ = (
         'shininess', 'diffuse', 'ambient', 'specular', 'emission',
-        'flags', 'source_obj',
+        'flags', 'priority', 'source_obj',
     )
 
     def __init__(self):
@@ -151,6 +151,7 @@ class ParsedMaterial:
         self.specular = (0.0, 0.0, 0.0, 0.0)    # RGBA
         self.emission = (0.0, 0.0, 0.0, 0.0)    # RGBA
         self.flags = 0
+        self.priority = 0      # inherited igAttr base Short (slot 2/v6+v8, 3/v4)
         self.source_obj = None
 
     @property
@@ -255,7 +256,12 @@ def extract_material(reader, material_obj, profile=None):
     # igAttr-derived: only the base Short (slot 2) shifts in v4; slots 4+ are fixed.
 
     for slot, val, fi in material_obj._raw_fields:
-        if slot == 4 and fi.short_name == b"Float":
+        if fi.short_name == b"Short":
+            # Inherited igAttr base Short (_priority sort key). Its slot SHIFTS by
+            # version (2 in v6/v8, 3 in v4) but it is igMaterialAttr's ONLY Short,
+            # so match by type rather than a hardcoded slot. v6/v8 = 0, v4 = 1.
+            mat.priority = val
+        elif slot == 4 and fi.short_name == b"Float":
             mat.shininess = val
         elif slot == 5 and fi.short_name == b"Vec4f":
             mat.diffuse = val

@@ -22,7 +22,7 @@ import bpy
 from bpy.types import Operator, Panel
 from . import _get_icon_id
 from bpy.props import (BoolProperty, FloatProperty, FloatVectorProperty,
-                       IntProperty, EnumProperty)
+                       IntProperty, EnumProperty, StringProperty)
 
 
 # Maximum collision triangles recommended for the game engine.
@@ -1351,7 +1351,7 @@ class IGB_PT_Main(Panel):
     bl_idname = "IGB_PT_Main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
 
     def draw_header(self, context):
         icon_id = _get_icon_id()
@@ -1372,7 +1372,7 @@ class IGB_PT_ImportExport(Panel):
     bl_idname = "IGB_PT_ImportExport"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_Main"
 
     def draw(self, context):
@@ -1409,7 +1409,7 @@ class IGB_PT_Collision(Panel):
     bl_idname = "IGB_PT_Collision"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1483,7 +1483,7 @@ class IGB_PT_Materials(Panel):
     bl_idname = "IGB_PT_Materials"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1590,7 +1590,7 @@ class IGB_PT_QuickTools(Panel):
     bl_idname = "IGB_PT_QuickTools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1613,7 +1613,7 @@ class IGB_PT_QT_Lighting(Panel):
     bl_idname = "IGB_PT_QT_Lighting"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1639,7 +1639,7 @@ class IGB_PT_QT_Culling(Panel):
     bl_idname = "IGB_PT_QT_Culling"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1665,7 +1665,7 @@ class IGB_PT_QT_UVAnim(Panel):
     bl_idname = "IGB_PT_QT_UVAnim"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1691,7 +1691,7 @@ class IGB_PT_QT_Alpha(Panel):
     bl_idname = "IGB_PT_QT_Alpha"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1717,7 +1717,7 @@ class IGB_PT_QT_Blend(Panel):
     bl_idname = "IGB_PT_QT_Blend"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1743,7 +1743,7 @@ class IGB_PT_QT_Color(Panel):
     bl_idname = "IGB_PT_QT_Color"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1764,7 +1764,7 @@ class IGB_PT_QT_Shader(Panel):
     bl_idname = "IGB_PT_QT_Shader"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1863,7 +1863,7 @@ class IGB_PT_QT_MaterialColors(Panel):
     bl_idname = "IGB_PT_QT_MaterialColors"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_QuickTools"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -2064,7 +2064,7 @@ class IGB_PT_Extras(Panel):
     bl_idname = "IGB_PT_Extras"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -2257,7 +2257,7 @@ class IGB_PT_Credits(Panel):
     bl_idname = "IGB_PT_Credits"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
     bl_parent_id = "IGB_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -2362,17 +2362,49 @@ def _draw_material_colors(layout, mat):
 
         # Shininess
         sub = box.box()
-        sub.label(text="Shininess (specular exponent, 0-128)")
-        sub.prop(mat, '["igb_shininess"]', text="Shininess")
+        sub.label(text="Shininess (specular power, 0-128; 0 = off)")
+        sub.prop(mat, '["igb_shininess"]', text="Shininess", slider=True)
+        prow = sub.row(align=True)
+        prow.label(text="Presets:")
+        for val, lbl in ((0.0, "Off"), (1.28, "Mild"), (12.8, "Shiny")):
+            op = prow.operator("igb.set_shininess", text=lbl)
+            op.value = val
+            op.material_name = mat.name
 
         # Flags
         if mat.get("igb_flags") is not None:
             sub = box.box()
             sub.label(text="Material Flags (bitmask)")
             sub.prop(mat, '["igb_flags"]', text="Flags")
+
+        # Priority (inherited igAttr base Short sort key; v6/v8=0, v4=1)
+        if mat.get("igb_priority") is not None:
+            sub = box.box()
+            sub.label(text="Priority (render sort key)")
+            sub.prop(mat, '["igb_priority"]', text="Priority")
     else:
         box.label(text="No igMaterialAttr data on this material.")
         box.label(text="Import an IGB file or use Quick Tools to set.")
+
+
+class IGB_OT_set_shininess(Operator):
+    """Set the igMaterialAttr shininess (specular power) to a preset value"""
+    bl_idname = "igb.set_shininess"
+    bl_label = "Set Shininess"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    value: FloatProperty(name="Shininess", default=0.0, min=0.0, max=128.0)
+    material_name: StringProperty(default="")
+
+    def execute(self, context):
+        mat = bpy.data.materials.get(self.material_name)
+        if mat is None:
+            mat = context.material
+        if mat is None:
+            self.report({'ERROR'}, "No material")
+            return {'CANCELLED'}
+        mat["igb_shininess"] = float(self.value)
+        return {'FINISHED'}
 
 
 class IGB_OT_add_material_node(Operator):
@@ -2606,6 +2638,7 @@ classes = (
     IGB_OT_set_all_shininess,
     IGB_OT_set_all_shader,
     IGB_OT_merge_duplicate_materials,
+    IGB_OT_set_shininess,
     IGB_OT_add_material_node,
     IGB_OT_update_addon,
     # IGB Tab panels (parent before children)

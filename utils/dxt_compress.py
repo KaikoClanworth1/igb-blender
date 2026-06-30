@@ -269,6 +269,108 @@ def _compress_dxt5_blocks(pixels, width, height):
     return out.tobytes()
 
 
+def _compress_dxt1_blocks(pixels, width, height):
+    """Compress all 4x4 blocks to DXT1 (8 bytes/block, color only) in parallel.
+
+    This is the color half of DXT5, emitted standalone for opaque textures —
+    half the size, matching native MUA character diffuse (igImage pfmt 14).
+    """
+    bh = (height + 3) // 4 * 4
+    bw = (width + 3) // 4 * 4
+    if bh != height or bw != width:
+        padded = np.empty((bh, bw, 4), dtype=np.uint8)
+        padded[:height, :width] = pixels
+        if width < bw:
+            padded[:height, width:] = pixels[:, -1:, :]
+        if height < bh:
+            padded[height:, :width] = pixels[-1:, :, :]
+        if width < bw and height < bh:
+            padded[height:, width:] = pixels[-1, -1]
+        pixels = padded
+    blocks_y = bh // 4
+    blocks_x = bw // 4
+    N = blocks_y * blocks_x
+    if N == 0:
+        return b''
+    blocks = pixels.reshape(blocks_y, 4, blocks_x, 4, 4)
+    blocks = blocks.transpose(0, 2, 1, 3, 4).reshape(N, 16, 4)
+
+    rgb = blocks[:, :, :3].astype(np.int16)
+    min_rgb = rgb.min(axis=1)
+    max_rgb = rgb.max(axis=1)
+    inset = (max_rgb - min_rgb) >> 4
+    min_i = np.clip(min_rgb + inset, 0, 255)
+    max_i = np.clip(max_rgb - inset, 0, 255)
+    c0 = (((max_i[:, 0] >> 3) << 11) | ((max_i[:, 1] >> 2) << 5) |
+          (max_i[:, 2] >> 3)).astype(np.uint16)
+    c1 = (((min_i[:, 0] >> 3) << 11) | ((min_i[:, 1] >> 2) << 5) |
+          (min_i[:, 2] >> 3)).astype(np.uint16)
+    swap = c0 < c1
+    c0s, c1s = c0.copy(), c1.copy()
+    c0[swap] = c1s[swap]
+    c1[swap] = c0s[swap]
+    mn, mx = min_i.copy(), max_i.copy()
+    min_i[swap] = mx[swap]
+    max_i[swap] = mn[swap]
+    c_pal = np.empty((N, 4, 3), dtype=np.int16)
+    c_pal[:, 0] = max_i
+    c_pal[:, 1] = min_i
+    c_pal[:, 2] = (2 * max_i + min_i + 1) // 3
+    c_pal[:, 3] = (max_i + 2 * min_i + 1) // 3
+    c_diffs = rgb[:, :, None, :] - c_pal[:, None, :, :]
+    c_dists = (c_diffs * c_diffs).sum(axis=3)
+    c_idx = c_dists.argmin(axis=2).astype(np.uint32)
+    c_idx[c0 == c1] = 0
+    c_shifts = (np.arange(16, dtype=np.uint32) * 2)
+    color_bits = (c_idx << c_shifts[None, :]).sum(axis=1).astype(np.uint32)
+
+    out = np.zeros((N, 8), dtype=np.uint8)
+    out[:, 0:2] = c0.view(np.uint8).reshape(N, 2)
+    out[:, 2:4] = c1.view(np.uint8).reshape(N, 2)
+    out[:, 4:8] = color_bits.view(np.uint8).reshape(N, 4)
+    return out.tobytes()
+
+
+def compress_with_mipmaps_dxt1(rgba_data, width, height, swap_rb=False):
+    """Compress base + all mipmaps as DXT1 (8 bytes/block, no alpha).
+
+    Half the size of DXT5; matches native MUA character diffuse textures.
+    Falls back to DXT5 if numpy is unavailable (correctness over size).
+    """
+    if not _HAS_NUMPY:
+        return compress_with_mipmaps(rgba_data, width, height, swap_rb)
+    pixels = np.frombuffer(rgba_data, dtype=np.uint8).reshape(
+        height, width, 4).copy()
+    if swap_rb:
+        pixels[:, :, [0, 2]] = pixels[:, :, [2, 0]]
+    result = [(_compress_dxt1_blocks(pixels, width, height), width, height)]
+    current = pixels
+    cw, ch = width, height
+    while cw > 1 or ch > 1:
+        new_w = max(1, cw // 2)
+        new_h = max(1, ch // 2)
+        if ch >= 2 and cw >= 2:
+            current = current[:new_h * 2, :new_w * 2].astype(
+                np.uint16).reshape(
+                new_h, 2, new_w, 2, 4).mean(axis=(1, 3)).astype(np.uint8)
+        else:
+            current = current.astype(np.uint16).mean(
+                axis=(0, 1)).astype(np.uint8).reshape(1, 1, 4)
+            new_w, new_h = 1, 1
+        result.append((_compress_dxt1_blocks(current, new_w, new_h),
+                       new_w, new_h))
+        cw, ch = new_w, new_h
+    return result
+
+
+def rgba_is_opaque(rgba_data):
+    """True if every alpha byte is 255 (-> DXT1-safe, no alpha needed)."""
+    if _HAS_NUMPY:
+        a = np.frombuffer(rgba_data, dtype=np.uint8)[3::4]
+        return bool((a == 255).all())
+    return all(rgba_data[i] == 255 for i in range(3, len(rgba_data), 4))
+
+
 # ===========================================================================
 # Pure Python fallback (used when numpy is not available)
 # ===========================================================================

@@ -201,6 +201,88 @@ class ACTOR_SceneProperties(PropertyGroup):
         default='auto',
     )
 
+    auto_detect_game: BoolProperty(
+        name="Auto-Detect Game From Skin",
+        description=(
+            "Read the game directly from each imported skin's own metadata, "
+            "ignoring the Game dropdown above. Fixes blue/BGR textures when the "
+            "dropdown is left on the wrong game, and auto-fills the Game "
+            "Directory from the skin's folder"
+        ),
+        default=True,
+    )
+
+    active_material_name: StringProperty(
+        name="Material",
+        description="Which material on the selected skin to edit",
+        default="",
+    )
+
+    show_material_colors: BoolProperty(
+        name="Material Colors",
+        description="Show the diffuse/ambient/specular/emission color editor",
+        default=False,
+    )
+
+    show_bone_help: BoolProperty(
+        name="What do these bones do?",
+        description="Explain the special engine bones (Bone_000, Motion, etc.) "
+                    "that the validator looks for",
+        default=False,
+    )
+
+    # --- Collapsible-section toggles: Quick Tools workflow ---
+    show_qt_import: BoolProperty(
+        name="1. Import", description="Import an actor or scene", default=True)
+    show_qt_setup: BoolProperty(
+        name="2. Setup", description="Set up / convert the rig and materials",
+        default=True)
+    show_qt_resize: BoolProperty(
+        name="3. Resize & Fixes",
+        description="Resize the character and fix menu/anim grounding",
+        default=False)
+    show_qt_export: BoolProperty(
+        name="4. Export", description="Export the finished skin", default=True)
+
+    # --- Collapsible-section toggles: Import panel ---
+    show_import_options: BoolProperty(
+        name="Import Options", description="What to import and which game",
+        default=True)
+    show_skin_setup: BoolProperty(
+        name="Skin Setup",
+        description="Validate / convert the selected armature", default=True)
+    show_skin_errors: BoolProperty(
+        name="Issues", description="Show the rig validation issues", default=True)
+
+    # --- Collapsible-section toggles: Materials panel ---
+    show_material_maps: BoolProperty(
+        name="Texture Maps", description="Normal / specular / gloss maps (MUA)",
+        default=True)
+    show_material_render: BoolProperty(
+        name="Render State",
+        description="Blend, alpha test, lighting and culling", default=True)
+    show_material_advanced: BoolProperty(
+        name="Advanced",
+        description="Raw IGB material fields (flags, UV anim, PS2 blend)",
+        default=False)
+
+    # --- Collapsible-section toggles: Information tab ---
+    show_doc_workflow: BoolProperty(
+        name="Workflow", description="How the Import→Export workflow works",
+        default=True)
+    show_doc_skins: BoolProperty(
+        name="Skins & Segments", description="Skins and segments explained",
+        default=False)
+    show_doc_materials: BoolProperty(
+        name="Materials & Maps", description="Materials and texture maps",
+        default=False)
+    show_doc_extras: BoolProperty(
+        name="Extras", description="Mannequin and VR motion capture",
+        default=False)
+    show_doc_bones: BoolProperty(
+        name="Bone Reference", description="What every engine bone does",
+        default=True)
+
 
 _classes = (
     ACTOR_SkinItem,

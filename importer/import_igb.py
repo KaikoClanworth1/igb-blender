@@ -424,20 +424,22 @@ def import_igb(context, filepath, operator=None):
                     # Classify textures by unit_id into roles
                     from ..igz_format.igz_materials import (
                         TEX_ROLE_DIFFUSE, TEX_ROLE_NORMAL, TEX_ROLE_SPECULAR,
+                        TEX_ROLE_GLOSS,
                     )
                     _UNIT_TO_ROLE = {
                         0: TEX_ROLE_DIFFUSE,
                         1: TEX_ROLE_NORMAL,
                         2: TEX_ROLE_SPECULAR,
+                        5: TEX_ROLE_GLOSS,
                     }
                     texture_role_map = {}
                     diffuse_tex = None
                     for pt in parsed_textures:
                         uid = getattr(pt, 'unit_id', 0) or 0
-                        # Only units 0/1/2 are BSDF roles. Unknown units
-                        # (3=sphere/env, 4=mask, 5=gloss on MUA v8) must be
-                        # SKIPPED — defaulting them to diffuse let the black
-                        # gloss map overwrite the real _d diffuse.
+                        # Units 0/1/2 are BSDF roles; 5 = gloss/mask (wired to
+                        # the .IGB Material group's Gloss/Mask input, NOT Base
+                        # Color, so it can't darken the diffuse). Other unknown
+                        # units (3=sphere/env, 4=mask) are skipped.
                         role = _UNIT_TO_ROLE.get(uid)
                         if role is None:
                             continue

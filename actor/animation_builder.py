@@ -55,8 +55,25 @@ def _compute_rest_local_data(armature_obj):
     return result
 
 
+def _world_parent_rot(armature_obj):
+    """Map bone_name -> world-rest rotation Quaternion of its PARENT bone.
+
+    For a parentless (root) bone the parent frame is world identity. Used to
+    rebase a separate-file animation's rotations into the actor's parent frame
+    (fixes sideways playback when the actor's root chain differs from the
+    anim's, e.g. a skin-built actor has a +90deg-X "Unnamed bone" root above
+    Bip01 that the anim file does not).
+    """
+    from mathutils import Quaternion
+    out = {}
+    for bone in armature_obj.data.bones:
+        out[bone.name] = (bone.parent.matrix_local.to_quaternion()
+                          if bone.parent else Quaternion((1.0, 0.0, 0.0, 0.0)))
+    return out
+
+
 def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
-                  bone_remap=None, target_bind_pose=None):
+                  bone_remap=None, target_bind_pose=None, anim_armature=None):
     """Create a Blender Action from a ParsedAnimation.
 
     Args:
@@ -77,6 +94,13 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
                           keeps bone positions relative to the target
                           character's skeleton. Falls back to bind_pose if
                           not provided.
+        anim_armature: Optional temporary armature built from the SEPARATE
+                       anim file's OWN skeleton. When provided, each bone's
+                       rotation is rebased from the anim skeleton's parent
+                       frame into the actor's parent frame (parent-rest delta),
+                       fixing sideways playback when the root chains differ.
+                       When None (e.g. an actor's own embedded anims) behavior
+                       is unchanged.
 
     Returns:
         The created bpy.types.Action, or None on failure.
@@ -112,6 +136,15 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
 
     # Precompute rest-local data (quaternion + rotation inverse)
     rest_data = _compute_rest_local_data(armature_obj)
+
+    # Parent-rest delta: when applying a SEPARATE anim file, rebase each bone's
+    # rotation from the anim skeleton's parent frame onto the actor's parent
+    # frame. delta = wpr_actor[bone]^-1 @ wpr_anim[bone]; identity (no-op) when
+    # the parent frames already match (same skeleton / own anims).
+    wpr_actor = _world_parent_rot(armature_obj) if anim_armature else None
+    wpr_anim = _world_parent_rot(anim_armature) if anim_armature else None
+    anim_bone_names = (set(b.name for b in anim_armature.data.bones)
+                       if anim_armature else None)
 
     track_count = 0
     seen_bones = set()
@@ -168,11 +201,31 @@ def build_action(armature_obj, parsed_animation, bind_pose=None, fps=None,
         if anim_bind_q is None and bone_name != track.bone_name:
             anim_bind_q = bind_quat_map.get(bone_name)
 
+        # Parent-rest delta for this bone. Applied ONLY when this bone's parent
+        # in the ACTOR is absent from the anim skeleton — a genuine structural
+        # extra-root (e.g. a skin-built actor's +90X "Unnamed bone" above
+        # Bip01, which the anim file doesn't have). Skeletons that share the
+        # same structure leave EVERY bone untouched, so anims that already play
+        # correctly are never disturbed.
+        parent_delta = None
+        if wpr_actor is not None and anim_bone_names is not None:
+            ab = armature_obj.data.bones.get(bone_name)
+            actor_parent = ab.parent.name if (ab and ab.parent) else None
+            if actor_parent is not None and actor_parent not in anim_bone_names:
+                wa = wpr_actor.get(bone_name)
+                wn = wpr_anim.get(track.bone_name) or wpr_anim.get(bone_name)
+                if wa is not None and wn is not None:
+                    d = wa.inverted() @ wn
+                    d.normalize()
+                    if abs(d.angle) > 1e-3:   # skip float noise
+                        parent_delta = d
+
         # Insert rotation keyframes (delta-from-anim-bind retarget when the
         # anim's bind quat is known; else pose_q = rest_q^{-1} @ conjugate(anim_q))
         _insert_quaternion_keyframes(action, track, fps, rest_q,
                                      bone_name_override=bone_name,
-                                     bind_q=anim_bind_q)
+                                     bind_q=anim_bind_q,
+                                     parent_delta=parent_delta)
 
         # Insert location keyframes using bind-pose translation delta
         _insert_location_keyframes(action, track, fps, rest_rot_inv, bind_trans,
@@ -226,7 +279,8 @@ def set_active_action(armature_obj, action):
 
 
 def _insert_quaternion_keyframes(action, track, fps, rest_q=None,
-                                  bone_name_override=None, bind_q=None):
+                                  bone_name_override=None, bind_q=None,
+                                  parent_delta=None):
     """Insert quaternion rotation keyframes for a track.
 
     Uses the general formula to convert Alchemy absolute local quaternions
@@ -285,12 +339,20 @@ def _insert_quaternion_keyframes(action, track, fps, rest_q=None,
 
         if rest_q_inv is not None and bq is not None:
             # delta-from-anim-bind, retargeted onto the actor's rest
-            q = rest_q_inv @ aq.conjugated() @ bq @ rest_q
+            final_local = aq.conjugated() @ bq @ rest_q
+            if parent_delta is not None:
+                final_local = parent_delta @ final_local
+            q = rest_q_inv @ final_local
         elif rest_q_inv is not None:
-            # General formula: pose_q = rest_q^{-1} @ conjugate(anim_q)
-            q = rest_q_inv @ aq.conjugated()
+            # General formula: pose_q = rest_q^{-1} @ conjugate(anim_q).
+            # parent_delta rebases a separate-file anim into the actor's
+            # parent frame (final_local = parent_delta @ conjugate(anim_q)).
+            final_local = aq.conjugated()
+            if parent_delta is not None:
+                final_local = parent_delta @ final_local
+            q = rest_q_inv @ final_local
         else:
-            q = aq
+            q = parent_delta @ aq if parent_delta is not None else aq
 
         # Ensure shortest-path interpolation: q and -q are the same rotation,
         # but if the sign flips between consecutive keyframes, Blender's

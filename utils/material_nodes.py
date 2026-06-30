@@ -43,6 +43,10 @@ _INPUT_DEFS = [
     ("Texture Alpha",    "Float",  1.0,   0.0, 1.0),
     ("Normal",           "Vector", (0.0, 0.0, 0.0), None, None),
     ("Specular Texture", "Float",  0.0,   0.0, 1.0),
+    # Gloss/mask map (MUA v8 texture unit 5). Export-only tag socket: plug an
+    # Image Texture in and the v8 exporter emits it on unit 5. Not wired into
+    # the Blender preview (MUA's shader, not Blender's, consumes it).
+    ("Gloss/Mask Texture", "Color", (1.0, 1.0, 1.0, 1.0), None, None),
     # Per-vertex color (igVec4ucList / igColorAttr); white = no tint.
     ("Vertex Color",     "Color",  (1.0, 1.0, 1.0, 1.0), None, None),
 

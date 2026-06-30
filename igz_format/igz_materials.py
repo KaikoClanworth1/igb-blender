@@ -54,6 +54,7 @@ TEX_ROLE_NORMAL = 'normal'
 TEX_ROLE_SPECULAR = 'specular'
 TEX_ROLE_EMISSIVE = 'emissive'
 TEX_ROLE_METALLIC = 'metallic'
+TEX_ROLE_GLOSS = 'gloss'
 TEX_ROLE_CUBEMAP = 'cubemap'
 TEX_ROLE_UNKNOWN = 'unknown'
 

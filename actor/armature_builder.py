@@ -84,6 +84,44 @@ def build_armature(context, skeleton, armature_name=None, collection=None,
                     rot_q.normalize()
                     world_rotations[bone.index] = rot_q
 
+    # Fill bones left at the origin: non-skinned dummies (fx*, Motion, *Nub,
+    # Footsteps) have no inv_joint, and the v8 bind pose (afakeanim) is
+    # degenerate, so they default to (0,0,0). Place each from its parent's world
+    # position + the parent's world rotation applied to the skeleton's
+    # parent-relative bone translation (the authoritative rest offset).
+    def _at_origin(p):
+        return p is None or (abs(p[0]) < 1e-5 and abs(p[1]) < 1e-5
+                             and abs(p[2]) < 1e-5)
+
+    def _fill_pos(idx, seen=None):
+        if seen is None:
+            seen = set()
+        cur = world_positions.get(idx)
+        if not _at_origin(cur):
+            return cur
+        if idx in seen:
+            return cur if cur is not None else (0.0, 0.0, 0.0)
+        seen.add(idx)
+        bone = skeleton.bones[idx]
+        pidx = bone.parent_idx
+        if pidx is not None and 0 <= pidx < len(skeleton.bones):
+            ppos = _fill_pos(pidx, seen)
+            prot = world_rotations.get(pidx)
+            t = Vector(bone.translation)
+            if prot is not None:
+                t = prot @ t
+            newpos = (ppos[0] + t[0], ppos[1] + t[1], ppos[2] + t[2])
+            world_positions[idx] = newpos
+            # Inherit the parent's orientation so the dummy isn't axis-aligned
+            if idx not in world_rotations and prot is not None:
+                world_rotations[idx] = prot
+            return newpos
+        # Root with no parent: keep its own translation (often the origin)
+        return tuple(bone.translation)
+
+    for bone in skeleton.bones:
+        _fill_pos(bone.index)
+
     # Create armature data block and object
     armature = bpy.data.armatures.new(armature_name)
     armature.display_type = 'OCTAHEDRAL'

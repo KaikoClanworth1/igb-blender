@@ -53,6 +53,12 @@ class IGBWriter:
         self.shared_entries = True
         self.has_memory_pool_names = True
 
+        # v8+ name pool: object String fields are 4-byte indices into this list
+        # (class/field names in the meta buffers stay inline). Populated lazily
+        # during field serialization via _intern_name(); copied from a reader in
+        # from_reader() so v8 round-trips keep their original indices.
+        self.name_pool = []         # list of bytes (names, null/padding stripped)
+
         self.meta_fields = []       # list of MetaFieldDef
         self.meta_objects = []      # list of MetaObjectDef
         self.alignment_data = b''   # raw alignment buffer content (without 4-byte size prefix)
@@ -84,6 +90,10 @@ class IGBWriter:
         info_buf = self._serialize_info()
         obj_buf = self._serialize_objects()
         mref_buf = self._serialize_memory_refs()
+
+        # v8+ name pool — serialize AFTER objects so every String field has
+        # been interned via _serialize_field/_intern_name.
+        name_pool_buf = self._serialize_name_pool() if self.version >= 8 else b''
 
         # Count objects and memory blocks
         obj_count = sum(1 for ri in self.ref_info if ri['is_object'])
@@ -119,6 +129,8 @@ class IGBWriter:
         # Write all sections sequentially
         with open(filepath, "wb") as f:
             f.write(header_buf)    # 1. Header (48 bytes)
+            if self.version >= 8:
+                f.write(name_pool_buf)  # 1b. Name pool (v8+, before meta-fields)
             f.write(mf_buf)        # 2. Meta-field buffer
             f.write(align_buf)     # 3. Alignment buffer
             f.write(mo_buf)        # 4. Meta-object buffer
@@ -356,6 +368,48 @@ class IGBWriter:
 
         return bytes(buf)
 
+    def _intern_name(self, val):
+        """Return the v8 name-pool index for a string value, adding it if new."""
+        if isinstance(val, str):
+            b = val.encode('utf-8')
+        elif isinstance(val, (bytes, bytearray)):
+            b = bytes(val)
+        else:
+            b = b''
+        b = b.rstrip(b'\x00')
+        try:
+            return self.name_pool.index(b)
+        except ValueError:
+            self.name_pool.append(b)
+            return len(self.name_pool) - 1
+
+    def _serialize_name_pool(self):
+        """Serialize the v8+ name pool buffer (inverse of reader._read_name_pool).
+
+        Layout: bufSize:u32, count:u32, then per name (nameLen:u32, bytes).
+        CRITICAL: native MUA files use nameLen = len(name)+1 (name + a single
+        null terminator) — NO per-name 4-byte padding (verified on 2103: 136/137
+        names are len+1, 0 are 4-aligned). Padding each name diverged from every
+        native file and inflated the pool by ~184 bytes; if the loader assumes
+        nameLen==strlen+1 it would then misread the whole pool. We only pad the
+        WHOLE buffer to a 4-byte boundary so the meta-field section that follows
+        stays aligned.
+        """
+        endian = self.endian
+        body = bytearray()
+        for name in self.name_pool:
+            nb = name if isinstance(name, (bytes, bytearray)) else str(name).encode('utf-8')
+            nb = bytes(nb).rstrip(b'\x00')
+            # native: non-empty name -> name + ONE null (nameLen = len+1); the
+            # empty string -> nameLen = 0 with no bytes (verified on 2103 #136).
+            if nb:
+                nb = nb + b'\x00'
+            body += struct.pack(endian + 'I', len(nb)) + nb
+        total = 8 + len(body)
+        body += b'\x00' * (((total + 3) & ~3) - total)  # 4-align the whole pool
+        buf_size = 8 + len(body)
+        return struct.pack(endian + 'II', buf_size, len(self.name_pool)) + bytes(body)
+
     def _serialize_object_fields(self, obj, endian):
         """Serialize all fields for a single object.
 
@@ -406,6 +460,10 @@ class IGBWriter:
                 return struct.pack(endian + fmt, *val)
             else:
                 return struct.pack(endian + fmt, val)
+
+        # String type (v8+): 4-byte name-pool index
+        if short_name == b"String" and self.version >= 8:
+            return struct.pack(endian + "i", self._intern_name(val))
 
         # String type (v6): length:i32 + string bytes (inline)
         if short_name == b"String":
@@ -679,6 +737,10 @@ def from_reader(reader):
     writer.has_external = reader.header.has_external
     writer.shared_entries = reader.header.shared_entries
     writer.has_memory_pool_names = reader.header.has_memory_pool_names
+
+    # Copy the v8+ name pool so String fields re-intern to their original
+    # indices (object String values were resolved to strings by the reader).
+    writer.name_pool = [bytes(n) for n in getattr(reader, 'name_pool', [])]
 
     # Extract original name lengths from raw file data
     # Meta-field buffer: static part has nameLen for each entry

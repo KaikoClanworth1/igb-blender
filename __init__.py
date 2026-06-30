@@ -1,7 +1,7 @@
 bl_info = {
     "name": "IGB Format (Alchemy Engine)",
     "author": "Kaiko",
-    "version": (0, 4, 1),
+    "version": (0, 5, 0),
     "blender": (4, 4, 0),
     "location": "File > Import/Export, 3D Viewport > Sidebar > IGB",
     "description": "Import/Export Alchemy Engine IGB/IGZ files for X-Men Legends, XML2, MUA. By Kaiko.",
@@ -338,46 +338,65 @@ class ExportIGB(bpy.types.Operator, ExportHelper):
         layout.label(text="Exports all scene meshes with materials & textures")
 
 
+class IGB_MT_import_actor(bpy.types.Menu):
+    """File > Import > IGB Actor — characters (skeleton + skins + anims)."""
+    bl_idname = "IGB_MT_import_actor"
+    bl_label = "IGB Actor"
+
+    def draw(self, context):
+        self.layout.operator("actor.import_actor",
+                             text="Actor / Skin (.igb)",
+                             icon_value=_get_icon_id())
+
+
+class IGB_MT_import_map(bpy.types.Menu):
+    """File > Import > IGB Map — scenes / maps / minimaps."""
+    bl_idname = "IGB_MT_import_map"
+    bl_label = "IGB Map / Scene"
+
+    def draw(self, context):
+        icon = _get_icon_id()
+        l = self.layout
+        l.operator(ImportIGB.bl_idname, text="Scene IGB (.igb)", icon_value=icon)
+        l.operator(ImportIGZ.bl_idname, text="Scene IGZ (.igz)", icon_value=icon)
+        l.operator(ImportZAM.bl_idname, text="ZAM Minimap (.zam)")
+
+
+class IGB_MT_export_actor(bpy.types.Menu):
+    """File > Export > IGB Actor — skins + animations."""
+    bl_idname = "IGB_MT_export_actor"
+    bl_label = "IGB Actor"
+
+    def draw(self, context):
+        icon = _get_icon_id()
+        l = self.layout
+        l.operator("actor.export_skin", text="Skin (.igb)", icon_value=icon)
+        l.operator("actor.export_animations", text="Animations (.igb)",
+                   icon_value=icon)
+
+
+class IGB_MT_export_map(bpy.types.Menu):
+    """File > Export > IGB Map — scenes / minimaps."""
+    bl_idname = "IGB_MT_export_map"
+    bl_label = "IGB Map / Scene"
+
+    def draw(self, context):
+        icon = _get_icon_id()
+        l = self.layout
+        l.operator(ExportIGB.bl_idname, text="Scene IGB (.igb)", icon_value=icon)
+        l.operator(ExportZAM.bl_idname, text="ZAM Minimap (.zam)")
+
+
 def menu_func_import(self, context):
-    icon_id = _get_icon_id()
-    self.layout.operator(ImportIGB.bl_idname, text="Alchemy IGB (.igb)",
-                         icon_value=icon_id)
+    icon = _get_icon_id()
+    self.layout.menu("IGB_MT_import_actor", icon_value=icon)
+    self.layout.menu("IGB_MT_import_map", icon_value=icon)
 
 
-def menu_func_import_igz(self, context):
-    icon_id = _get_icon_id()
-    self.layout.operator(ImportIGZ.bl_idname, text="Alchemy IGZ (.igz)",
-                         icon_value=icon_id)
-
-
-def menu_func_import_actor(self, context):
-    """File > Import entry that mirrors the IGB Actors > Import Actor button.
-
-    Loads a character's skeleton + skins + animations from a chosen .igb file
-    (uses the same operator the N-panel uses; settings come from the actor
-    scene properties so the user can pre-configure them in the panel)."""
-    icon_id = _get_icon_id()
-    self.layout.operator("actor.import_actor",
-                         text="Alchemy Actor (.igb)",
-                         icon_value=icon_id)
-
-
-def menu_func_export_scene(self, context):
-    icon_id = _get_icon_id()
-    self.layout.operator(ExportIGB.bl_idname,
-                         text="Alchemy Scene IGB (.igb)",
-                         icon_value=icon_id)
-
-
-def menu_func_export_skin(self, context):
-    """File > Export entry that mirrors the IGB Actors > Export Skin button.
-
-    Operator's poll() greys it out unless an armature with skeleton metadata
-    is set up and a skin is selected in the IGB Actors panel."""
-    icon_id = _get_icon_id()
-    self.layout.operator("actor.export_skin",
-                         text="Alchemy Skin IGB (.igb)",
-                         icon_value=icon_id)
+def menu_func_export(self, context):
+    icon = _get_icon_id()
+    self.layout.menu("IGB_MT_export_actor", icon_value=icon)
+    self.layout.menu("IGB_MT_export_map", icon_value=icon)
 
 
 class ImportZAM(bpy.types.Operator, ImportHelper):
@@ -451,12 +470,8 @@ class ExportZAM(bpy.types.Operator, ExportHelper):
         return {'FINISHED'}
 
 
-def menu_func_import_zam(self, context):
-    self.layout.operator(ImportZAM.bl_idname, text="ZAM Minimap (.zam)")
-
-
-def menu_func_export_zam(self, context):
-    self.layout.operator(ExportZAM.bl_idname, text="ZAM Minimap (.zam)")
+_FILE_MENUS = (IGB_MT_import_actor, IGB_MT_import_map,
+               IGB_MT_export_actor, IGB_MT_export_map)
 
 
 def register():
@@ -482,32 +497,76 @@ def register():
     actor.register()
     from . import teammenu
     teammenu.register()
+    # The "IGB Menu Editor" tab registers LAST so its sidebar tab appears at the
+    # end, giving the order: IGB Tools, IGB Map Maker, IGB Actors, IGB Team Menu,
+    # IGB Menu Editor (N-panel tabs follow registration order).
+    mapmaker.menu_panels.register()
 
-    # File menu: split export into Scene + Skin, add Actor import.
-    # Mirrors the N-panel tabs (IGB → scene, IGB Actors → skin/actor).
+    # Per-material MUA blend mode -> igBlendStateAttr + igBlendFunctionAttr on
+    # the MUA (v4) export. The four values mirror what real MUA models use.
+    bpy.types.Material.igb_blend_mode = bpy.props.EnumProperty(
+        name="Blend Mode",
+        description="How this material blends in-game. Exported as "
+                    "igBlendStateAttr + igBlendFunctionAttr (MUA only)",
+        items=[
+            ('OPAQUE', "Opaque",
+             "No blending (default) — solid material"),
+            ('ALPHA', "Alpha Blend",
+             "Standard transparency: SRC_ALPHA, ONE_MINUS_SRC_ALPHA"),
+            ('ADDITIVE', "Additive (glow)",
+             "Glow / energy effects: SRC_ALPHA, ONE"),
+            ('INV_ALPHA_ADD', "Inverse-Alpha Additive",
+             "Found on some MUA models: ONE_MINUS_SRC_ALPHA, ONE"),
+        ],
+        default='OPAQUE',
+    )
+
+    # Per-material "use this map" toggles (MUA only). The export skips a map
+    # when its toggle is off, even if an image is assigned — lets the user keep
+    # a map in the .blend but leave it out of a given export.
+    bpy.types.Material.igb_use_normal_map = bpy.props.BoolProperty(
+        name="Use Normal Map",
+        description="Export this material's normal map (MUA v4 + DXT5)",
+        default=True)
+    bpy.types.Material.igb_use_specular_map = bpy.props.BoolProperty(
+        name="Use Specular Map",
+        description="Export this material's specular map (MUA v4 + DXT5)",
+        default=True)
+    bpy.types.Material.igb_use_gloss_map = bpy.props.BoolProperty(
+        name="Use Gloss/Mask Map",
+        description="Export this material's gloss/mask map (MUA next-gen / "
+                    "v8 texture unit 5)",
+        default=True)
+
+    # File menu: grouped IGB Actor / IGB Map submenus under Import + Export.
+    for _mcls in _FILE_MENUS:
+        bpy.utils.register_class(_mcls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_igz)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_actor)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_zam)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_scene)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_skin)
-    bpy.types.TOPBAR_MT_file_export.append(menu_func_export_zam)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_zam)
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_skin)
-    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_scene)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_zam)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_actor)
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_igz)
+    bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    for _mcls in reversed(_FILE_MENUS):
+        try:
+            bpy.utils.unregister_class(_mcls)
+        except RuntimeError:
+            pass
 
+    if hasattr(bpy.types.Material, "igb_blend_mode"):
+        del bpy.types.Material.igb_blend_mode
+    for _p in ("igb_use_normal_map", "igb_use_specular_map",
+               "igb_use_gloss_map"):
+        if hasattr(bpy.types.Material, _p):
+            delattr(bpy.types.Material, _p)
+
+    from . import mapmaker
+    mapmaker.menu_panels.unregister()   # registered last -> unregister first
     from . import teammenu
     teammenu.unregister()
     from . import actor
     actor.unregister()
-    from . import mapmaker
     mapmaker.unregister()
     from . import panels
     panels.unregister()

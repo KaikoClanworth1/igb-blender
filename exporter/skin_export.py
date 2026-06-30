@@ -21,9 +21,75 @@ import struct
 from typing import Dict, List, Optional, Tuple
 
 
+def _meshpart_to_v8_tris(mesh_part, with_tangents=False):
+    """Expand an indexed MeshExport into v8 non-indexed triangle-list arrays.
+
+    v8 native skins (Max-export form) store geometry as a flat triangle list —
+    one entry per triangle vertex — with single-bone rigid skinning (1 weight +
+    1 bone index per vertex).
+
+    When `with_tangents` is set (normal-mapped material), a per-vertex tangent +
+    binormal frame is computed from the UVs on the *indexed* mesh, then expanded
+    alongside the other streams so the v8 builder can emit TANGENT/BINORMAL
+    vertex data (the streams MUA's normal-map shader reads).
+    """
+    pos = mesh_part.positions
+    nrm = mesh_part.normals or []
+    uv = mesh_part.uvs or []
+    bw = mesh_part.blend_weights or []
+    bidx = mesh_part.blend_indices or []
+    tangents = binormals = None
+    if with_tangents and uv:
+        from .skin_builder_v4 import _compute_tangent_frame
+        tangents, binormals = _compute_tangent_frame(
+            pos, nrm, uv, mesh_part.indices)
+    # MUA skinning is per-PART: native uses 4-bone weighting (comp_size=4) for
+    # skinned meshes but 1-bone (comp_size=1) for rigid props (e.g. guns bound
+    # to one hand bone). Match that — emitting weight[0] (often 0.25 of a 4-bone
+    # vertex) un-normalized both deforms wrong and is a format the engine's skin
+    # path doesn't expect. Pick bones-per-vertex from the actual max influence.
+    max_inf = 1
+    for vi in mesh_part.indices:
+        wv = bw[vi] if (vi < len(bw) and bw[vi]) else (1.0,)
+        max_inf = max(max_inf, sum(1 for w in wv if w > 1e-5))
+    WPV = 4 if max_inf > 1 else 1
+    P, N, U, W, BI, T, B = [], [], [], [], [], [], []
+    for vi in mesh_part.indices:
+        P.append(pos[vi])
+        N.append(nrm[vi] if vi < len(nrm) else (0.0, 0.0, 1.0))
+        U.append(uv[vi] if vi < len(uv) else (0.0, 0.0))
+        wv = list(bw[vi]) if vi < len(bw) and bw[vi] else [1.0]
+        iv = list(bidx[vi]) if vi < len(bidx) and bidx[vi] else [0]
+        # keep the WPV strongest influences, sorted by weight descending
+        pairs = sorted(zip(wv, iv), key=lambda p: -p[0])[:WPV]
+        ws = [float(p[0]) for p in pairs]
+        ix = [int(p[1]) & 0xFF for p in pairs]
+        while len(ws) < WPV:
+            ws.append(0.0)
+            ix.append(0)
+        s = sum(ws)
+        if s > 1e-6:
+            ws = [w / s for w in ws]
+        else:
+            ws = [1.0] + [0.0] * (WPV - 1)
+            ix = [ix[0]] + [0] * (WPV - 1)
+        W.extend(ws)
+        BI.extend(ix)
+        if tangents is not None:
+            T.append(tangents[vi] if vi < len(tangents) else (1.0, 0.0, 0.0))
+            B.append(binormals[vi] if vi < len(binormals) else (0.0, 1.0, 0.0))
+    out = {'positions': P, 'normals': N, 'uvs': U, 'weights': W,
+           'blend_idx': BI, 'weights_per_vertex': WPV}
+    if tangents is not None:
+        out['tangents'] = T
+        out['binormals'] = B
+    return out
+
+
 def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
                 texture_mode='dxt5', max_texture_size=0, actor_graph='OFF',
-                igb_format='V6', use_normal_maps=False, normal_map_size=0):
+                igb_format='V6', use_normal_maps=False, normal_map_size=0,
+                use_gloss_map=False, use_mipmaps=True, normal_y_flip=True):
     """Export Blender skin mesh(es) to an IGB file using from-scratch builder.
 
     Args:
@@ -46,14 +112,24 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
     from .skin_builder import SkinBuilder
     from .mesh_extractor import extract_skin_mesh, extract_mesh
 
-    # Normal maps are a MUA-only, v4-only feature (the proven 3ds Max recipe:
-    # DXT diffuse/normal/specular + tangent-frame vertex streams). XML2 has no
-    # normal maps, and our CLUT/v6 paths can't carry them — so gate it.
-    if use_normal_maps and igb_format != 'V4':
+    # Normal maps are a MUA-only feature (DXT diffuse/normal/specular +
+    # tangent-frame vertex streams). Both the 3ds Max v4 path and the native v8
+    # path carry them; XML2's CLUT/v6 paths cannot — so gate to V4/V8.
+    if (use_normal_maps or use_gloss_map) and igb_format not in ('V4', 'V8'):
         _report(operator, 'WARNING',
-                "Normal maps require the 3ds Max v4 (MUA) skin format — "
-                "ignoring 'Use Normal Maps' for this export")
+                "Normal/gloss maps require the v4 (3ds Max) or v8 (MUA native) "
+                "skin format — ignoring them for this export")
         use_normal_maps = False
+        use_gloss_map = False
+
+    # Gloss/mask (texture unit 5). Native MUA ships it on v8, but MUA's engine
+    # reads texture units by ID regardless of skin-file version, so we also emit
+    # it on the v4 path as a 4th unit-5 bind (in-game-verified by the user).
+    if use_gloss_map and igb_format not in ('V4', 'V8'):
+        _report(operator, 'WARNING',
+                "Gloss/mask maps require the v4 (3ds Max) or v8 (MUA native) "
+                "skin format — ignoring 'Use Gloss Map' for this export")
+        use_gloss_map = False
 
     if igb_format == 'V4':
         if use_normal_maps:
@@ -63,6 +139,20 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
             _report(operator, 'INFO',
                     "v4 export uses CLUT textures — switching texture mode")
             texture_mode = 'clut'
+
+    if igb_format == 'V8':
+        # Native MUA v8 characters use DXT textures (igImage pfmt 14/16) with
+        # mipmaps, never CLUT — force DXT so texture_levels get extracted.
+        texture_mode = 'dxt5'
+        # BUILD STAMP — if you do NOT see this exact line in Blender's export
+        # log, Blender is running OLD cached addon code: disable+re-enable the
+        # IGB addon (or restart Blender) and re-export.
+        # print() (not operator.report) so this lands in the SYSTEM CONSOLE next
+        # to the "SKIN EXPORT [...]" lines — the channel you actually watch.
+        print(">>> IGB v8 native export — BUILD 2026-06-29-K "
+              "(simple 0201 char form + skin-graph fixes: no actor graph) <<<")
+        _report(operator, 'INFO',
+                "IGB v8 native export — BUILD 2026-06-29-K")
 
     # Normalize mesh_objs
     if not isinstance(mesh_objs, list):
@@ -266,27 +356,74 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
                     max_texture_size=max_texture_size)
                 sub_dict['clut_data'] = clut_result
                 sub_dict['texture_levels'] = None
+            elif texture_mode == 'cmpr':
+                # GameCube/Wii CMPR (GX-tiled DXT1). v6 geometry, pfmt 34.
+                sub_dict['cmpr_levels'] = _get_texture_cmpr(
+                    mesh_obj, mat_slot=mat_slot,
+                    max_texture_size=max_texture_size)
+                sub_dict['clut_data'] = None
+                sub_dict['texture_levels'] = None
+            elif igb_format == 'V8':
+                # Native MUA character diffuse is DXT1 (half the size of DXT5);
+                # use it when the image is opaque, else fall back to DXT5.
+                levels, pfmt = _get_texture(
+                    mesh_obj, swap_rb=swap_rb, mat_slot=mat_slot,
+                    max_texture_size=max_texture_size, dxt1=True,
+                    return_pfmt=True)
+                sub_dict['texture_levels'] = levels
+                sub_dict['diffuse_pfmt'] = pfmt
+                sub_dict['clut_data'] = None
             else:
                 sub_dict['texture_levels'] = _get_texture(
                     mesh_obj, swap_rb=swap_rb, mat_slot=mat_slot,
                     max_texture_size=max_texture_size)
                 sub_dict['clut_data'] = None
 
-            # Normal-map path (MUA/v4): also extract normal + specular maps,
+            # Per-material "use this map" toggles let the user keep a map in
+            # the .blend but leave it out of a given export. Default True.
+            _slot_mat = None
+            if (mesh_obj.data.materials and
+                    mat_slot < len(mesh_obj.data.materials)):
+                _slot_mat = mesh_obj.data.materials[mat_slot]
+
+            def _map_on(attr):
+                return _slot_mat is None or getattr(_slot_mat, attr, True)
+
+            # Normal-map path (MUA/v4/v8): also extract normal + specular maps,
             # DXT-encoded, with their own size cap (normal_map_size).
             if use_normal_maps and not is_outline:
                 nm_cap = normal_map_size or max_texture_size
-                sub_dict['normal_levels'] = _get_texture_role(
-                    mesh_obj, 'normal', swap_rb=swap_rb, mat_slot=mat_slot,
-                    max_texture_size=nm_cap)
-                sub_dict['specular_levels'] = _get_texture_role(
-                    mesh_obj, 'specular', swap_rb=swap_rb, mat_slot=mat_slot,
-                    max_texture_size=nm_cap)
+                if _map_on('igb_use_normal_map'):
+                    sub_dict['normal_levels'] = _get_texture_role(
+                        mesh_obj, 'normal', swap_rb=swap_rb, mat_slot=mat_slot,
+                        max_texture_size=nm_cap, normal_y_flip=normal_y_flip)
+                if _map_on('igb_use_specular_map'):
+                    sub_dict['specular_levels'] = _get_texture_role(
+                        mesh_obj, 'specular', swap_rb=swap_rb, mat_slot=mat_slot,
+                        max_texture_size=nm_cap)
                 if sub_dict.get('normal_levels'):
                     _report(operator, 'INFO',
                             f"  + normal map for '{mesh_part.name}'"
                             + ('' if not sub_dict.get('specular_levels')
                                else ' (+ specular)'))
+
+            # Gloss/mask (texture unit 5) — v8 only, its own toggle.
+            if use_gloss_map and not is_outline and _map_on('igb_use_gloss_map'):
+                nm_cap = normal_map_size or max_texture_size
+                sub_dict['gloss_levels'] = _get_texture_role(
+                    mesh_obj, 'gloss', swap_rb=swap_rb, mat_slot=mat_slot,
+                    max_texture_size=nm_cap)
+                if sub_dict.get('gloss_levels'):
+                    _report(operator, 'INFO',
+                            f"  + gloss/mask map for '{mesh_part.name}'")
+
+            # Honor the Mipmaps toggle by trimming every map to its base level.
+            if not use_mipmaps:
+                for _k in ('texture_levels', 'normal_levels',
+                           'specular_levels', 'gloss_levels', 'cmpr_levels'):
+                    lv = sub_dict.get(_k)
+                    if lv:
+                        sub_dict[_k] = lv[:1]
 
             submeshes.append(sub_dict)
 
@@ -310,7 +447,36 @@ def export_skin(filepath, mesh_objs, armature_obj, operator=None, swap_rb=False,
     if skeleton_data and not skeleton_data.get('name'):
         skeleton_data['name'] = f"{export_name}_skel"
 
-    if igb_format == 'V4':
+    if igb_format == 'V8':
+        from .skin_builder_v8 import SkinBuilderV8
+        v8_subs = []
+        for sub in submeshes:
+            if sub.get('is_outline'):
+                continue
+            # Tangent-frame streams are only needed (and only valid) when a
+            # normal map is actually present for this submesh.
+            with_tan = bool(sub.get('normal_levels'))
+            v8_subs.append({
+                'mesh': _meshpart_to_v8_tris(sub['mesh'], with_tangents=with_tan),
+                'material': sub.get('material'),
+                'texture_levels': sub.get('texture_levels'),
+                'diffuse_pfmt': sub.get('diffuse_pfmt', 16),
+                'normal_levels': sub.get('normal_levels'),
+                'specular_levels': sub.get('specular_levels'),
+                'gloss_levels': sub.get('gloss_levels'),
+                'texture_name': sub.get('texture_name'),
+                'segment_name': sub.get('segment_name', ''),
+            })
+        builder = SkinBuilderV8()
+        # Use the GENUINE-CHARACTER (0201) simple form — igInfoList=[animDB],
+        # no actor graph. The engine builds the actor/combiner at runtime from
+        # the herostat. This avoids our actor-graph value bugs (wrong combiner
+        # quats / identity palette / missing 2nd anim state) entirely. Combined
+        # now with the skin-graph fixes (body not segmented) — the untested
+        # combination. (full 2103 actor-graph form available via actor_graph=True)
+        writer = builder.build_skin(v8_subs, skeleton_data, bms_palette,
+                                    export_name=export_name, actor_graph=False)
+    elif igb_format == 'V4':
         from .skin_builder_v4 import SkinBuilderV4
         builder = SkinBuilderV4()
         writer = builder.build_skin(
@@ -747,6 +913,7 @@ def _extract_material_props(mesh_obj, mat_slot=0):
         'emission': (0.0, 0.0, 0.0, 1.0),
         'shininess': 0.0,
         'flags': 31,
+        'priority': 0,
     }
 
     if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
@@ -766,6 +933,7 @@ def _extract_material_props(mesh_obj, mat_slot=0):
             'emission': tuple(mat.get("igb_emission", (0.0, 0.0, 0.0, 1.0))),
             'shininess': mat.get("igb_shininess", 0.0),
             'flags': mat.get("igb_flags", 31),
+            'priority': int(mat.get("igb_priority", 0)),
         }
     elif mat.use_nodes and mat.node_tree:
         # Fallback: extract from Principled BSDF
@@ -804,8 +972,27 @@ def _read_igb_render_state(mat, result):
             mat.get("igb_color_a", 1.0),
         )
 
-    # Blend state
-    if "igb_blend_enabled" in mat:
+    # Blend state. The friendly "Blend Mode" enum (igb_blend_mode) maps to the
+    # exact igBlendFunctionAttr src/dst pairs; it wins over any raw blend props.
+    # ONE=1, SRC_ALPHA=4, ONE_MINUS_SRC_ALPHA=5.
+    _BLEND_MODES = {
+        'OPAQUE':        (False, 4, 5),
+        'ALPHA':         (True,  4, 5),   # SRC_ALPHA, ONE_MINUS_SRC_ALPHA
+        'ADDITIVE':      (True,  4, 1),   # SRC_ALPHA, ONE
+        'INV_ALPHA_ADD': (True,  5, 1),   # ONE_MINUS_SRC_ALPHA, ONE
+    }
+    # The dropdown is AUTHORITATIVE for every mode, including OPAQUE. OPAQUE
+    # MUST force blend off — otherwise it falls through to the raw
+    # igb_blend_enabled prop, which is commonly True on imported MUA materials
+    # (the game ships igBlendStateAttr enabled even on solid skins), so the
+    # model would export see-through despite the user picking Opaque.
+    mode = getattr(mat, "igb_blend_mode", "OPAQUE")
+    if mode in _BLEND_MODES:
+        en, src, dst = _BLEND_MODES[mode]
+        result['blend_enabled'] = en
+        result['blend_src'] = src
+        result['blend_dst'] = dst
+    elif "igb_blend_enabled" in mat:
         result['blend_enabled'] = bool(mat["igb_blend_enabled"])
         result['blend_src'] = mat.get("igb_blend_src", 4)
         result['blend_dst'] = mat.get("igb_blend_dst", 5)
@@ -826,25 +1013,31 @@ def _read_igb_render_state(mat, result):
         result['cull_face_mode'] = mat.get("igb_cull_face_mode", 0)
 
 
-def _get_texture(mesh_obj, swap_rb=False, mat_slot=0, max_texture_size=0):
+def _get_texture(mesh_obj, swap_rb=False, mat_slot=0, max_texture_size=0,
+                 dxt1=False, return_pfmt=False):
     """Extract texture data from a Blender mesh object's material.
 
     Uses the same approach as the map file exporter:
     1. Find Image Texture via BSDF Base Color link (or fallback any TEX_IMAGE)
     2. Extract RGBA pixels with Y-flip (Blender OpenGL → DXT/IGB convention)
     3. Ensure power-of-2 dimensions
-    4. DXT5 compress with mipmaps
+    4. DXT5 compress with mipmaps (or DXT1 when dxt1=True AND fully opaque —
+       native MUA character diffuse is DXT1, half the size)
 
     Args:
         mesh_obj: Blender mesh object.
         swap_rb: If True, swap R/B channels for MUA PC BGR565 encoding.
         mat_slot: Material slot index to read from (default 0).
         max_texture_size: 0 = keep original size; otherwise cap longest edge.
+        dxt1: prefer DXT1 (pfmt 14) when the image is fully opaque.
+        return_pfmt: when True, return (levels, pfmt) instead of just levels.
 
-    Returns list of (compressed_dxt5_bytes, width, height) tuples, or None.
+    Returns list of (compressed_bytes, width, height) tuples (or with pfmt),
+    or None.
     """
     import bpy
-    from ..utils.dxt_compress import compress_with_mipmaps
+    from ..utils.dxt_compress import (
+        compress_with_mipmaps, compress_with_mipmaps_dxt1, rgba_is_opaque)
 
     if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
         return None
@@ -880,7 +1073,15 @@ def _get_texture(mesh_obj, swap_rb=False, mat_slot=0, max_texture_size=0):
 
     rgba, w, h = _extract_image_rgba(bl_image, w, h, max_texture_size=max_texture_size)
 
-    return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
+    if dxt1 and rgba_is_opaque(rgba):
+        levels = compress_with_mipmaps_dxt1(bytes(rgba), w, h, swap_rb=swap_rb)
+        pfmt = 14  # RGBA_DXT1 — matches native MUA character diffuse
+    else:
+        levels = compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
+        pfmt = 16  # RGBA_DXT5
+    if return_pfmt:
+        return levels, pfmt
+    return levels
 
 
 def _find_role_image(mat, role):
@@ -891,11 +1092,18 @@ def _find_role_image(mat, role):
     Level' (or legacy 'Specular'). Returns a bpy Image or None.
     """
     nodes = mat.node_tree.nodes
-    bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
-    if bsdf is None:
+    # The shader may be a raw Principled BSDF OR the ".IGB Material" node group
+    # (Principled lives inside it). Earlier this only matched BSDF_PRINCIPLED, so
+    # normal/specular maps wired into the group were never found and never
+    # exported even with "Use Normal Maps" on.
+    shader = next((n for n in nodes
+                   if n.type == 'BSDF_PRINCIPLED'
+                   or (n.type == 'GROUP' and n.node_tree is not None
+                       and n.node_tree.name == '.IGB Material')), None)
+    if shader is None:
         return None
     if role == 'normal':
-        inp = bsdf.inputs.get('Normal')
+        inp = shader.inputs.get('Normal')
         if inp and inp.is_linked:
             src = inp.links[0].from_node
             if src.type == 'NORMAL_MAP':
@@ -908,8 +1116,21 @@ def _find_role_image(mat, role):
                 return src.image
         return None
     if role == 'specular':
-        for name in ('Specular IOR Level', 'Specular'):
-            inp = bsdf.inputs.get(name)
+        # Group input is "Specular Texture"; raw BSDF is "Specular IOR Level"
+        for name in ('Specular Texture', 'Specular IOR Level', 'Specular'):
+            inp = shader.inputs.get(name)
+            if inp and inp.is_linked:
+                src = inp.links[0].from_node
+                if src.type == 'TEX_IMAGE' and src.image:
+                    return src.image
+        return None
+    if role == 'gloss':
+        # Gloss/mask (texture unit 5). The .IGB Material group exposes a
+        # "Gloss/Mask Texture" input; fall back to a raw BSDF link or a
+        # node named to hint gloss/mask if the group input is absent.
+        for name in ('Gloss/Mask Texture', 'Gloss Texture', 'Gloss',
+                     'Sheen Tint'):
+            inp = shader.inputs.get(name)
             if inp and inp.is_linked:
                 src = inp.links[0].from_node
                 if src.type == 'TEX_IMAGE' and src.image:
@@ -919,11 +1140,15 @@ def _find_role_image(mat, role):
 
 
 def _get_texture_role(mesh_obj, role, swap_rb=False, mat_slot=0,
-                      max_texture_size=0):
+                      max_texture_size=0, normal_y_flip=True):
     """Extract a normal/specular map as DXT5 levels, or None if absent.
 
-    Normal maps get their green channel flipped (Blender/OpenGL +Y -> the
-    DirectX -Y convention MUA expects). Specular passes through unchanged.
+    Normal maps are repacked to DXT5nm (X->alpha, Y->green, Z reconstructed).
+    MUA's Cg bump shader expects DirectX (green = Y-down); the importer flips
+    native green to Blender's OpenGL (Y-up) for a correct viewport, so the
+    DEFAULT here flips it back to DirectX (normal_y_flip=True) — verified to
+    match native byte-for-byte. Turn OFF only for a map that is already DirectX
+    in Blender (no importer round-trip). Specular passes through unchanged.
     """
     from ..utils.dxt_compress import compress_with_mipmaps
 
@@ -941,9 +1166,32 @@ def _get_texture_role(mesh_obj, role, swap_rb=False, mat_slot=0,
     rgba, w, h = _extract_image_rgba(bl_image, w, h,
                                      max_texture_size=max_texture_size)
     if role == 'normal':
-        rgba = bytearray(rgba)
-        for i in range(1, len(rgba), 4):
-            rgba[i] = 255 - rgba[i]   # flip green (OpenGL -> DirectX)
+        # Native MUA normal maps use the DXT5nm layout (decoded from
+        # 0104bladecybernetic: R=B~0, G~126=normal.Y, A 0..255=normal.X). The
+        # shader reads X from ALPHA and Y from GREEN and reconstructs Z, so a
+        # plain RGB normal makes it read our opaque alpha as X -> wrong bumps.
+        # Repack: X -> alpha, Y -> green (flipped to DirectX), R/B = 0. R/B are
+        # unused so swap_rb is irrelevant here.
+        src = rgba
+        # The source's X can live in RED (a standard tangent-space normal, e.g.
+        # authored via a Normal Map node: R=X, G=Y, B=Z~255) OR in ALPHA (a map
+        # IMPORTED from a native MUA DXT5nm file, which has R=B=0 and X in alpha).
+        # Reading R=0 as X on an imported map was zeroing alpha and destroying
+        # the whole X component -> wrong bumps. Detect where X is and read it.
+        n = len(src) // 4
+        step = max(1, n // 4096)
+        idxs = range(0, n, step)
+        cnt = len(idxs) or 1
+        r_mean = sum(src[i * 4] for i in idxs) / cnt
+        b_mean = sum(src[i * 4 + 2] for i in idxs) / cnt
+        x_in_alpha = (r_mean < 12.0 and b_mean < 12.0)
+        rgba = bytearray(len(src))
+        for px in range(0, len(src), 4):
+            nx = src[px + 3] if x_in_alpha else src[px]   # X from alpha or red
+            ny = src[px + 1]                               # Y from green
+            rgba[px + 1] = (255 - ny) if normal_y_flip else ny  # Y in green
+            rgba[px + 3] = nx                              # X in alpha (DXT5nm)
+        return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=False)
     return compress_with_mipmaps(bytes(rgba), w, h, swap_rb=swap_rb)
 
 
@@ -998,6 +1246,47 @@ def _get_texture_clut(mesh_obj, mat_slot=0, max_texture_size=0):
 
     palette_data, index_data = quantize_rgba_to_clut(bytes(rgba), w, h)
     return (palette_data, index_data, w, h)
+
+
+def _get_texture_cmpr(mesh_obj, mat_slot=0, max_texture_size=0):
+    """Extract the diffuse texture as a GameCube/Wii CMPR byte stream.
+
+    Same RGBA extraction as _get_texture_clut, then GX-tiled DXT1 (CMPR, pfmt
+    34). Returns [(cmpr_bytes, w, h)] (single base level) or None.
+    """
+    import bpy
+    from ..utils.wii_cmpr_compress import compress_rgba_to_cmpr
+
+    if not mesh_obj.data.materials or mat_slot >= len(mesh_obj.data.materials):
+        return None
+    mat = mesh_obj.data.materials[mat_slot]
+    if mat is None or not mat.use_nodes or not mat.node_tree:
+        return None
+
+    # Find the diffuse image (same logic as _get_texture_clut / _get_texture).
+    bl_image = None
+    for node in mat.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            base_color = node.inputs.get('Base Color')
+            if base_color is not None and base_color.is_linked:
+                for link in base_color.links:
+                    if link.from_node.type == 'TEX_IMAGE' and link.from_node.image:
+                        bl_image = link.from_node.image
+                        break
+            break
+    if bl_image is None:
+        for node in mat.node_tree.nodes:
+            if node.type == 'TEX_IMAGE' and node.image:
+                bl_image = node.image
+                break
+    if bl_image is None:
+        return None
+
+    w, h = bl_image.size[0], bl_image.size[1]
+    if w == 0 or h == 0:
+        return None
+    rgba, w, h = _extract_image_rgba(bl_image, w, h, max_texture_size=max_texture_size)
+    return [(compress_rgba_to_cmpr(bytes(rgba), w, h), w, h)]
 
 
 def _extract_image_rgba(bl_image, w, h, max_texture_size=0):

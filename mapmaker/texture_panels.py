@@ -10,7 +10,7 @@ class TEX_PT_main(Panel):
     bl_idname = "TEX_PT_main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB"
+    bl_category = "IGB Tools"
 
     def draw(self, context):
         layout = self.layout

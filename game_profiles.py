@@ -315,6 +315,129 @@ register_profile(GameProfile(
     notes="IGB v6, LE, igGeometryAttr1_5, CLUT paletted textures",
 ))
 
+# XML2 PS2 and MUA1 PS2 are byte-structurally identical to XML2 PC v6
+# (float32 v1 geometry, slots 0/1/11, DirectX UVs) — only the texture is CLUT
+# (pfmt 65536 PSMT8 + igClut 256xRGBA8888) instead of DXT3. Verified: 0101.igb
+# across XML1/XML2/MUA1 PS2 all = v6 / igGeometryAttr1_5 / pfmt 65536 / igClut.
+# (MUA2 PS2 is the odd one out — v8 + igPsx2VertexStream VIF; see mua2_ps2.)
+register_profile(GameProfile(
+    game_id="xml2_ps2",
+    game_name="X-Men Legends 2 (PS2)",
+    engine_version="Alchemy 2.5/3.2",
+    min_version=5,
+    max_version=7,
+    expected_endian="little",
+    geometry=GeometryConfig(
+        geometry_attr_version="v1",
+        ext_slot_positions=0,
+        ext_slot_normals=1,
+        ext_slot_colors=2,
+        ext_slot_texcoords=11,
+        color_byte_order="abgr",
+    ),
+    texture=TextureConfig(
+        uv_v_flip=True,              # Same DirectX UV convention as XML2 PC
+        expected_pixel_formats=(65536, 65537, 8, 0),
+        needs_unswizzle=False,        # Data already linear in IGB
+        has_clut=True,
+    ),
+    coordinate=CoordinateConfig(up_axis="Z", transpose_matrices=True),
+    signature_classes=(
+        b"igGeometryAttr1_5",
+        b"igVertexArray1_1",
+        b"igClut",
+    ),
+    notes="IGB v6, LE, igGeometryAttr1_5, CLUT paletted textures",
+))
+
+register_profile(GameProfile(
+    game_id="mua1_ps2",
+    game_name="Marvel: Ultimate Alliance (PS2)",
+    engine_version="Alchemy 3.2",
+    min_version=5,
+    max_version=7,
+    expected_endian="little",
+    geometry=GeometryConfig(
+        geometry_attr_version="v1",
+        ext_slot_positions=0,
+        ext_slot_normals=1,
+        ext_slot_colors=2,
+        ext_slot_texcoords=11,
+        color_byte_order="abgr",
+    ),
+    texture=TextureConfig(
+        uv_v_flip=True,
+        expected_pixel_formats=(65536, 65537, 8, 0),
+        needs_unswizzle=False,
+        has_clut=True,
+    ),
+    coordinate=CoordinateConfig(up_axis="Z", transpose_matrices=True),
+    signature_classes=(
+        b"igGeometryAttr1_5",
+        b"igVertexArray1_1",
+        b"igClut",
+    ),
+    notes="IGB v6, LE, igGeometryAttr1_5, CLUT paletted textures (MUA1 PS2)",
+))
+
+# XML1 / XML2 GameCube: v6 + v1 float32 geometry (identical to PC/PS2-classic),
+# LITTLE-ENDIAN container (the GC PowerPC engine byte-swaps at load), CMPR
+# textures (pfmt 34 = GX-tiled DXT1, no CLUT). Verified: 0101.igb GC = v6 /
+# igGeometryAttr1_5 / pfmt 34 / 0.5 byte-per-px. (Wii MUA = v8 + CMPR; separate.)
+register_profile(GameProfile(
+    game_id="xml1_gc",
+    game_name="X-Men Legends 1 (GameCube)",
+    engine_version="Alchemy 2.5",
+    min_version=5,
+    max_version=7,
+    expected_endian="little",
+    geometry=GeometryConfig(
+        geometry_attr_version="v1",
+        ext_slot_positions=0,
+        ext_slot_normals=1,
+        ext_slot_colors=2,
+        ext_slot_texcoords=11,
+        color_byte_order="abgr",
+    ),
+    texture=TextureConfig(
+        uv_v_flip=True,
+        expected_pixel_formats=(34, 21),  # GC/Wii CMPR
+    ),
+    coordinate=CoordinateConfig(up_axis="Z", transpose_matrices=True),
+    signature_classes=(
+        b"igGeometryAttr1_5",
+        b"igVertexArray1_1",
+    ),
+    notes="IGB v6, LE, igGeometryAttr1_5, CMPR (GX-tiled) textures (GameCube)",
+))
+
+register_profile(GameProfile(
+    game_id="xml2_gc",
+    game_name="X-Men Legends 2 (GameCube)",
+    engine_version="Alchemy 2.5/3.2",
+    min_version=5,
+    max_version=7,
+    expected_endian="little",
+    geometry=GeometryConfig(
+        geometry_attr_version="v1",
+        ext_slot_positions=0,
+        ext_slot_normals=1,
+        ext_slot_colors=2,
+        ext_slot_texcoords=11,
+        color_byte_order="abgr",
+    ),
+    texture=TextureConfig(
+        uv_v_flip=True,
+        expected_pixel_formats=(34, 21),  # GC/Wii CMPR
+    ),
+    coordinate=CoordinateConfig(up_axis="Z", transpose_matrices=True),
+    signature_classes=(
+        b"igGeometryAttr1_5",
+        b"igVertexArray1_1",
+    ),
+    notes="IGB v6, LE, igGeometryAttr1_5, CMPR (GX-tiled) textures (GameCube)",
+))
+
 # ---- Group A: v1 geometry platforms (same pipeline as XML2 PC) ----
 
 register_profile(GameProfile(

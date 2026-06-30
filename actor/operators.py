@@ -8,6 +8,69 @@ from bpy.props import StringProperty, IntProperty, EnumProperty, BoolProperty, F
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 
+def _game_dir_from_actor_path(actor_filepath):
+    """Infer the game root from an actor .igb path.
+
+    Actors live in ``<game root>/actors/<file>.igb``; the game root holds the
+    ``actors/`` and ``data/`` folders used to resolve herostat/skin files.
+    Returns the inferred root, or "" if the path isn't under an actors/ folder.
+    """
+    parent = os.path.dirname(actor_filepath)
+    if os.path.basename(parent).lower() == 'actors':
+        root = os.path.dirname(parent)
+        if os.path.isdir(root):
+            return root
+    return ""
+
+
+def _build_anim_ref_armature(context, anim_filepath):
+    """Build a throwaway reference armature for a separate anim file.
+
+    Reuses import_actor EXACTLY as the actor would be built FROM the anim file
+    (same skin discovery + inverse-joint source), so the reference's bone rest
+    frames match what the animation was authored against — i.e. the upright
+    "ground truth" pose. pick_animation uses it to rebase a separate-file anim
+    into the actor's parent frame (sideways fix). Geometry/materials are skipped
+    (armature only). The caller MUST remove it via _remove_anim_ref_armature.
+    """
+    from .actor_import import import_actor
+
+    game_dir = _game_dir_from_actor_path(anim_filepath)
+    skins = _discover_skin_files(anim_filepath, game_dir)
+    res = import_actor(context, anim_filepath,
+                       skin_filepaths=skins or [],
+                       game_dir=game_dir or None,
+                       options={'import_skins': False,
+                                'import_animations': False,
+                                'import_materials': False,
+                                'game_preset': 'auto'})
+    if not res or res[0] is None:
+        raise ValueError("anim reference import failed")
+    return res[0]
+
+
+def _remove_anim_ref_armature(arm):
+    """Remove a temp anim-ref armature (object + data + its now-empty collection)."""
+    try:
+        colls = list(arm.users_collection)
+        data = arm.data
+        bpy.data.objects.remove(arm, do_unlink=True)
+        if data is not None and data.users == 0:
+            bpy.data.armatures.remove(data)
+        # import_actor links the armature into a collection named after the
+        # anim file; drop it once empty so the reference leaves no trace.
+        scene_coll = bpy.context.scene.collection
+        for c in colls:
+            if c is not scene_coll and len(c.objects) == 0 \
+                    and len(c.children) == 0:
+                try:
+                    bpy.data.collections.remove(c)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def _discover_skin_files(anim_filepath, game_dir=""):
     """Discover skin files for an actor animation file.
 
@@ -73,6 +136,16 @@ class ACTOR_OT_import_actor(Operator, ImportHelper):
         props = context.scene.igb_actor
         anim_filepath = self.filepath
 
+        # Auto-detect game from the skin's own metadata (ignores a stale Game
+        # dropdown — fixes blue/BGR MUA PC textures) and fill the game dir.
+        if props.auto_detect_game:
+            game_preset = 'auto'
+            detected_dir = _game_dir_from_actor_path(anim_filepath)
+            if detected_dir and not props.game_dir:
+                props.game_dir = detected_dir
+        else:
+            game_preset = props.game_preset
+
         # Try to resolve skin files
         skin_filepaths = _discover_skin_files(anim_filepath, props.game_dir)
 
@@ -80,7 +153,7 @@ class ACTOR_OT_import_actor(Operator, ImportHelper):
             'import_skins': props.import_skins,
             'import_animations': props.import_animations,
             'import_materials': props.import_materials,
-            'game_preset': props.game_preset,
+            'game_preset': game_preset,
         }
 
         # If skins found and import_skins enabled, show selection dialog
@@ -384,6 +457,7 @@ class ACTOR_OT_import_animations(Operator, ImportHelper):
         # Populate the cache for the multi-select dialog
         _anim_import_cache['parsed_anims'] = parsed_anims
         _anim_import_cache['bind_pose'] = bind_pose
+        _anim_import_cache['anim_filepath'] = self.filepath
         _anim_import_cache['anim_names'] = [
             (pa.name, pa.name, f"{pa.duration_ms / 1000.0:.2f}s, {len(pa.tracks)} tracks")
             for pa in parsed_anims
@@ -407,16 +481,28 @@ def _skin_export_texture_items(self, context):
 
 
 def _skin_export_resolution_items(self, context):
-    """Enum items for skin export texture resolution cap (longest edge)."""
+    """Enum items for skin export texture resolution cap (longest edge).
+
+    Textures are ~80-90% of an exported IGB's size, so this cap is by far the
+    biggest lever on file size. Default is 512: it matches native practice
+    (most retail characters use 256-512px skins) and a character is only
+    ~100-200px wide on screen, so 512 is already 2-4x oversampled. Going from
+    a 1024px source to 512 is ~4x less texture data (e.g. ~3MB -> ~0.8MB).
+    The first item is the EnumProperty default, so '512' must stay first.
+    """
     return [
-        ('original', "Original",
-         "Keep each texture's source size (rounded up to power-of-2)"),
+        ('512', "512  (Recommended)",
+         "Cap textures to 512px on the longest edge. ~4x smaller than 1024 "
+         "and visually identical in-game (characters are small on screen). "
+         "Matches native characters, which mostly use 256-512px skins"),
+        ('256', "256  (Smallest)",
+         "Cap textures to 256px. ~16x smaller than 1024 — best for menu "
+         "mannequins or size-constrained mods; slightly softer up close"),
         ('1024', "1024",
-         "Cap each texture to 1024px on the longest edge"),
-        ('512', "512",
-         "Cap each texture to 512px on the longest edge"),
-        ('256', "256",
-         "Cap each texture to 256px on the longest edge"),
+         "Cap textures to 1024px on the longest edge"),
+        ('original', "Original  (Largest)",
+         "Keep each texture's full source size (rounded up to power-of-2). "
+         "Biggest files; use only if you need maximum texture detail"),
     ]
 
 
@@ -446,8 +532,47 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
         items=_skin_export_resolution_items,
     )
 
+    # The ONLY format choice the user sees: pick the game, we apply its correct,
+    # in-game-proven format + texture encoding automatically.
+    game_target: EnumProperty(
+        name="Game",
+        description="Which game this skin is for. The exporter picks the "
+                    "correct, in-game-proven format and texture encoding "
+                    "automatically — no other choices needed",
+        items=[
+            ('MUA', "Marvel Ultimate Alliance",
+             "3ds Max v4 skin + DXT5 (MUA BGR) textures, with normal + "
+             "specular maps exported automatically. The format MUA loads"),
+            ('XML2', "X-Men Legends 2",
+             "Native v6 skin + CLUT textures. The format XML2 loads"),
+        ],
+        default='MUA',
+    )
+
+    platform: EnumProperty(
+        name="Platform",
+        description="Target platform. PC uses each game's native PC format; "
+                    "PS2 / GameCube force the v6 console format these games "
+                    "use (CLUT on PS2, GX-tiled CMPR on GameCube)",
+        items=[
+            ('PC', "PC", "Native PC format for the selected game"),
+            ('PS2', "PS2 (XML1/XML2/MUA1)",
+             "v6 skin + CLUT (PSMT8) textures — the format these games load on "
+             "PlayStation 2. Use this even for MUA1: PS2 MUA1 is v6, not the "
+             "PC v4 + DXT5"),
+        ('GC', "GameCube (XML1/XML2)",
+             "v6 skin + CMPR (GX-tiled DXT1) textures — the format X-Men "
+             "Legends 1 & 2 load on GameCube. (MUA on Nintendo is Wii/v8, not "
+             "covered by this preset)"),
+        ],
+        default='PC',
+    )
+
+    # --- internal format knobs (kept for the builder code; not shown in the UI;
+    #     execute() sets the right combination from game_target) ---
     actor_graph: EnumProperty(
         name="Skin Format",
+        options={'HIDDEN'},
         description="IGB layout + how much of the 3ds Max-style actor graph "
                     "to emit. The v4 Max-style formats mirror community "
                     "skins; 'v4 + Combiner' carries the engine-side "
@@ -468,6 +593,10 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
              "v4 layout + MUA-era combiner graph. CRASHES XML2 — the XML2 "
              "engine cannot deserialize combiner classes (no XML2 skin, "
              "vanilla or modded, carries them). MUA-era Max skins all do"),
+            ('V8_NATIVE', "v8 (MUA Native)",
+             "Alchemy 5.0 native format: igGeometryAttr2 separate-list "
+             "geometry. The format MUA itself ships — carries normal/spec/"
+             "gloss maps + mipmaps. MUA ONLY (XML2 cannot read v8)"),
         ],
         default='OFF',
     )
@@ -475,12 +604,30 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
     use_normal_maps: BoolProperty(
         name="Use Normal Maps (MUA)",
         description="Export normal + specular maps alongside the diffuse "
-                    "(MUA only, 3ds Max v4 format). Reads the Normal Map and "
-                    "Specular textures from each material and emits the "
-                    "tangent-frame vertex data MUA's shader needs. Requires "
-                    "Texture Format = DXT5 (MUA Only) and Skin Format = 3ds "
-                    "Max v4. XML2 has no normal maps and ignores this",
+                    "(MUA only, 3ds Max v4 or v8 native format). Reads the "
+                    "Normal Map and Specular textures from each material and "
+                    "emits the tangent-frame vertex data MUA's shader needs. "
+                    "Requires Texture Format = DXT5 (MUA Only) and Skin Format "
+                    "= 3ds Max v4 or v8 (MUA Native). XML2 has no normal maps "
+                    "and ignores this",
         default=False,
+    )
+
+    use_gloss_map: BoolProperty(
+        name="Use Gloss / Mask Map (v8)",
+        description="Export a gloss/mask map on texture unit 5 (v8 MUA native "
+                    "only). Reads the 'Gloss/Mask Texture' input from each "
+                    "material. Used by MUA's shader for specular masking / "
+                    "glossiness. Ignored unless Skin Format = v8 (MUA Native)",
+        default=False,
+    )
+
+    use_mipmaps: BoolProperty(
+        name="Generate Mipmaps",
+        description="Build the full mipmap chain for every texture (smoother "
+                    "at distance, matches native MUA skins). Turn off to ship "
+                    "only the base level for a smaller file",
+        default=True,
     )
 
     normal_map_size: EnumProperty(
@@ -493,6 +640,16 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             ('256', "256 x 256", "Cap normal/specular maps at 256px"),
         ],
         default='0',
+    )
+
+    normal_y_flip: BoolProperty(
+        name="Flip Normal Green (Y)",
+        description="Convert Blender's OpenGL (Y-up) normal green back to MUA's "
+                    "DirectX (Y-down). Leave this ON (default) — it matches "
+                    "native MUA normal maps and the addon's importer, which "
+                    "flips green for Blender's viewport. Turn OFF only if your "
+                    "map is already DirectX in Blender and looks like dents",
+        default=True,
     )
 
     mannequin_mode: BoolProperty(
@@ -508,18 +665,18 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
         options={'HIDDEN'},
     )
 
+    def _is_v8(self):
+        return self.actor_graph == 'V8_NATIVE'
+
     def _normal_maps_available(self):
-        """Normal maps need the MUA DXT5 + 3ds Max v4 path."""
-        return (self.actor_graph.startswith('V4')
+        """Normal maps need the MUA DXT5 + (3ds Max v4 OR v8 native) path."""
+        return ((self.actor_graph.startswith('V4') or self._is_v8())
                 and self.texture_format == 'dxt5_mua')
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "texture_format")
-        layout.prop(self, "texture_resolution")
         if self.mannequin_mode:
-            # The actor_graph/normal-map knobs are forced/irrelevant here;
-            # show placement guidance instead (the only thing that matters).
+            # Placement guidance is the only thing that matters for a mannequin.
             box = layout.box()
             box.label(text="MUA Animated Mannequin", icon='ARMATURE_DATA')
             box.label(text="Save as <id>.igb (id = a character slot)",
@@ -528,17 +685,37 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             box.label(text="The MUA menu supplies the idle automatically.",
                       icon='INFO')
             return
-        layout.prop(self, "actor_graph")
-        layout.separator()
-        avail = self._normal_maps_available()
-        row = layout.row()
-        row.enabled = avail
-        row.prop(self, "use_normal_maps")
-        if not avail:
-            layout.label(text="Normal maps: set DXT5 (MUA) + 3ds Max v4",
-                         icon='INFO')
-        elif self.use_normal_maps:
-            layout.prop(self, "normal_map_size")
+        # Choices: the game, the platform, and an optional texture-size cap. The
+        # exporter applies the correct format/textures/maps automatically.
+        layout.prop(self, "game_target")
+        layout.prop(self, "platform")
+        layout.prop(self, "texture_resolution")
+        # Show the format consequence so the choice can't silently drop normal
+        # maps. PS2 = v6 + CLUT for all 3 games; PC = each game's native format.
+        fmt = layout.box().column(align=True)
+        if self.platform == 'PS2':
+            fmt.label(text="PS2: v6 + CLUT (PSMT8) textures", icon='SCENE')
+            fmt.label(text="XML1 / XML2 / MUA1 all load this on PS2.",
+                      icon='INFO')
+            fmt.label(text="No normal/specular maps on PS2.", icon='INFO')
+        elif self.platform == 'GC':
+            fmt.label(text="GameCube: v6 + CMPR (GX-tiled) textures",
+                      icon='SCENE')
+            fmt.label(text="X-Men Legends 1 & 2 load this on GameCube.",
+                      icon='INFO')
+            fmt.label(text="MUA on Nintendo is Wii/v8 (not this preset).",
+                      icon='INFO')
+        elif self.game_target == 'MUA':
+            fmt.label(text="MUA (PC): v4 + DXT5 textures", icon='CHECKMARK')
+            fmt.label(text="Normal + specular maps export automatically.",
+                      icon='TEXTURE')
+            layout.prop(self, "normal_y_flip")
+        else:
+            fmt.label(text="XML2 (PC): v6 + CLUT textures", icon='SCENE')
+            fmt.label(text="No normal/specular maps (XML2 has none).",
+                      icon='INFO')
+            fmt.label(text="For normal maps, pick Marvel Ultimate Alliance.",
+                      icon='ERROR')
 
     @classmethod
     def poll(cls, context):
@@ -590,48 +767,72 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
                     f"({sum(1 for _, o in mesh_objs if not o)} main, "
                     f"{sum(1 for _, o in mesh_objs if o)} outline)")
 
-        # Do the export (from-scratch, no template needed)
-        if self.texture_format == 'clut':
+        # Apply the correct, in-game-proven format + textures for the game.
+        if self.game_target == 'MUA':
+            igb_format = 'V4'        # 3ds Max v4 — the MUA format that loads
+            texture_mode = 'dxt5'
+            swap_rb = True           # MUA BGR565
+            use_nm = True            # normal + specular maps, auto if present
+            use_gloss = True         # gloss/mask map on texture unit 5 (per
+            #                          material via its 'Use Gloss/Mask Map' toggle)
+            # Resized / rig-converted characters need the MUA combiner to ground
+            # in the character-select menu (no float); native-proportioned skins
+            # use the simpler bind-pose form. Auto-detected — no user choice.
+            _scale = armature_obj.get("igb_export_scale", 1.0)
+            _scaled = (armature_obj.get("igb_converted_rig", False) or
+                       (isinstance(_scale, (int, float)) and abs(_scale - 1.0) > 0.01))
+            graph_mode = 'FULL' if _scaled else 'ANIM'
+        else:  # XML2
+            igb_format = 'V6'        # XML2 native
+            graph_mode = 'OFF'
+            texture_mode = 'clut'    # universal CLUT, proven in XML2
             swap_rb = False
+            use_nm = False           # XML2 has no normal maps
+            use_gloss = False        # XML2 uses a single diffuse texture
+
+        # PS2 (XML1 / XML2 / MUA1) override: native PS2 actors for ALL THREE
+        # games are v6 / igGeometryAttr1_5 (float32) / pfmt 65536 CLUT — verified
+        # against 0101.igb in each. This forces that format regardless of which
+        # game is selected, so a MUA1 skin targets PS2 (v6+CLUT) instead of the
+        # PC-MUA v4+DXT5 path. No normal/gloss maps (PS2-classic has none).
+        if self.platform == 'PS2':
+            igb_format = 'V6'
+            graph_mode = 'OFF'
             texture_mode = 'clut'
-        elif self.texture_format == 'dxt5_mua':
-            swap_rb = True
-            texture_mode = 'dxt5'
-        else:  # dxt5_xml2
             swap_rb = False
-            texture_mode = 'dxt5'
+            use_nm = False
+            use_gloss = False
+        elif self.platform == 'GC':
+            # GameCube (XML1/XML2): v6 + CMPR (GX-tiled DXT1, pfmt 34). Same
+            # float32 v6 geometry/rig as PS2/PC — only the texture encoder
+            # differs. Verified native GC 0101 = v6 / igGeometryAttr1_5 / pfmt 34.
+            igb_format = 'V6'
+            graph_mode = 'OFF'
+            texture_mode = 'cmpr'
+            swap_rb = False
+            use_nm = False
+            use_gloss = False
+
+        use_mips = True
+        normal_map_size = 0
 
         try:
             max_texture_size = int(self.texture_resolution)
         except (TypeError, ValueError):
             max_texture_size = 0  # 'original'
 
-        # Map the format enum to builder family + graph mode
-        if self.actor_graph.startswith('V4'):
-            igb_format = 'V4'
-            graph_mode = 'FULL' if self.actor_graph == 'V4_FULL' else 'ANIM'
-        else:
-            igb_format = 'V6'
-            graph_mode = self.actor_graph
-
-        # Mannequin export is just a bare v6 skinned actor — the MUA menu
-        # animates it at runtime (no embedded animation; verified the stock
-        # mannequins ship an empty igAnimationList). Force the proven layout
-        # regardless of how the dialog was left, and never emit a combiner.
+        # Mannequin export is a bare v6 skinned actor; the MUA menu animates it
+        # at runtime (stock mannequins ship an empty igAnimationList).
         if self.mannequin_mode:
             igb_format = 'V6'
             graph_mode = 'OFF'
+            texture_mode = 'dxt5'
+            swap_rb = True
             use_nm = False
+            use_gloss = False
             self.report({'INFO'},
                         "Mannequin: save as <id>.igb in ui/models/mannequin/ "
                         "(id = character slot). The menu plays the idle.")
-        else:
-            use_nm = self.use_normal_maps
-
-        try:
-            normal_map_size = int(self.normal_map_size)
-        except (TypeError, ValueError):
-            normal_map_size = 0
 
         success = export_skin(
             filepath=self.filepath,
@@ -645,6 +846,9 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
             igb_format=igb_format,
             use_normal_maps=use_nm,
             normal_map_size=normal_map_size,
+            use_gloss_map=use_gloss,
+            use_mipmaps=use_mips,
+            normal_y_flip=self.normal_y_flip,
         )
 
         return {'FINISHED'} if success else {'CANCELLED'}
@@ -670,6 +874,22 @@ class ACTOR_OT_export_skin(Operator, ExportHelper):
                 else:
                     self.filepath = os.path.join(dirname,
                                                  f"{basename}_export.igb")
+        # Auto-pick the game from the imported source: MUA-sourced skins default
+        # to MUA, XML2-sourced to XML2 (the user can still flip the dropdown).
+        if not self.mannequin_mode:
+            arm = bpy.data.objects.get(props.active_armature)
+            if arm is not None:
+                profile = (arm.get("igb_game_profile", "") or "")
+                if arm.get("igb_source_is_mua_pc") or "Ultimate Alliance" in profile:
+                    self.game_target = 'MUA'
+                elif "X-Men Legends 2" in profile:
+                    self.game_target = 'XML2'
+                # PS2-sourced (v6 CLUT) skins default the platform to PS2.
+                # Exclude MUA2 PS2 — that's the v8/VIF path this preset can't emit.
+                if "(PS2)" in profile and "Alliance 2" not in profile:
+                    self.platform = 'PS2'
+                elif "(GameCube)" in profile:
+                    self.platform = 'GC'
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
@@ -1399,22 +1619,40 @@ class ACTOR_OT_pick_animation(Operator):
             self.report({'WARNING'}, "No animations selected")
             return {'CANCELLED'}
 
+        # Build a throwaway armature from the SEPARATE anim file's own skeleton
+        # so build_action can rebase its rotations into the actor's parent frame
+        # (fixes sideways playback when the actor's root chain differs, e.g. a
+        # skin-built actor has a +90X "Unnamed bone" root above Bip01). Safe:
+        # on any failure we fall back to anim_armature=None (current behavior).
+        anim_armature = None
+        anim_fp = _anim_import_cache.get('anim_filepath')
+        if anim_fp and os.path.exists(anim_fp):
+            try:
+                anim_armature = _build_anim_ref_armature(context, anim_fp)
+            except Exception:
+                anim_armature = None
+
         fps = context.scene.render.fps
         imported_count = 0
-        for pa in selected:
-            action = build_action(armature_obj, pa, bind_pose=bind_pose,
-                                  bone_remap=bone_remap,
-                                  target_bind_pose=target_bind_pose)
-            if action is None:
-                continue
+        try:
+            for pa in selected:
+                action = build_action(armature_obj, pa, bind_pose=bind_pose,
+                                      bone_remap=bone_remap,
+                                      target_bind_pose=target_bind_pose,
+                                      anim_armature=anim_armature)
+                if action is None:
+                    continue
 
-            item = props.animations.add()
-            item.name = action.name
-            item.action_name = action.name
-            item.duration_ms = action.get("igb_duration_ms", 0.0)
-            item.track_count = action.get("igb_track_count", 0)
-            item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
-            imported_count += 1
+                item = props.animations.add()
+                item.name = action.name
+                item.action_name = action.name
+                item.duration_ms = action.get("igb_duration_ms", 0.0)
+                item.track_count = action.get("igb_track_count", 0)
+                item.frame_count = max(1, int(item.duration_ms / 1000.0 * fps))
+                imported_count += 1
+        finally:
+            if anim_armature is not None:
+                _remove_anim_ref_armature(anim_armature)
 
         if imported_count > 0:
             props.animations_index = len(props.animations) - 1
@@ -1425,6 +1663,7 @@ class ACTOR_OT_pick_animation(Operator):
         _anim_import_cache['parsed_anims'] = []
         _anim_import_cache['bind_pose'] = None
         _anim_import_cache['anim_names'] = []
+        _anim_import_cache['anim_filepath'] = None
 
         return {'FINISHED'}
 
@@ -2621,7 +2860,260 @@ class ACTOR_OT_show_all_skins(Operator):
         return {'FINISHED'}
 
 
+def _igb_group_node(mat):
+    """Return the ".IGB Material" group node of a material, or None."""
+    if mat is None or not mat.use_nodes or mat.node_tree is None:
+        return None
+    return next((n for n in mat.node_tree.nodes
+                 if n.type == 'GROUP' and n.node_tree is not None
+                 and n.node_tree.name == '.IGB Material'), None)
+
+
+def _role_map_node(mat, role):
+    """Return the Image Texture node feeding the group's Normal/Specular input.
+
+    Mirrors how the exporter (_find_role_image) reads it, so the per-material
+    picker and the export agree.
+    """
+    grp = _igb_group_node(mat)
+    if grp is None:
+        return None
+    if role == 'normal':
+        inp = grp.inputs.get('Normal')
+        if inp and inp.is_linked:
+            src = inp.links[0].from_node
+            if src.type == 'NORMAL_MAP':
+                col = src.inputs.get('Color')
+                if (col and col.is_linked
+                        and col.links[0].from_node.type == 'TEX_IMAGE'):
+                    return col.links[0].from_node
+            elif src.type == 'TEX_IMAGE':
+                return src
+    elif role == 'gloss':
+        inp = grp.inputs.get('Gloss/Mask Texture')
+        if (inp and inp.is_linked
+                and inp.links[0].from_node.type == 'TEX_IMAGE'):
+            return inp.links[0].from_node
+    else:  # specular
+        inp = grp.inputs.get('Specular Texture')
+        if (inp and inp.is_linked
+                and inp.links[0].from_node.type == 'TEX_IMAGE'):
+            return inp.links[0].from_node
+    return None
+
+
+class ACTOR_OT_add_material_map(Operator):
+    """Add a Normal/Specular map slot to this material, then pick its image.
+
+    Exported when 'Use Normal Maps' is on (3ds Max v4 + DXT5 MUA)."""
+    bl_idname = "actor.add_material_map"
+    bl_label = "Add Map"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    material_name: StringProperty()
+    role: EnumProperty(items=[('normal', "Normal", ""),
+                              ('specular', "Specular", ""),
+                              ('gloss', "Gloss/Mask", "")])
+
+    # Which group-node input each role feeds, and the vertical offset used
+    # to lay the new Image Texture node out tidily in the shader editor.
+    _ROLE_SOCKET = {'normal': 'Normal',
+                    'specular': 'Specular Texture',
+                    'gloss': 'Gloss/Mask Texture'}
+    _ROLE_OFFSET = {'normal': 250, 'specular': 420, 'gloss': 590}
+
+    def execute(self, context):
+        mat = bpy.data.materials.get(self.material_name)
+        grp = _igb_group_node(mat)
+        if grp is None:
+            self.report({'ERROR'},
+                        "Material has no IGB Material node — use 'Convert "
+                        "Materials to IGB' first")
+            return {'CANCELLED'}
+        if _role_map_node(mat, self.role) is not None:
+            return {'FINISHED'}
+        # Validate the target socket BEFORE creating any node, so a stale node
+        # group (missing the socket) can't leave an orphaned, unwired image.
+        target_sock = grp.inputs.get(self._ROLE_SOCKET[self.role])
+        if target_sock is None:
+            self.report({'ERROR'},
+                        f"'{self._ROLE_SOCKET[self.role]}' input is missing on "
+                        f"the .IGB Material node — re-run 'Convert Materials to "
+                        f"IGB' to update it")
+            return {'CANCELLED'}
+        nt = mat.node_tree
+        tex = nt.nodes.new('ShaderNodeTexImage')
+        tex.label = self.role.capitalize() + " Map"
+        try:
+            tex.image = None
+        except Exception:
+            pass
+        y = grp.location.y - self._ROLE_OFFSET.get(self.role, 250)
+        tex.location = (grp.location.x - 650, y)
+        if self.role == 'normal':
+            nm = nt.nodes.new('ShaderNodeNormalMap')
+            nm.location = (grp.location.x - 320, y)
+            nt.links.new(tex.outputs['Color'], nm.inputs['Color'])
+            nt.links.new(nm.outputs['Normal'], target_sock)
+        else:
+            nt.links.new(tex.outputs['Color'], target_sock)
+        self.report({'INFO'},
+                    f"Added {self.role} map slot to {mat.name} — pick an image")
+        return {'FINISHED'}
+
+
+class ACTOR_OT_clear_material_map(Operator):
+    """Remove this material's Normal / Specular / Gloss map node(s)."""
+    bl_idname = "actor.clear_material_map"
+    bl_label = "Remove Map"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    material_name: StringProperty()
+    role: EnumProperty(items=[('normal', "Normal", ""),
+                              ('specular', "Specular", ""),
+                              ('gloss', "Gloss/Mask", "")])
+
+    def execute(self, context):
+        mat = bpy.data.materials.get(self.material_name)
+        tex = _role_map_node(mat, self.role)
+        if tex is None:
+            return {'FINISHED'}
+        nt = mat.node_tree
+        # For normals, also remove the intervening Normal Map node.
+        to_remove = [tex]
+        for out in tex.outputs:
+            for link in out.links:
+                if link.to_node.type == 'NORMAL_MAP':
+                    to_remove.append(link.to_node)
+        for n in to_remove:
+            try:
+                nt.nodes.remove(n)
+            except Exception:
+                pass
+        self.report({'INFO'}, f"Removed {self.role} map from {mat.name}")
+        return {'FINISHED'}
+
+
+class ACTOR_OT_select_material(Operator):
+    """Select which material on the skin to edit in the Materials panel."""
+    bl_idname = "actor.select_material"
+    bl_label = "Select Material"
+    bl_options = {'INTERNAL'}
+
+    material_name: StringProperty()
+
+    def execute(self, context):
+        context.scene.igb_actor.active_material_name = self.material_name
+        return {'FINISHED'}
+
+
+class ACTOR_OT_toggle_segment_collapse(Operator):
+    """Collapse / expand a segment's details in the Segments panel."""
+    bl_idname = "actor.toggle_segment_collapse"
+    bl_label = "Toggle Segment"
+    bl_options = {'INTERNAL'}
+
+    segment_name: StringProperty()
+
+    def execute(self, context):
+        props = context.scene.igb_actor
+        arm = bpy.data.objects.get(props.active_armature)
+        if arm is None:
+            return {'CANCELLED'}
+        # "__body__" sentinel for the unnamed Body group — keep this in sync
+        # with the read site in panels.py (_seg_collapse_key).
+        key = "igb_segcollapse:" + (self.segment_name or "__body__")
+        arm[key] = not arm.get(key, False)
+        return {'FINISHED'}
+
+
+class ACTOR_OT_import_game_lights(Operator, ImportHelper):
+    """Create Blender lights from a game scene IGB so your skin previews under
+    real game lighting. Actor IGBs have no lights — point this at a map
+    (maps/act1/.../*.igb) for in-level lighting, or maps/menu/main_back.igb for
+    the menu rig."""
+    bl_idname = "actor.import_game_lights"
+    bl_label = "Import Game Lighting"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filename_ext = ".igb"
+    filter_glob: StringProperty(default="*.igb", options={'HIDDEN'})
+    point_energy: FloatProperty(name="Point/Spot Energy", default=400.0,
+                                min=0.0, soft_max=5000.0)
+    sun_strength: FloatProperty(name="Sun Strength", default=3.0,
+                                min=0.0, soft_max=50.0)
+    set_world_ambient: BoolProperty(name="Set World Ambient", default=True)
+
+    def invoke(self, context, event):
+        props = context.scene.igb_actor
+        if props.game_dir and not self.filepath:
+            cand = os.path.join(props.game_dir, "maps", "menu", "main_back.igb")
+            if os.path.exists(cand):
+                self.filepath = cand
+        return super().invoke(context, event)
+
+    def execute(self, context):
+        from ..importer.light_importer import import_lights_to_blender
+        try:
+            created, total, amb = import_lights_to_blender(
+                self.filepath, point_energy=self.point_energy,
+                sun_strength=self.sun_strength)
+        except Exception as e:
+            self.report({'ERROR'}, f"Light import failed: {e}")
+            return {'CANCELLED'}
+        if created == 0:
+            self.report({'WARNING'},
+                        "No lights in that IGB — actor files have none. Try a "
+                        "map .igb or maps/menu/main_back.igb")
+            return {'CANCELLED'}
+        if self.set_world_ambient and amb is not None:
+            world = context.scene.world or bpy.data.worlds.new("IGB World")
+            context.scene.world = world
+            world.use_nodes = True
+            bg = world.node_tree.nodes.get('Background')
+            if bg is not None:
+                bg.inputs[0].default_value = (amb[0], amb[1], amb[2], 1.0)
+                bg.inputs[1].default_value = 1.0
+        self.report({'INFO'},
+                    f"Imported {created} game light(s) into the 'IGB Game "
+                    f"Lights' collection")
+        return {'FINISHED'}
+
+
+class ACTOR_OT_character_preview_lights(Operator):
+    """Build a 3-point key/fill/rim SUN rig tuned to show off a skin's
+    normal / specular / gloss maps. Replaces the 'IGB Game Lights' collection.
+    Switch the viewport to Material Preview or Rendered shading to see it."""
+    bl_idname = "actor.character_preview_lights"
+    bl_label = "Character Preview Lighting"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    energy_scale: FloatProperty(name="Brightness", default=1.0, min=0.0,
+                                soft_max=4.0,
+                                description="Scale all three lamps together")
+    set_world_ambient: BoolProperty(name="Set World Ambient", default=True)
+
+    def execute(self, context):
+        from ..importer.light_importer import build_character_preview_rig
+        try:
+            n = build_character_preview_rig(
+                set_world_ambient=self.set_world_ambient,
+                energy_scale=self.energy_scale)
+        except Exception as e:
+            self.report({'ERROR'}, f"Preview rig failed: {e}")
+            return {'CANCELLED'}
+        self.report({'INFO'},
+                    f"Built {n}-point character preview rig in 'IGB Game Lights'")
+        return {'FINISHED'}
+
+
 _classes = (
+    ACTOR_OT_import_game_lights,
+    ACTOR_OT_character_preview_lights,
+    ACTOR_OT_add_material_map,
+    ACTOR_OT_clear_material_map,
+    ACTOR_OT_select_material,
+    ACTOR_OT_toggle_segment_collapse,
     ACTOR_OT_fix_menu_anims,
     ACTOR_OT_scale_anim_set,
     ACTOR_OT_apply_pose_resize,

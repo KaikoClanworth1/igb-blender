@@ -140,11 +140,14 @@ _IDENTITY44 = (1.0, 0.0, 0.0, 0.0,
 VTX_FMT_SLOTS = 19          # v4 slot-table size (v6 uses 20)
 FMT_SKINNED = 0x443         # pos+normals+weights
 FMT_SKINNED_UV = 0x10443    # pos+normals+uv+weights
-# Normal-mapped format flag, observed verbatim in 3ds Max MUA modder skins
-# (0104bladecybernetic.igb etc). Declares the tangent-frame layout: slot 0 pos
-# (12B), slot 1 normal-frame (36B = normal+tangent+binormal), slot 11 uv (8B),
-# slot 17 tangent (12B), slot 18 binormal (12B). See memory/mua_normal_maps.md.
-FMT_NORMAL_MAPPED = 0xC0E443
+# Normal-mapped format flag = 12649539, verified byte-for-byte against native
+# 3ds Max MUA modder skins (0104bladecybernetic.igb, all 5 vertex arrays).
+# NOTE: 12649539 == 0xC10443, NOT 0xC0E443 — earlier notes/code used the wrong
+# hex (0xC0E443 == 12641347, a different value), so the engine read the
+# normal-mapped vertex layout from the wrong slots and rendered the model BLACK.
+# Declares the layout: slot 0 pos (12B), slot 1 normal x3 (36B), slot 11 uv (8B),
+# slot 17 tangent (12B), slot 18 binormal (12B).
+FMT_NORMAL_MAPPED = 0xC10443     # == 12649539
 # extra ext-indexed-entry slots used only by the normal-mapped format
 VTX_SLOT_TANGENT = 17
 VTX_SLOT_BINORMAL = 18
@@ -362,10 +365,19 @@ class SkinBuilderV4:
         default_chain = next(iter(tex_chain_map.values()), None)
 
         def _dxt_binds(sub, base_name):
-            """[diffuse, normal, specular] bind idxs for a normal-mapped sub."""
+            """[diffuse, normal, specular, gloss] bind idxs for a sub.
+
+            Units mirror native MUA: 0=diffuse, 1=normal, 2=specular, and
+            5=gloss/mask. Native v4 modder skins stop at unit 2; the unit-5
+            gloss bind is the v8 convention applied to v4 (MUA reads units by
+            ID regardless of file version). gloss_levels is only present when
+            the material has a gloss image and its 'Use Gloss/Mask Map' toggle
+            is on, so non-gloss materials emit no extra bind.
+            """
             specs = [(sub.get('texture_levels'), base_name, 0),
                      (sub.get('normal_levels'), base_name + '_n', 1),
-                     (sub.get('specular_levels'), base_name + '_s', 2)]
+                     (sub.get('specular_levels'), base_name + '_s', 2),
+                     (sub.get('gloss_levels'), base_name + '_g', 5)]
             binds = []
             for levels, nm, unit in specs:
                 if not levels:
@@ -374,7 +386,7 @@ class SkinBuilderV4:
                 if ck not in self._dxt_cache:
                     self._dxt_cache[ck] = self._build_dxt_chain(levels, nm, unit)
                 if self._dxt_cache[ck] is not None:
-                    binds.append(self._dxt_cache[ck])
+                    binds.append((self._dxt_cache[ck], unit))
             return binds
 
         # ---- shared attrs ----
@@ -388,6 +400,9 @@ class SkinBuilderV4:
             (3, 1, 'Short', 2), (4, 1, 'Bool', 1), (5, 0, 'Int', 4)])
         texstate_off_idx = self._add_obj(MO_TEX_STATE, [
             (3, 1, 'Short', 2), (4, 0, 'Bool', 1), (5, 0, 'Int', 4)])
+        # Per-unit texturing-ON states (stage = texture unit). Seed unit 0 with
+        # the state above; _texstate_for_unit() adds 1/2/5 on demand.
+        self._texstate_cache = {0: texstate_on_idx}
         vbs_idx = self._add_obj(MO_VBS_ATTR, [
             (3, 1, 'Short', 2), (4, 1, 'Bool', 1)])
 
@@ -677,8 +692,11 @@ class SkinBuilderV4:
 
     def _build_material(self, mat):
         return self._add_obj(MO_MATERIAL, [
-            (3, 1, 'Short', 2),
-            (4, float(mat.get('shininess', 12.8)), 'Float', 4),
+            # base Short lives at slot 3 on v4 (vs 2 on v6/v8); native v4 = 1.
+            (3, int(mat.get('priority', 1)), 'Short', 2),
+            # Native MUA skins use shininess 1.28 (decoded from 0104); 12.8 was
+            # 10x too sharp for the ASP gloss/rim highlight exponent.
+            (4, float(mat.get('shininess', 1.28)), 'Float', 4),
             (5, tuple(mat.get('diffuse', (1.0, 1.0, 1.0, 1.0))), 'Vec4f', 16),
             (6, tuple(mat.get('ambient', (0.588, 0.588, 0.588, 1.0))), 'Vec4f', 16),
             (7, tuple(mat.get('specular', (0.0, 0.0, 0.0, 0.0))), 'Vec4f', 16),
@@ -703,15 +721,18 @@ class SkinBuilderV4:
         if normal_mapped:
             tangents, binormals = _compute_tangent_frame(
                 mesh.positions, mesh.normals, mesh.uvs, mesh.indices)
-            # slot 1 normal-frame: normal + tangent + binormal (36 bytes/vertex),
-            # matching the 3ds Max modder layout the engine loads.
+            # slot 1 is a 36-byte "normal" stream = the vertex NORMAL stored
+            # THREE times (12B each), NOT a tangent frame. Decoded from native
+            # 0104bladecybernetic: its three slot-1 vectors are all unit-length
+            # and ~parallel (dot 0.92-0.996) — i.e. all the normal — while the
+            # real tangent/binormal live in slots 17/18 (both perpendicular to
+            # the normal). We previously packed (N,T,B) here, so the engine read
+            # our tangent/binormal as lighting normals -> garbage -> BLACK model.
             norm_data = bytearray(n * 36)
             for i in range(n):
                 nx, ny, nz = mesh.normals[i] if i < len(mesh.normals) else (0.0, 0.0, 1.0)
-                tx, ty, tz = tangents[i]
-                bx, by, bz = binormals[i]
                 struct.pack_into('<9f', norm_data, i * 36,
-                                 nx, ny, nz, tx, ty, tz, bx, by, bz)
+                                 nx, ny, nz, nx, ny, nz, nx, ny, nz)
         else:
             norm_data = bytearray(n * 12)
             for i, (nx, ny, nz) in enumerate(mesh.normals):
@@ -772,20 +793,38 @@ class SkinBuilderV4:
             (9, b_mb, 'MemoryRef', 4),
             (11, -1, 'MemoryRef', 4)])
 
+    def _texstate_for_unit(self, unit):
+        """igTextureStateAttr (texturing ON) for a texture stage. slot 5 =
+        the texture unit, matching native modder skins; cached per unit."""
+        cache = getattr(self, '_texstate_cache', None)
+        if cache is None:
+            cache = self._texstate_cache = {}
+        if unit not in cache:
+            cache[unit] = self._add_obj(MO_TEX_STATE, [
+                (3, 1, 'Short', 2), (4, 1, 'Bool', 1), (5, int(unit), 'Int', 4)])
+        return cache[unit]
+
     def _build_unit(self, mesh, material, tex_bind_idx, is_outline,
                     palette_idx, cull_idx, light_idx, texstate_on_idx,
                     texstate_off_idx, vbs_idx, unit_name):
         """group -> BMS -> AttrSet -> Geometry chain for one submesh.
 
-        tex_bind_idx may be a single bind idx (CLUT path) or a list of bind
-        idxs (normal-map path: [diffuse(unit0), normal(unit1), specular(unit2)]).
+        tex_bind_idx may be a single bind idx (CLUT path, unit 0) or a list of
+        (bind_idx, unit) tuples (normal-map path: diffuse(0)/normal(1)/
+        specular(2)/gloss(5)).
         """
-        if isinstance(tex_bind_idx, (list, tuple)):
-            tex_binds = [b for b in tex_bind_idx if b is not None]
-        elif tex_bind_idx is not None:
-            tex_binds = [tex_bind_idx]
-        else:
+        # Normalize to a list of (bind_idx, unit) tuples.
+        if tex_bind_idx is None:
             tex_binds = []
+        elif (isinstance(tex_bind_idx, (list, tuple)) and tex_bind_idx
+              and isinstance(tex_bind_idx[0], (list, tuple))):
+            tex_binds = [(b, u) for (b, u) in tex_bind_idx if b is not None]
+        elif isinstance(tex_bind_idx, (list, tuple)):
+            # Legacy: bare list of bind idxs -> assume sequential unit numbers.
+            tex_binds = [(b, i) for i, b in enumerate(tex_bind_idx)
+                         if b is not None]
+        else:
+            tex_binds = [(tex_bind_idx, 0)]   # single CLUT diffuse bind
         # Normal mapping active when this textured unit carries a 2nd (normal)
         # bind — emit the tangent-frame vertex format to match.
         normal_mapped = (getattr(self, '_use_normal_maps', False)
@@ -854,12 +893,15 @@ class SkinBuilderV4:
                 (4, int(material['lighting_enabled']), 'Bool', 1)]))
 
         if textured:
-            # Each texture bind is followed by a texturing-ON state — mirrors
-            # the (TextureBind, TextureState) pairing in 3ds Max skins. For
-            # normal maps this emits diffuse/normal/specular in unit order.
+            # Each texture bind is followed by its texturing-ON state. CRITICAL:
+            # the state's stage (slot 5) MUST match the bind's texture unit —
+            # native 3ds Max modder skins emit one state per unit (stage 0/1/2/
+            # 5...). A single shared stage-0 state left the normal/specular/gloss
+            # units (1/2/5) with no enabling state, rendering the model BLACK
+            # in-game. Order stays diffuse, normal, specular, gloss.
             tex_pairs = []
-            for b in tex_binds:
-                tex_pairs += [b, texstate_on_idx]
+            for bind_idx, unit in tex_binds:
+                tex_pairs += [bind_idx, self._texstate_for_unit(unit)]
             attrs = [cull_idx, color_idx, mat_idx] + extra + tex_pairs
         else:
             attrs = ([cull_idx, light_idx, color_idx, mat_idx] + extra
