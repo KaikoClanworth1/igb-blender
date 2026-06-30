@@ -594,53 +594,70 @@ class SkinBuilderV4:
             (5, 0, 'Int', 4)])
         return bind_idx
 
-    def _build_dxt_chain(self, levels, name, unit_id):
-        """DXT5 igImage + igTextureAttr + igTextureBindAttr (single base level).
+    def _build_dxt_chain(self, levels, name, unit_id, pfmt=16):
+        """DXT igImage + full mip chain + igTextureAttr + igTextureBindAttr.
 
-        Used by the normal-map path (units 0=diffuse, 1=normal, 2=specular),
-        which the 3ds Max MUA modder skins ship as DXT. Returns the bind idx,
-        or None if no level data. Mips omitted (base level renders fine;
-        avoids the v4 mip-list layout risk).
+        Used by the normal-map path (units 0=diffuse, 1=normal, 2=specular,
+        5=gloss). `levels` = [(bytes, w, h), ...] base-first (from
+        compress_with_mipmaps). pfmt 16 = DXT5 (16-byte blocks), 14 = RGBA_DXT1
+        (8-byte blocks). Returns the bind idx, or None if no level data.
+
+        Emitting the FULL mip pyramid (not just the base) + a trilinear
+        min/mag filter is REQUIRED: an un-mipmapped normal map aliases into
+        harsh, crawling "hard shadows" under minification. Native MUA actors
+        ship an 11-level chain with min=mag=LINEAR_MIPMAP_LINEAR (5) on every
+        texture, including the DXT5 normal map.
         """
         if not levels:
             return None
-        comp_data, tw, th = levels[0]
-        stride = max(1, (tw + 3) // 4) * 16     # DXT5 block-row stride
-        pix_mb = self._add_mem(TAG_IMAGE_DATA, bytes(comp_data),
-                               align=ALIGN_IMAGE)
-        mip_idx = self._empty_list(MO_MIPMAP_LIST)
-        image_idx = self._add_obj(MO_IMAGE, [
-            (3, tw, 'UnsignedInt', 4),
-            (4, th, 'UnsignedInt', 4),
-            (5, 4, 'UnsignedInt', 4),
-            (6, 1, 'UnsignedInt', 4),
-            (7, 100, 'UnsignedInt', 4),
-            (8, 2, 'UnsignedInt', 4),
-            (9, 2, 'UnsignedInt', 4),
-            (10, 2, 'UnsignedInt', 4),
-            (11, 2, 'UnsignedInt', 4),
-            (12, 16, 'Enum', 4),             # pfmt DXT5
-            (13, len(comp_data), 'Int', 4),
-            (14, pix_mb, 'MemoryRef', 4),
-            (15, -1, 'MemoryRef', 4),
-            (16, 1, 'Bool', 1),
-            (17, 0, 'UnsignedInt', 4),
-            (18, -1, 'ObjectRef', 4),        # no clut for DXT
-            (19, 0, 'UnsignedInt', 4),
-            (20, stride, 'Int', 4),          # bytesPerRow (block stride)
-            (21, 1, 'Bool', 1),              # compressed
-            (22, 0, 'UnsignedInt', 4),
-            (23, name or '', 'String', 4)])
+        block = 8 if pfmt == 14 else 16     # DXT1 = 8-byte blocks, DXT5 = 16
+
+        def _mk_image(comp_data, tw, th):
+            stride = max(1, (tw + 3) // 4) * block
+            pix_mb = self._add_mem(TAG_IMAGE_DATA, bytes(comp_data),
+                                   align=ALIGN_IMAGE)
+            return self._add_obj(MO_IMAGE, [
+                (3, tw, 'UnsignedInt', 4),
+                (4, th, 'UnsignedInt', 4),
+                (5, 4, 'UnsignedInt', 4),
+                (6, 1, 'UnsignedInt', 4),
+                (7, 100, 'UnsignedInt', 4),
+                (8, 2, 'UnsignedInt', 4),
+                (9, 2, 'UnsignedInt', 4),
+                (10, 2, 'UnsignedInt', 4),
+                (11, 2, 'UnsignedInt', 4),
+                (12, int(pfmt), 'Enum', 4),
+                (13, len(comp_data), 'Int', 4),
+                (14, pix_mb, 'MemoryRef', 4),
+                (15, -1, 'MemoryRef', 4),
+                (16, 1, 'Bool', 1),
+                (17, 0, 'UnsignedInt', 4),
+                (18, -1, 'ObjectRef', 4),        # no clut for DXT
+                (19, 0, 'UnsignedInt', 4),
+                (20, stride, 'Int', 4),          # bytesPerRow (block stride)
+                (21, 1, 'Bool', 1),              # compressed
+                (22, 0, 'UnsignedInt', 4),
+                (23, name or '', 'String', 4)])
+
+        base_idx = _mk_image(*levels[0])
+        # The mip list holds the SMALLER levels (base is referenced separately
+        # by the texture attr at slot 12); imageCount = total level count.
+        mip_indices = [_mk_image(*lv) for lv in levels[1:]]
+        has_mips = bool(mip_indices)
+        mip_idx = (self._ref_list(MO_MIPMAP_LIST, mip_indices)
+                   if has_mips else self._empty_list(MO_MIPMAP_LIST))
+        # Trilinear (5) only when a chain is present; else plain LINEAR (1).
+        filt = 5 if has_mips else 1
         tex_attr_idx = self._add_obj(MO_TEXTURE_ATTR, [
             (3, 1, 'Short', 2),
             (4, 0, 'UnsignedInt', 4),
-            (5, 1, 'Enum', 4), (6, 1, 'Enum', 4),
+            (5, filt, 'Enum', 4), (6, filt, 'Enum', 4),
             (7, 1, 'Enum', 4), (8, 1, 'Enum', 4),
             (10, 0, 'Enum', 4), (11, 0, 'Enum', 4),
-            (12, image_idx, 'ObjectRef', 4),
+            (12, base_idx, 'ObjectRef', 4),
             (13, 0, 'Bool', 1),
             (14, -1, 'ObjectRef', 4),
-            (15, 1, 'Int', 4),
+            (15, len(levels), 'Int', 4),
             (16, mip_idx, 'ObjectRef', 4)])
         return self._add_obj(MO_TEX_BIND, [
             (3, 1, 'Short', 2),
@@ -721,22 +738,18 @@ class SkinBuilderV4:
         if normal_mapped:
             tangents, binormals = _compute_tangent_frame(
                 mesh.positions, mesh.normals, mesh.uvs, mesh.indices)
-            # slot 1 is a 36-byte "normal" stream = the vertex NORMAL stored
-            # THREE times (12B each), NOT a tangent frame. Decoded from native
-            # 0104bladecybernetic: its three slot-1 vectors are all unit-length
-            # and ~parallel (dot 0.92-0.996) — i.e. all the normal — while the
-            # real tangent/binormal live in slots 17/18 (both perpendicular to
-            # the normal). We previously packed (N,T,B) here, so the engine read
-            # our tangent/binormal as lighting normals -> garbage -> BLACK model.
-            norm_data = bytearray(n * 36)
-            for i in range(n):
-                nx, ny, nz = mesh.normals[i] if i < len(mesh.normals) else (0.0, 0.0, 1.0)
-                struct.pack_into('<9f', norm_data, i * 36,
-                                 nx, ny, nz, nx, ny, nz, nx, ny, nz)
-        else:
-            norm_data = bytearray(n * 12)
-            for i, (nx, ny, nz) in enumerate(mesh.normals):
-                struct.pack_into('<fff', norm_data, i * 12, nx, ny, nz)
+
+        # slot 1 = DENSE 12B/vert vertex normal in ALL formats. The engine reads
+        # slot1 at a 12-byte stride EVEN in the normal-mapped format, so the old
+        # [N,N,N]-packed-at-36B layout made vertices 3k+1 / 3k+2 read the PREVIOUS
+        # vertex's normal -> 2/3 of verts got the wrong lighting normal. Native
+        # 0104's slot1 read at 12B stride is just the dense normal (its
+        # over-allocated back two-thirds are unread garbage we don't reproduce).
+        # The real per-vertex tangent frame lives in slots 17/18 (see below).
+        norm_data = bytearray(n * 12)
+        for i in range(n):
+            nx, ny, nz = mesh.normals[i] if i < len(mesh.normals) else (0.0, 0.0, 1.0)
+            struct.pack_into('<fff', norm_data, i * 12, nx, ny, nz)
         norm_mb = self._add_mem(TAG_VTX_STREAM, bytes(norm_data))
 
         uv_mb = -1
@@ -762,8 +775,15 @@ class SkinBuilderV4:
         if uv_mb >= 0:
             slots[11] = uv_mb
         if normal_mapped:
-            slots[VTX_SLOT_TANGENT] = tan_mb
-            slots[VTX_SLOT_BINORMAL] = bin_mb
+            # Native binds slot 17 -> D3DDECLUSAGE_BINORMAL (the +V / dPdv vector)
+            # and slot 18 -> D3DDECLUSAGE_TANGENT (the +U / dPdu vector) — the
+            # REVERSE of our local tan/bin names. Routing tangent->17, binormal->18
+            # transposes the engine's object->tangent basis, so the normal map is
+            # lit from the wrong axes on every surface. So: binormal -> slot 17,
+            # tangent -> slot 18. (Slot constants name the fixed slot index; only
+            # the content routed into each is swapped.)
+            slots[VTX_SLOT_TANGENT] = bin_mb     # slot 17 carries BINORMAL (+V)
+            slots[VTX_SLOT_BINORMAL] = tan_mb    # slot 18 carries TANGENT  (+U)
         fmt_mb = self._add_mem(TAG_VA_FORMAT,
                                struct.pack('<' + 'I' * VTX_FMT_SLOTS, *slots))
 
@@ -880,12 +900,19 @@ class SkinBuilderV4:
             (4, color_val, 'Vec4f', 16)])
         mat_idx = self._build_material(material)
 
-        # per-material overrides from the IGB Materials panel
+        # Cull-face. Native MUA modder skins emit NO cull-face attr on the main
+        # textured mesh — the engine's default back-face cull is correct. We used
+        # to force the shared attr with mode 0 (= cull FRONT), which removes the
+        # VISIBLE faces and lights the inside-out back faces -> "dark shadows in
+        # the wrong locations" on normal-mapped skins. Only emit a cull attr on
+        # the main mesh when the material explicitly asks (default mode BACK=1).
+        # Outlines keep the shared front-cull (param cull_idx) for the hull.
+        mat_cull_idx = None
         if 'cull_face_enabled' in material:
-            cull_idx = self._add_obj(MO_CULL_FACE, [
+            mat_cull_idx = self._add_obj(MO_CULL_FACE, [
                 (3, 1, 'Short', 2),
                 (4, int(material['cull_face_enabled']), 'Bool', 1),
-                (5, material.get('cull_face_mode', 0), 'Enum', 4)])
+                (5, material.get('cull_face_mode', 1), 'Enum', 4)])
         extra = self._build_render_state_attrs(material)
         if textured and 'lighting_enabled' in material:
             extra.append(self._add_obj(MO_LIGHTING_STATE, [
@@ -902,7 +929,8 @@ class SkinBuilderV4:
             tex_pairs = []
             for bind_idx, unit in tex_binds:
                 tex_pairs += [bind_idx, self._texstate_for_unit(unit)]
-            attrs = [cull_idx, color_idx, mat_idx] + extra + tex_pairs
+            head = [mat_cull_idx] if mat_cull_idx is not None else []
+            attrs = head + [color_idx, mat_idx] + extra + tex_pairs
         else:
             attrs = ([cull_idx, light_idx, color_idx, mat_idx] + extra
                      + [texstate_off_idx])
