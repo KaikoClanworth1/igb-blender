@@ -96,7 +96,8 @@ class MENU_PT_file(Panel):
     bl_idname = "MENU_PT_file"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
@@ -145,7 +146,7 @@ class MENU_PT_items(Panel):
     bl_idname = "MENU_PT_items"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_file"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -202,7 +203,7 @@ class MENU_PT_item_props(Panel):
     bl_idname = "MENU_PT_item_props"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_file"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -265,7 +266,7 @@ class MENU_PT_onfocus(Panel):
     bl_idname = "MENU_PT_onfocus"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_item_props"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -305,7 +306,7 @@ class MENU_PT_extra_attrs(Panel):
     bl_idname = "MENU_PT_extra_attrs"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_item_props"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -341,7 +342,7 @@ class MENU_PT_precache(Panel):
     bl_idname = "MENU_PT_precache"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_file"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -375,7 +376,7 @@ class MENU_PT_view(Panel):
     bl_idname = "MENU_PT_view"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_file"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -403,7 +404,7 @@ class MENU_PT_validation(Panel):
     bl_idname = "MENU_PT_validation"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Menu Editor"
+    bl_category = "IGB Tools"
     bl_parent_id = "MENU_PT_file"
     bl_options = {'DEFAULT_CLOSED'}
 

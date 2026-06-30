@@ -460,7 +460,8 @@ class MM_PT_Root(Panel):
     bl_idname = "MM_PT_Root"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
         icon_id = _get_icon_id()
@@ -483,7 +484,7 @@ class MM_PT_Scene_Identity(Panel):
     bl_idname = "MM_PT_Scene_Identity"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -510,7 +511,7 @@ class MM_PT_Scene_Environment(Panel):
     bl_idname = "MM_PT_Scene_Environment"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -546,7 +547,7 @@ class MM_PT_Scene_Lights(Panel):
     bl_idname = "MM_PT_Scene_Lights"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -645,7 +646,7 @@ class MM_PT_Scene_Paths(Panel):
     bl_idname = "MM_PT_Scene_Paths"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -676,7 +677,7 @@ class MM_PT_Place_QuickAdd(Panel):
     bl_idname = "MM_PT_Place_QuickAdd"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -743,7 +744,7 @@ class MM_PT_Place_Entities(Panel):
     bl_idname = "MM_PT_Place_Entities"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -817,7 +818,7 @@ class MM_PT_Place_CharacterDB(Panel):
     bl_idname = "MM_PT_Place_CharacterDB"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -883,7 +884,7 @@ class MM_PT_Place_ModelBrowser(Panel):
     bl_idname = "MM_PT_Place_ModelBrowser"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -950,7 +951,7 @@ class MM_PT_Logic_Objectives(Panel):
     bl_idname = "MM_PT_Logic_Objectives"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -1055,7 +1056,7 @@ class MM_PT_Logic_Conversations(Panel):
     bl_idname = "MM_PT_Logic_Conversations"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1143,7 +1144,7 @@ class MM_PT_Logic_Conversations_Preview(Panel):
     bl_idname = "MM_PT_Logic_Conversations_Preview"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Logic_Conversations"
 
     @classmethod
@@ -1289,7 +1290,7 @@ class MM_PT_Logic_Conversations_NodeProps(Panel):
     bl_idname = "MM_PT_Logic_Conversations_NodeProps"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Logic_Conversations"
 
     @classmethod
@@ -1358,7 +1359,7 @@ class MM_PT_Logic_Precache(Panel):
     bl_idname = "MM_PT_Logic_Precache"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1425,7 +1426,7 @@ class MM_PT_Build_Navigation(Panel):
     bl_idname = "MM_PT_Build_Navigation"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -1472,7 +1473,7 @@ class MM_PT_Build_IGB(Panel):
     bl_idname = "MM_PT_Build_IGB"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -1498,7 +1499,7 @@ class MM_PT_Build_Compile(Panel):
     bl_idname = "MM_PT_Build_Compile"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
 
     @classmethod
@@ -1534,7 +1535,7 @@ class MM_PT_Build_Validation(Panel):
     bl_idname = "MM_PT_Build_Validation"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1576,7 +1577,7 @@ class MM_PT_Build_Collision(Panel):
     bl_idname = "MM_PT_Build_Collision"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1609,7 +1610,7 @@ class MM_PT_Build_Automap(Panel):
     bl_idname = "MM_PT_Build_Automap"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -1644,7 +1645,7 @@ class MM_PT_SelectionInspector(Panel):
     bl_idname = "MM_PT_SelectionInspector"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Map Maker"
+    bl_category = "IGB Tools"
     bl_parent_id = "MM_PT_Root"
     bl_options = {'DEFAULT_CLOSED'}
 

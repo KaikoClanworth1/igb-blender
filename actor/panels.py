@@ -159,7 +159,7 @@ class ACTOR_PT_Main(Panel):
     bl_idname = "ACTOR_PT_Main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
 
     def draw_header(self, context):
         icon_id = _get_icon_id()
@@ -197,7 +197,7 @@ class ACTOR_PT_QuickTools(Panel):
     bl_idname = "ACTOR_PT_QuickTools"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
 
     def draw(self, context):
@@ -259,7 +259,7 @@ class ACTOR_PT_Import(Panel):
     bl_idname = "ACTOR_PT_Import"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -345,7 +345,7 @@ class ACTOR_PT_Skins(Panel):
     bl_idname = "ACTOR_PT_Skins"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -393,7 +393,7 @@ class ACTOR_PT_Segments(Panel):
     bl_idname = "ACTOR_PT_Segments"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Skins"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -505,7 +505,7 @@ class ACTOR_PT_Animations(Panel):
     bl_idname = "ACTOR_PT_Animations"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -557,7 +557,7 @@ class ACTOR_PT_Materials(Panel):
     bl_idname = "ACTOR_PT_Materials"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -739,7 +739,7 @@ class ACTOR_PT_AnimConverter(Panel):
     bl_idname = "ACTOR_PT_AnimConverter"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Extras"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -807,7 +807,7 @@ class ACTOR_PT_Information(Panel):
     bl_idname = "ACTOR_PT_Information"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -924,7 +924,7 @@ class ACTOR_PT_Extras(Panel):
     bl_idname = "ACTOR_PT_Extras"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Main"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -958,7 +958,7 @@ class ACTOR_PT_Mannequin(Panel):
     bl_idname = "ACTOR_PT_Mannequin"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Extras"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -983,7 +983,7 @@ class ACTOR_PT_VMC(Panel):
     bl_idname = "ACTOR_PT_VMC"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Actors"
+    bl_category = "IGB Tools"
     bl_parent_id = "ACTOR_PT_Extras"
     bl_options = {'DEFAULT_CLOSED'}
 

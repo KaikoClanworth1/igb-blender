@@ -24,7 +24,8 @@ class IGB_PT_TeamMenu(Panel):
     bl_idname = "IGB_PT_TeamMenu"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "IGB Team Menu"
+    bl_category = "IGB Tools"
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
